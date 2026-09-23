@@ -46,6 +46,10 @@ enum Command {
         /// falls to by the last iteration; the cap starts at the initial noise.
         #[arg(long)]
         final_std: Option<f32>,
+        /// Exploration noise at the start: the initial noise of a new policy and the cap
+        /// the schedule starts from (set it to where a warm-started policy left off).
+        #[arg(long, default_value_t = PpoConfig::default().init_log_std.exp())]
+        init_std: f32,
         /// Reward lost when an episode ends in a crash (100 m of progress earns 10).
         #[arg(long, default_value_t = DefaultReward::default().termination_penalty)]
         crash_penalty: f64,
@@ -123,6 +127,7 @@ fn main() {
             gamma,
             entropy,
             final_std,
+            init_std,
             crash_penalty,
             grip_loss_penalty,
             steer_change_penalty,
@@ -187,6 +192,7 @@ fn main() {
                 gamma,
                 entropy_coef: entropy,
                 final_log_std: final_std.map(f32::ln),
+                init_log_std: init_std.ln(),
                 hidden,
                 seed,
                 out_dir: out,
