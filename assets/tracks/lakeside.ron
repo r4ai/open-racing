@@ -34,7 +34,9 @@
         (pos: (-20.0, -400.0, 2.0), width_left: 6.0, width_right: 6.0, bank: -0.05),
         (pos: (-100.0, -300.0, 1.5), width_left: 6.0, width_right: 6.0, bank: -0.05),
         (pos: (-130.0, -180.0, 1.0), width_left: 6.0, width_right: 6.0, bank: -0.03),
-        (pos: (-100.0, -70.0, 0.5), width_left: 6.0, width_right: 6.0, bank: 0),
-        (pos: (-40.0, -10.0, 0.0), width_left: 6.0, width_right: 6.0, bank: 0),
+        // Final corner: constant ~130 m radius (centre (0, -130)) onto the start straight.
+        (pos: (-120.1, -80.3, 0.75), width_left: 6.0, width_right: 6.0, bank: -0.03),
+        (pos: (-91.9, -38.1, 0.5), width_left: 6.0, width_right: 6.0, bank: -0.02),
+        (pos: (-49.7, -9.9, 0.25), width_left: 6.0, width_right: 6.0, bank: 0),
     ],
 )
