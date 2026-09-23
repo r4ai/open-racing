@@ -60,6 +60,15 @@ enum Command {
         /// Include the track widths at the lookahead points in the observation.
         #[arg(long)]
         edge_obs: bool,
+        /// Start episodes no faster than the corners just ahead allow.
+        #[arg(long)]
+        safe_start: bool,
+        /// Agent decisions per second.
+        #[arg(long, default_value_t = EnvConfig::default().control_hz)]
+        control_hz: f64,
+        /// Hidden layer sizes of the actor and critic, e.g. 256,256.
+        #[arg(long, value_delimiter = ',', default_values_t = PpoConfig::default().hidden)]
+        hidden: Vec<usize>,
         /// Let the policy shift gears itself instead of the automatic gear selector.
         #[arg(long)]
         manual_shift: bool,
@@ -103,6 +112,9 @@ fn main() {
             privileged,
             tyre_obs,
             edge_obs,
+            safe_start,
+            control_hz,
+            hidden,
             manual_shift,
             out,
             init,
@@ -111,6 +123,8 @@ fn main() {
                 privileged_obs: privileged,
                 tyre_obs,
                 edge_obs,
+                safe_start,
+                control_hz,
                 auto_shift: !manual_shift,
                 seed,
                 ..EnvConfig::default()
@@ -149,6 +163,7 @@ fn main() {
                 learning_rate: lr,
                 gamma,
                 entropy_coef: entropy,
+                hidden,
                 seed,
                 out_dir: out,
                 init,

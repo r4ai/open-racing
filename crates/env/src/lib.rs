@@ -12,7 +12,7 @@ mod rng;
 use std::sync::Arc;
 
 use glam::DVec3;
-use open_racing_sim::{AutoShift, Car, CarModel, Controls, DT, Shift, Surface, Track};
+use open_racing_sim::{AutoShift, Car, CarModel, Controls, DT, GRAVITY, Shift, Surface, Track};
 use rayon::prelude::*;
 
 pub use lap::LapTimer;
@@ -36,6 +36,9 @@ pub struct EnvConfig {
     pub random_start: bool,
     /// Initial speed range in m/s.
     pub start_speed: (f64, f64),
+    /// Cap the initial speed at what the corners within [`SAFE_START_DISTANCE`] allow at
+    /// [`SAFE_START_LATERAL_G`], so no episode starts in a crash it cannot avoid.
+    pub safe_start: bool,
     /// Initial lateral offset range in m.
     pub start_offset: (f64, f64),
     /// Let an automatic gear selector drive the sequential gearbox.
@@ -60,6 +63,7 @@ impl Default for EnvConfig {
             random_start: true,
             start_speed: (0.0, 40.0),
             start_offset: (-2.0, 2.0),
+            safe_start: false,
             auto_shift: true,
             max_steer_rate: 15.0,
             lookahead_points: 20,
@@ -168,7 +172,12 @@ impl Env {
             0.0
         };
         let d = self.rng.uniform(cfg.start_offset.0, cfg.start_offset.1);
-        let speed = self.rng.uniform(cfg.start_speed.0, cfg.start_speed.1);
+        let top = if cfg.safe_start {
+            cfg.start_speed.1.min(cornering_speed(track, s))
+        } else {
+            cfg.start_speed.1
+        };
+        let speed = self.rng.uniform(cfg.start_speed.0.min(top), top);
         let gear = gear_for_speed(&shared.car, speed);
         self.car.reset(track, s, d, speed, gear);
         self.lap = LapTimer::new(track, self.car.state.position);
@@ -349,6 +358,20 @@ impl Actuator {
             brake: f64::from(action[2]).clamp(0.0, 1.0),
         }
     }
+}
+
+/// Look-ahead distance and lateral acceleration of [`EnvConfig::safe_start`].
+pub const SAFE_START_DISTANCE: f64 = 60.0;
+pub const SAFE_START_LATERAL_G: f64 = 1.3;
+
+/// Speed at which the corners within [`SAFE_START_DISTANCE`] after `s` can be taken at
+/// [`SAFE_START_LATERAL_G`], m/s.
+fn cornering_speed(track: &Track, s: f64) -> f64 {
+    (0..=(SAFE_START_DISTANCE / 5.0) as usize)
+        .map(|k| track.sample_at(s + 5.0 * k as f64).curvature.abs())
+        .fold(f64::INFINITY, |v, c| {
+            v.min((SAFE_START_LATERAL_G * GRAVITY / c.max(1e-6)).sqrt())
+        })
 }
 
 /// Highest gear that keeps the engine above ~55% of the limiter at `speed`.
