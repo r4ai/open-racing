@@ -187,10 +187,16 @@ mod tests {
         let mut v = VisualBuilder::new();
         let t = v.add_texture(Texture { data: b"DDS data".to_vec() });
         let mask = v.add_texture(Texture { data: b"DDS mask".to_vec() });
+        let normal = v.add_texture(Texture { data: b"DDS normal".to_vec() });
         let detail = Detail { mask, layers: [None, Some(DetailLayer { texture: t, scale: 20.0 }), None, None], multiplier: 2.0, world_uv: true };
         let m = v.add_material(Material {
             base_color: [0.5, 0.5, 0.5, 1.0],
             base_color_texture: Some(t),
+            roughness: 0.6,
+            reflectance: 0.4,
+            reflection: 0.2,
+            surface_texture: Some(mask),
+            normal_texture: Some(normal),
             alpha_mode: AlphaMode::Mask(0.4),
             double_sided: true,
             detail: Some(detail),
@@ -232,6 +238,9 @@ mod tests {
         let dir = temp_dir("broken");
         let mut pkg = package();
         pkg.ground.patches[0].indices.push(99);
+        assert!(pkg.save(&dir).is_err());
+        let mut pkg = package();
+        pkg.visual.as_mut().unwrap().materials[0].normal_texture = Some(99);
         assert!(pkg.save(&dir).is_err());
 
         let pkg = package();

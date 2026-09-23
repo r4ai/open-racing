@@ -11,7 +11,7 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
 /// Stored for an absent texture index.
@@ -32,16 +32,53 @@ pub enum AlphaMode {
     Blend,
 }
 
+/// A metallic-roughness material without metal (dielectric), as in glTF with Filament's
+/// `reflectance` for the specular strength.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     /// Linear RGBA factor, multiplied with the texture.
     pub base_color: [f32; 4],
     /// Index into `Visual::textures`; sRGB.
     pub base_color_texture: Option<u32>,
+    /// Perceptual roughness, multiplied with the surface texture's G.
+    pub roughness: f32,
+    /// Specular reflectance at normal incidence F0 = 0.16 · reflectance², with reflectance
+    /// multiplied with the surface texture's A.
+    pub reflectance: f32,
+    /// Scale of the specular reflection of the surroundings (sky, environment maps), with
+    /// the surface texture's R: 1 is physically based, 0 leaves only the highlights of
+    /// lights. Games may reflect their surroundings on some surfaces only.
+    pub reflection: f32,
+    /// Index into `Visual::textures`; linear data whose R, G and A scale `reflection`,
+    /// `roughness` and `reflectance`.
+    pub surface_texture: Option<u32>,
+    /// Index into `Visual::textures`; a linear tangent-space normal map. The shading normal
+    /// is normalize(x·T + y·B + z·N) with (x, y, z) = 2·rgb − 1, N the vertex normal, B the
+    /// direction in which V increases (down the image) along the surface and T = B × N.
+    /// The frame follows from the UVs, so meshes need no tangents.
+    pub normal_texture: Option<u32>,
     pub alpha_mode: AlphaMode,
     /// Render back faces too.
     pub double_sided: bool,
     pub detail: Option<Detail>,
+}
+
+impl Default for Material {
+    /// Plain grey, fairly rough.
+    fn default() -> Self {
+        Self {
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            base_color_texture: None,
+            roughness: 0.85,
+            reflectance: 0.5,
+            reflection: 1.0,
+            surface_texture: None,
+            normal_texture: None,
+            alpha_mode: AlphaMode::Opaque,
+            double_sided: false,
+            detail: None,
+        }
+    }
 }
 
 /// Tiled detail textures blended by a mask and multiplied into the base colour (splat
@@ -156,7 +193,8 @@ impl Visual {
         let missing = |t: u32| t as usize >= self.textures.len();
         for m in &self.materials {
             let detail = m.detail.iter().flat_map(|d| std::iter::once(d.mask).chain(d.layers.iter().flatten().map(|l| l.texture)));
-            if m.base_color_texture.into_iter().chain(detail).any(missing) {
+            let own = [m.base_color_texture, m.surface_texture, m.normal_texture];
+            if own.into_iter().flatten().chain(detail).any(missing) {
                 return bad("material refers to a missing texture");
             }
         }
@@ -185,6 +223,11 @@ impl Visual {
         for m in &self.materials {
             m.base_color.iter().for_each(|&c| w.f32(c));
             w.u32(m.base_color_texture.unwrap_or(NONE));
+            w.f32(m.roughness);
+            w.f32(m.reflectance);
+            w.f32(m.reflection);
+            w.u32(m.surface_texture.unwrap_or(NONE));
+            w.u32(m.normal_texture.unwrap_or(NONE));
             match m.alpha_mode {
                 AlphaMode::Opaque => (w.u8(0), w.f32(0.0)),
                 AlphaMode::Mask(c) => (w.u8(1), w.f32(c)),
@@ -226,6 +269,9 @@ impl Visual {
         for _ in 0..r.u32()? {
             let base_color = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
             let base_color_texture = Some(r.u32()?).filter(|&t| t != NONE);
+            let (roughness, reflectance, reflection) = (r.f32()?, r.f32()?, r.f32()?);
+            let surface_texture = Some(r.u32()?).filter(|&t| t != NONE);
+            let normal_texture = Some(r.u32()?).filter(|&t| t != NONE);
             let alpha_mode = match (r.u8()?, r.f32()?) {
                 (0, _) => AlphaMode::Opaque,
                 (1, c) => AlphaMode::Mask(c),
@@ -245,7 +291,7 @@ impl Visual {
                     Some(Detail { mask, layers, multiplier: r.f32()?, world_uv: r.u8()? != 0 })
                 }
             };
-            v.materials.push(Material { base_color, base_color_texture, alpha_mode, double_sided, detail });
+            v.materials.push(Material { base_color, base_color_texture, roughness, reflectance, reflection, surface_texture, normal_texture, alpha_mode, double_sided, detail });
         }
         for _ in 0..r.u32()? {
             v.meshes.push(Mesh {
@@ -280,7 +326,7 @@ mod tests {
         assert_eq!(b.add_texture(tex.clone()), 0);
         assert_eq!(b.add_texture(Texture { data: vec![4] }), 1);
         assert_eq!(b.add_texture(tex), 0);
-        let mat = Material { base_color: [1.0; 4], base_color_texture: Some(0), alpha_mode: AlphaMode::Opaque, double_sided: false, detail: None };
+        let mat = Material { base_color: [1.0; 4], base_color_texture: Some(0), ..Default::default() };
         let (m0, m1) = (b.add_material(mat.clone()), b.add_material(mat));
         add(&mut b, m0, 0.0);
         add(&mut b, m0, 10.0);

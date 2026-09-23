@@ -106,12 +106,13 @@ How the folder is converted:
 
 - **Tyres:** a mesh is physical when its name starts with digits followed by a surface key from `surfaces.ini` (e.g. `1ROAD_05`). Grip is `FRICTION` relative to the grippiest valid-track surface, and surfaces that are not valid track count as off track in rewards. Meshes named `<digits>WALL…` are solid walls.
 - **Centreline:** the AI line only defines the centreline and the track widths, which give progress, observations and lap timing. It is not used as a driving line. The start/finish line is at the timing markers.
+- **Materials:** diffuse textures, normal maps (`txNormal`) and the mask and detail layers of multi-layer materials carry over. The game's highlights (`ksSpecular`, `ksSpecularEXP`) and reflections (`fresnelMaxLevel`) become a PBR roughness and reflectance, per texel where `txMaps` varies them. Surfaces reflect the sky only where the game reflects its surroundings.
 
 Limitations:
 
 - Point-to-point tracks (open AI line) are not supported.
 - Encrypted or otherwise protected KN5 files are rejected.
-- Materials keep the diffuse texture, plus the mask and detail layers of multi-layer materials; normal, specular and reflection maps are dropped.
+- Detail textures other than the multi-layer ones (`txDetail`, `txNormalDetail`, `txDetailNM`), object-space normal maps and emissive surfaces are not converted.
 - Model rotations in `models_*.ini` are ignored.
 - Custom Shaders Patch extensions (`extension/`: generated trees, lights, mesh adjustments) are not applied, so a track looks as it does without the patch.
 

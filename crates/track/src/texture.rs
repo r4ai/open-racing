@@ -13,17 +13,18 @@ const FOURCC_FLAG: u32 = 0x4;
 const RGB_FLAG: u32 = 0x40;
 const MIPMAP_COUNT_FLAG: u32 = 0x2_0000;
 
-/// A decoded image, 8-bit RGBA.
-struct Rgba {
-    width: usize,
-    height: usize,
-    pixels: Vec<u8>,
+/// A decoded image, 8-bit RGBA, rows top to bottom.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
 }
 
 /// Source image: block-compressed levels as stored, or decoded pixels.
 enum Source {
     Blocks { format: Format, width: usize, height: usize, levels: Vec<Vec<u8>> },
-    Pixels(Rgba),
+    Pixels(Image),
 }
 
 /// Which mip levels a prepared texture has.
@@ -43,34 +44,56 @@ pub enum Mips {
 /// Returns the texture as a DDS with the mip levels `mips` asks for. Formats the
 /// preparation does not handle are returned unchanged.
 pub fn prepare(encoded: &[u8], mips: Mips) -> Result<Vec<u8>, String> {
+    Ok(parse(encoded)?.and_then(|source| finish(source, mips)).unwrap_or_else(|| encoded.to_vec()))
+}
+
+/// Decodes the top level of a texture that `prepare` handles.
+pub fn decode(encoded: &[u8]) -> Result<Image, String> {
+    match parse(encoded)? {
+        Some(Source::Blocks { format, width, height, levels }) => Ok(decode_blocks(format, &levels[0], width, height)),
+        Some(Source::Pixels(image)) => Ok(image),
+        None => Err("unsupported DDS format".into()),
+    }
+}
+
+/// Block-compresses an image into a DDS with a complete mip chain: BC1 when it is
+/// opaque, BC3 otherwise.
+pub fn encode(image: Image) -> Vec<u8> {
+    finish(Source::Pixels(image), Mips::Complete).expect("pixel sources are always encoded")
+}
+
+/// `Ok(None)` for DDS variants that are passed through unchanged.
+fn parse(encoded: &[u8]) -> Result<Option<Source>, String> {
+    if encoded.starts_with(DDS_MAGIC) {
+        parse_dds(encoded)
+    } else if encoded.starts_with(b"\x89PNG") {
+        Ok(Some(Source::Pixels(decode_png(encoded)?)))
+    } else {
+        Err("unknown image format".into())
+    }
+}
+
+/// Encodes `source` with the mip levels `mips` asks for; `None` when a block-compressed
+/// source already has them.
+fn finish(source: Source, mips: Mips) -> Option<Vec<u8>> {
     let alpha_test = match mips {
         Mips::AlphaTest(c) if c > 0.0 && c < 1.0 => Some(c),
         _ => None,
-    };
-    let source = if encoded.starts_with(DDS_MAGIC) {
-        match parse_dds(encoded)? {
-            Some(s) => s,
-            None => return Ok(encoded.to_vec()),
-        }
-    } else if encoded.starts_with(b"\x89PNG") {
-        Source::Pixels(decode_png(encoded)?)
-    } else {
-        return Err("unknown image format".into());
     };
 
     // The smallest stored level, which the missing ones are generated from.
     let (format, width, height, mut levels, mut image) = match source {
         Source::Blocks { format, width, height, levels } => {
             if mips == Mips::Source || levels.len() == mip_count(width, height) {
-                return Ok(encoded.to_vec());
+                return None;
             }
             let (w, h) = level_size(width, height, levels.len() - 1);
-            let last = decode(format, &levels[levels.len() - 1], w, h);
+            let last = decode_blocks(format, &levels[levels.len() - 1], w, h);
             (format, width, height, levels, last)
         }
         Source::Pixels(top) => {
             let format = if top.pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255) { Format::Bc1 } else { Format::Bc3 };
-            (format, top.width, top.height, vec![encode(format, &top)], top)
+            (format, top.width, top.height, vec![compress(format, &top)], top)
         }
     };
 
@@ -78,16 +101,16 @@ pub fn prepare(encoded: &[u8], mips: Mips) -> Result<Vec<u8>, String> {
     let cutoff = alpha_test.map(|c| (c * 255.0).round() as u8);
     let coverage = cutoff.map(|c| match levels.len() {
         1 => alpha_coverage(&image, c, 1.0),
-        _ => alpha_coverage(&decode(format, &levels[0], width, height), c, 1.0),
+        _ => alpha_coverage(&decode_blocks(format, &levels[0], width, height), c, 1.0),
     });
     while levels.len() < wanted {
         image = downsample(&image);
         if let (Some(c), Some(target)) = (cutoff, coverage) {
             keep_coverage(&mut image, c, target);
         }
-        levels.push(encode(format, &image));
+        levels.push(compress(format, &image));
     }
-    Ok(write_dds(format, width, height, &levels))
+    Some(write_dds(format, width, height, &levels))
 }
 
 fn mip_count(width: usize, height: usize) -> usize {
@@ -138,25 +161,24 @@ fn parse_dds(b: &[u8]) -> Result<Option<Source>, String> {
         return Ok(Some(Source::Blocks { format, width, height, levels }));
     }
 
-    if pf_flags & RGB_FLAG != 0 && bits == 32 {
+    if pf_flags & RGB_FLAG != 0 && (bits == 24 || bits == 32) {
         let masks = [u32_at(b, 92), u32_at(b, 96), u32_at(b, 100), u32_at(b, 104)];
-        let texels = data.get(..width * height * 4).ok_or("truncated DDS data")?;
+        let size = bits as usize / 8;
+        let texels = data.get(..width * height * size).ok_or("truncated DDS data")?;
         let channel = |px: u32, mask: u32| if mask == 0 { 255 } else { ((px & mask) >> mask.trailing_zeros()) as u8 };
         let pixels = texels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|&p| {
-                let px = u32::from_le_bytes(p);
+            .chunks_exact(size)
+            .flat_map(|p| {
+                let px = p.iter().rev().fold(0, |px, &byte| px << 8 | u32::from(byte));
                 masks.map(|m| channel(px, m))
             })
             .collect();
-        return Ok(Some(Source::Pixels(Rgba { width, height, pixels })));
+        return Ok(Some(Source::Pixels(Image { width, height, pixels })));
     }
     Ok(None)
 }
 
-fn decode_png(b: &[u8]) -> Result<Rgba, String> {
+fn decode_png(b: &[u8]) -> Result<Image, String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(b));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
@@ -168,23 +190,23 @@ fn decode_png(b: &[u8]) -> Result<Rgba, String> {
         png::ColorType::GrayscaleAlpha => buf[..width * height * 2].as_chunks::<2>().0.iter().flat_map(|&[l, a]| [l, l, l, a]).collect(),
         other => return Err(format!("unexpected PNG colour type {other:?}")),
     };
-    Ok(Rgba { width, height, pixels })
+    Ok(Image { width, height, pixels })
 }
 
-fn decode(format: Format, blocks: &[u8], width: usize, height: usize) -> Rgba {
+fn decode_blocks(format: Format, blocks: &[u8], width: usize, height: usize) -> Image {
     let mut pixels = vec![0; width * height * 4];
     format.decompress(blocks, width, height, &mut pixels);
-    Rgba { width, height, pixels }
+    Image { width, height, pixels }
 }
 
-fn encode(format: Format, image: &Rgba) -> Vec<u8> {
+fn compress(format: Format, image: &Image) -> Vec<u8> {
     let mut out = vec![0; format.compressed_size(image.width, image.height)];
     format.compress(&image.pixels, image.width, image.height, Params::default(), &mut out);
     out
 }
 
 /// Halves each dimension with a 2×2 box filter.
-fn downsample(src: &Rgba) -> Rgba {
+fn downsample(src: &Image) -> Image {
     let (width, height) = ((src.width / 2).max(1), (src.height / 2).max(1));
     let mut pixels = vec![0; width * height * 4];
     for y in 0..height {
@@ -200,11 +222,11 @@ fn downsample(src: &Rgba) -> Rgba {
             }
         }
     }
-    Rgba { width, height, pixels }
+    Image { width, height, pixels }
 }
 
 /// Fraction of pixels whose alpha, scaled by `scale`, passes the alpha test.
-fn alpha_coverage(image: &Rgba, cutoff: u8, scale: f32) -> f32 {
+fn alpha_coverage(image: &Image, cutoff: u8, scale: f32) -> f32 {
     let passing = image.pixels.as_chunks::<4>().0.iter().filter(|p| f32::from(p[3]) * scale >= f32::from(cutoff)).count();
     passing as f32 / (image.width * image.height) as f32
 }
@@ -213,7 +235,7 @@ fn alpha_coverage(image: &Rgba, cutoff: u8, scale: f32) -> f32 {
 /// fraction of its area, as the full-resolution image does. Alpha is never scaled down:
 /// in atlases a region that averages above the cut-off (a fence) would otherwise make
 /// thin features elsewhere (wires) fail it.
-fn keep_coverage(image: &mut Rgba, cutoff: u8, target: f32) {
+fn keep_coverage(image: &mut Image, cutoff: u8, target: f32) {
     let (mut lo, mut hi) = (1.0f32, 8.0f32);
     if alpha_coverage(image, cutoff, lo) >= target {
         return;
@@ -258,7 +280,7 @@ fn write_dds(format: Format, width: usize, height: usize, levels: &[Vec<u8>]) ->
 mod tests {
     use super::*;
 
-    fn checker(size: usize, alpha: bool) -> Rgba {
+    fn checker(size: usize, alpha: bool) -> Image {
         let pixels = (0..size * size)
             .flat_map(|i| {
                 let on = (i % size + i / size).is_multiple_of(2);
@@ -266,7 +288,7 @@ mod tests {
                 [v, 128, 255 - v, if alpha && !on { 0 } else { 255 }]
             })
             .collect();
-        Rgba { width: size, height: size, pixels }
+        Image { width: size, height: size, pixels }
     }
 
     fn levels_of(dds: &[u8]) -> (Format, usize, usize, usize) {
@@ -279,7 +301,7 @@ mod tests {
     #[test]
     fn completes_a_truncated_mip_chain() {
         let top = checker(64, false);
-        let dds = write_dds(Format::Bc1, 64, 64, &[encode(Format::Bc1, &top), encode(Format::Bc1, &downsample(&top))]);
+        let dds = write_dds(Format::Bc1, 64, 64, &[compress(Format::Bc1, &top), compress(Format::Bc1, &downsample(&top))]);
         assert_eq!(prepare(&dds, Mips::Source).unwrap(), dds);
         let out = prepare(&dds, Mips::Complete).unwrap();
         assert_eq!(levels_of(&out), (Format::Bc1, 64, 64, 7));
@@ -291,8 +313,8 @@ mod tests {
 
     #[test]
     fn non_square_chain_ends_at_one_pixel() {
-        let img = Rgba { width: 16, height: 4, pixels: vec![200; 16 * 4 * 4] };
-        let dds = write_dds(Format::Bc1, 16, 4, &[encode(Format::Bc1, &img)]);
+        let img = Image { width: 16, height: 4, pixels: vec![200; 16 * 4 * 4] };
+        let dds = write_dds(Format::Bc1, 16, 4, &[compress(Format::Bc1, &img)]);
         assert_eq!(levels_of(&prepare(&dds, Mips::Complete).unwrap()).3, 5);
     }
 
@@ -322,5 +344,16 @@ mod tests {
         dds.extend_from_slice(&img.pixels);
         assert_eq!(levels_of(&prepare(&dds, Mips::Complete).unwrap()), (Format::Bc3, 8, 8, 4));
         assert_eq!(levels_of(&prepare(&dds, Mips::Source).unwrap()), (Format::Bc3, 8, 8, 1));
+
+        // Uncompressed 24-bit BGR.
+        dds.truncate(HEADER_SIZE);
+        dds[88..92].copy_from_slice(&24u32.to_le_bytes());
+        for (i, m) in [0xff_0000u32, 0xff00, 0xff, 0].iter().enumerate() {
+            dds[92 + 4 * i..96 + 4 * i].copy_from_slice(&m.to_le_bytes());
+        }
+        dds.extend(img.pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]));
+        let rgb: Vec<u8> = img.pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+        assert_eq!(decode(&dds).unwrap().pixels, rgb);
+        assert_eq!(levels_of(&prepare(&dds, Mips::Complete).unwrap()), (Format::Bc1, 8, 8, 4));
     }
 }

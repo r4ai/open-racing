@@ -5,7 +5,7 @@ use glam::DVec3;
 
 use crate::driving::Simulation;
 use crate::input::AppRequests;
-use crate::scene::{quat_to_bevy, to_bevy};
+use crate::scene::{quat_to_bevy, sky_light, to_bevy};
 
 #[derive(Component)]
 struct MainCamera;
@@ -52,10 +52,11 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         MainCamera,
         Camera3d::default(),
+        sky_light(&mut images),
         Projection::Perspective(PerspectiveProjection { fov: 60f32.to_radians(), near: 0.05, far: 8000.0, ..default() }),
         Transform::from_xyz(-10.0, 5.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));

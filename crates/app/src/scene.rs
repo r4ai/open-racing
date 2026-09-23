@@ -1,8 +1,10 @@
 //! Track geometry and car visuals generated from the simulation data.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::light::GeneratedEnvironmentMapLight;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension};
 use glam::{DQuat, DVec3};
 use open_racing_sim::Track;
 
@@ -37,8 +39,45 @@ struct CarBody;
 #[derive(Component)]
 struct CarWheel(usize);
 
+/// Edge of the sky cube map's faces, in texels. The sky is a smooth gradient.
+const SKY_MAP_SIZE: u32 = 64;
+/// Luminance scale of the sky light, cd/m². Shade gets about the light that ambient light
+/// of 400 cd/m² gives, which Bevy scales by its diffuse BRDF term (≈ 0.45).
+const SKY_BRIGHTNESS: f32 = 400.0;
+
+/// Environment light for cameras: a sky from blue at the zenith to haze at the horizon,
+/// over sunlit ground. It fills shadows as ambient light would, and gives glossy surfaces
+/// something to reflect. Its colours are muted so that shade stays close to neutral.
+pub fn sky_light(images: &mut Assets<Image>) -> GeneratedEnvironmentMapLight {
+    let zenith = LinearRgba::from(Color::srgb(0.5, 0.64, 0.85));
+    let horizon = LinearRgba::from(Color::srgb(0.88, 0.9, 0.92));
+    let ground = LinearRgba::from(Color::srgb(0.55, 0.5, 0.43));
+    let n = SKY_MAP_SIZE as usize;
+    let mut data = Vec::with_capacity(6 * n * n * 4);
+    // Faces +X, −X, +Y, −Y, +Z, −Z; rows run down on the side faces.
+    for face in 0..6 {
+        for row in 0..n {
+            for col in 0..n {
+                let [u, v] = [col, row].map(|i| (i as f32 + 0.5) / n as f32 * 2.0 - 1.0);
+                let up = match face {
+                    2 => 1.0,
+                    3 => -1.0,
+                    _ => -v,
+                } / (1.0 + u * u + v * v).sqrt();
+                let c = if up >= 0.0 { horizon.mix(&zenith, up.sqrt()) } else { horizon.mix(&ground, (-4.0 * up).min(1.0)) };
+                data.extend(Color::from(c).to_srgba().to_u8_array());
+            }
+        }
+    }
+    let size = Extent3d { width: SKY_MAP_SIZE, height: SKY_MAP_SIZE, depth_or_array_layers: 6 };
+    let mut image = Image::new(size, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
+    image.texture_view_descriptor = Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
+    GeneratedEnvironmentMapLight { environment_map: images.add(image), intensity: SKY_BRIGHTNESS, ..default() }
+}
+
 fn spawn_lights(mut commands: Commands) {
-    commands.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() });
+    // The sky light (see `sky_light`) replaces ambient light.
+    commands.insert_resource(GlobalAmbientLight::NONE);
     commands.spawn((
         DirectionalLight { illuminance: 12_000.0, shadow_maps_enabled: true, ..default() },
         Transform::from_xyz(100.0, 300.0, 150.0).looking_at(Vec3::ZERO, Vec3::Y),
