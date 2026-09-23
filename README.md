@@ -146,6 +146,25 @@ A rebuild after editing the app takes about 5 s this way (Windows, 16 threads), 
 `train --envs 512 --iterations 400` (13M agent steps, ~12 min on an M5, wgpu): mean distance per episode rose from ~50 m to ~3–8 km, best lap 75.9 s on Lakeside (~4 km). This is still short; more training should make it more stable.
 Training throughput is ~18k agent steps/s, and the bottleneck is the NN update, not the simulation.
 
+Tsukuba (2.08 km) on an RX 9070 (wgpu, ~90k agent steps/s at 50 Hz, ~57k at 25 Hz with 2048 envs), in three stages of about 16, 20 and 65 minutes:
+
+```bash
+T="train --track tsukuba --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --gamma 0.995 --crash-penalty 50 --steer-change-penalty 0.5"
+cargo run --release -p open-racing-train-burn -- $T --iterations 400 --entropy 0.002 --final-std 0.15 --out runs/tsukuba-1
+cargo run --release -p open-racing-train-burn -- $T --iterations 640 --lr 1.5e-4 --entropy 0 --init-std 0.15 --final-std 0.05 \
+  --off-track-penalty 0.06 --init runs/tsukuba-1 --out runs/tsukuba-2
+cargo run --release -p open-racing-train-burn -- $T --iterations 1800 --abs --lr 1.5e-4 --entropy 0 --init-std 0.11 --final-std 0.05 \
+  --off-track-penalty 0.06 --init runs/tsukuba-2 --out runs/tsukuba-3
+```
+
+(The second stage was stopped at iteration 640 of a 2300-iteration schedule.) The result laps in 55.2 s on the second lap from a standing start (best 54.8 s), with one crash in 141 laps from random starts. What mattered, from single-seed runs of 400 iterations:
+
+- `--edge-obs`: without the track widths ahead the policy cannot tell where the road ends, and did not get past Tsukuba's first hairpin; with them it lapped in 57.9 s after 10 minutes.
+- `--control-hz 25`: half as many decisions per second halves the steering jitter the exploration noise adds, and the same discount looks twice as far ahead. The policy then used the apexes (0.7–1.9 m from the inside edge instead of 3.3–5 m).
+- `--final-std`: with actions clipped to their range, a policy trained with large noise behaves differently when run deterministically; several runs lapped cleanly with noise and crashed without it. Shrinking the noise over training removed that, and with `--steer-change-penalty` the steering stopped sawing between full left and full right every step.
+- `--abs`: without it the GT3 locks its wheels at 80 % pedal, so policies braked at about half pedal and still overheated the front tyre that went light over bumps.
+- Hitting a wall ends the episode; before, policies braked for the hairpin by bouncing off the outside wall.
+
 ## License
 
 open-racing's source code and the files in `assets/` are licensed under either of
