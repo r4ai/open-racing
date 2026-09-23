@@ -67,6 +67,23 @@ fn privileged_obs_extends_space() {
 }
 
 #[test]
+fn tyre_and_edge_obs_extend_space() {
+    let config = EnvConfig::default();
+    let base = spec(config.clone()).observation_space().dim();
+    let dim = |config: EnvConfig| spec(config).observation_space().dim();
+    let tyres = dim(EnvConfig {
+        tyre_obs: true,
+        ..config.clone()
+    });
+    let edges = dim(EnvConfig {
+        edge_obs: true,
+        ..config.clone()
+    });
+    assert_eq!(tyres, base + 8);
+    assert_eq!(edges, base + 2 * config.lookahead_points);
+}
+
+#[test]
 fn manual_shift_adds_a_gear_action() {
     let spec = spec(EnvConfig {
         auto_shift: false,

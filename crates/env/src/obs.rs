@@ -26,12 +26,16 @@ const SPEED_SCALE: f64 = 50.0;
 const ACCEL_SCALE: f64 = 3.0 * GRAVITY;
 const DISTANCE_SCALE: f64 = 100.0;
 const LOAD_SCALE: f64 = 5000.0;
+const TEMPERATURE_SCALE: f64 = 100.0;
+const WIDTH_SCALE: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ObsLayout {
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
     pub privileged: bool,
+    pub tyres: bool,
+    pub edges: bool,
 }
 
 impl ObsLayout {
@@ -60,6 +64,18 @@ impl ObsLayout {
         for k in 1..=self.lookahead_points {
             names.push(format!("ahead_{k}_x"));
             names.push(format!("ahead_{k}_y"));
+        }
+        if self.edges {
+            for k in 1..=self.lookahead_points {
+                names.push(format!("ahead_{k}_width_left"));
+                names.push(format!("ahead_{k}_width_right"));
+            }
+        }
+        if self.tyres {
+            for w in ["fl", "fr", "rl", "rr"] {
+                names.push(format!("tread_temp_{w}"));
+                names.push(format!("pressure_{w}"));
+            }
         }
         if self.privileged {
             for w in ["fl", "fr", "rl", "rr"] {
@@ -127,6 +143,19 @@ pub fn encode(
         let rel = inv * (smp.pos - st.position);
         o.push(rel.x / DISTANCE_SCALE);
         o.push(rel.y / DISTANCE_SCALE);
+    }
+    if layout.edges {
+        for k in 1..=layout.lookahead_points {
+            let smp = track.sample_at(q.s + k as f64 * layout.lookahead_spacing);
+            o.push(smp.width_left / WIDTH_SCALE);
+            o.push(smp.width_right / WIDTH_SCALE);
+        }
+    }
+    if layout.tyres {
+        for (w, t) in st.wheels.iter().zip(&tel.wheels) {
+            o.push(w.tire.surface_temperature(&t.tread_load) / TEMPERATURE_SCALE);
+            o.push(t.pressure);
+        }
     }
     if layout.privileged {
         for w in &tel.wheels {

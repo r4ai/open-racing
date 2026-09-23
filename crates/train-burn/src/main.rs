@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use open_racing_api::{DefaultReward, EnvConfig, EnvSpec, Policy, RacingVecEnv, VecEnv};
+use open_racing_api::{DefaultReward, EnvConfig, EnvSpec, Policy, RacingVecEnv, Surface, VecEnv};
 use open_racing_train_burn::ppo::{self, PpoConfig, TrainContext};
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
@@ -45,11 +45,21 @@ enum Command {
         /// Reward lost when an episode ends in a crash (100 m of progress earns 10).
         #[arg(long, default_value_t = DefaultReward::default().termination_penalty)]
         crash_penalty: f64,
+        /// Reward lost per step per unit of tyre grip lost to heat, pressure and wear
+        /// (summed over the four tyres).
+        #[arg(long, default_value_t = DefaultReward::default().grip_loss_weight)]
+        grip_loss_penalty: f64,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// Include ground-truth tyre state in the observation.
         #[arg(long)]
         privileged: bool,
+        /// Include tread temperatures and pressures in the observation.
+        #[arg(long)]
+        tyre_obs: bool,
+        /// Include the track widths at the lookahead points in the observation.
+        #[arg(long)]
+        edge_obs: bool,
         /// Let the policy shift gears itself instead of the automatic gear selector.
         #[arg(long)]
         manual_shift: bool,
@@ -88,14 +98,19 @@ fn main() {
             gamma,
             entropy,
             crash_penalty,
+            grip_loss_penalty,
             seed,
             privileged,
+            tyre_obs,
+            edge_obs,
             manual_shift,
             out,
             init,
         } => {
             let config = EnvConfig {
                 privileged_obs: privileged,
+                tyre_obs,
+                edge_obs,
                 auto_shift: !manual_shift,
                 seed,
                 ..EnvConfig::default()
@@ -104,6 +119,7 @@ fn main() {
                 EnvSpec::from_names(&track, &car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
             spec.reward = Arc::new(DefaultReward {
                 termination_penalty: crash_penalty,
+                grip_loss_weight: grip_loss_penalty,
                 ..DefaultReward::default()
             });
             let mut env = spec.make_vec_env(envs);
@@ -118,6 +134,8 @@ fn main() {
                 lookahead_points: config.lookahead_points,
                 lookahead_spacing: config.lookahead_spacing,
                 privileged_obs: config.privileged_obs,
+                tyre_obs: config.tyre_obs,
+                edge_obs: config.edge_obs,
                 max_steer_rate: config.max_steer_rate,
                 auto_shift: config.auto_shift,
                 track,
@@ -185,7 +203,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         );
         writeln!(
             file,
-            "time,s,offset,speed,steer,throttle,brake,gear,curvature"
+            "time,s,offset,speed,steer,throttle,brake,gear,curvature,sideslip_deg,tread_fl,tread_fr,tread_rl,tread_rr,grip_fl,grip_fr,grip_rl,grip_rr,wheels_off"
         )
         .unwrap();
         file
@@ -194,6 +212,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
     let mut actions = vec![0.0; config.action_dim()];
     let mut stats = Default::default();
     let mut ending = "";
+    let mut laps: Vec<f64> = Vec::new();
     for _ in 0..(seconds * config.control_hz) as usize {
         policy.act(&obs, &mut actions);
         let r = env.step(&actions);
@@ -205,15 +224,41 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
             break;
         }
         stats = env.episode_stats().next().copied().unwrap_or_default();
+        if stats.laps as usize > laps.len() {
+            laps.extend(stats.last_lap_time);
+        }
         if let Some(file) = &mut trace {
             let car = env.cars().next().expect("one car");
             let q = spec.track.query(
                 car.state.position,
                 spec.track.nearest_index(car.state.position),
             );
+            // Body sideslip, and per tyre the load-weighted tread temperature and the
+            // grip left by temperature, pressure and wear.
+            let v = car.state.orientation.inverse() * car.state.velocity;
+            let sideslip = if v.x > 1.0 {
+                v.y.atan2(v.x).to_degrees()
+            } else {
+                0.0
+            };
+            let tyres = (0..4).map(|i| {
+                let (w, t) = (&car.state.wheels[i].tire, &car.telemetry.wheels[i]);
+                let model = car.model.tire(i);
+                (
+                    w.surface_temperature(&t.tread_load),
+                    model.condition_grip(w, &t.tread_load, t.pressure),
+                )
+            });
+            let (temps, grips): (Vec<_>, Vec<_>) = tyres.unzip();
+            let wheels_off = car
+                .telemetry
+                .wheels
+                .iter()
+                .filter(|w| w.surface == Surface::Grass)
+                .count();
             writeln!(
                 file,
-                "{:.2},{:.1},{:.2},{:.2},{:.3},{:.3},{:.3},{},{:.5}",
+                "{:.2},{:.1},{:.2},{:.2},{:.3},{:.3},{:.3},{},{:.5},{:.1},{:.0},{:.0},{:.0},{:.0},{:.3},{:.3},{:.3},{:.3},{}",
                 stats.time,
                 q.s,
                 q.d,
@@ -222,19 +267,31 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
                 actions[1],
                 actions[2],
                 car.state.drivetrain.gear,
-                spec.track.samples[q.index].curvature
+                spec.track.samples[q.index].curvature,
+                sideslip,
+                temps[0],
+                temps[1],
+                temps[2],
+                temps[3],
+                grips[0],
+                grips[1],
+                grips[2],
+                grips[3],
+                wheels_off,
             )
             .unwrap();
         }
     }
+    let laps: Vec<String> = laps.iter().map(|l| format!("{l:.3}")).collect();
     println!(
-        "start line: {:.1} s{ending}, {:.0} m, {} laps, best lap {}",
+        "start line: {:.1} s{ending}, {:.0} m, {} laps, best lap {}, laps [{}]",
         stats.time,
         stats.progress,
         stats.laps,
         stats
             .best_lap_time
-            .map_or("-".into(), |l| format!("{l:.3}s"))
+            .map_or("-".into(), |l| format!("{l:.3}s")),
+        laps.join(", ")
     );
 }
 

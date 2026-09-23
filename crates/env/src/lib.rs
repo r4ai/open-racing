@@ -46,6 +46,10 @@ pub struct EnvConfig {
     pub lookahead_spacing: f64,
     /// Append ground-truth tyre state to the observation.
     pub privileged_obs: bool,
+    /// Append tread temperatures and pressures, as sims report them in telemetry.
+    pub tyre_obs: bool,
+    /// Append the track widths left and right of each lookahead point.
+    pub edge_obs: bool,
     pub seed: u64,
 }
 
@@ -61,6 +65,8 @@ impl Default for EnvConfig {
             lookahead_points: 20,
             lookahead_spacing: 10.0,
             privileged_obs: false,
+            tyre_obs: false,
+            edge_obs: false,
             seed: 0,
         }
     }
@@ -85,6 +91,8 @@ impl EnvConfig {
             lookahead_points: self.lookahead_points,
             lookahead_spacing: self.lookahead_spacing,
             privileged: self.privileged_obs,
+            tyres: self.tyre_obs,
+            edges: self.edge_obs,
         }
     }
 }
@@ -224,6 +232,16 @@ impl Env {
             .iter()
             .filter(|w| w.surface == Surface::Grass)
             .count();
+        let grip_loss = (0..4)
+            .map(|i| {
+                let t = &self.car.telemetry.wheels[i];
+                1.0 - self.car.model.tire(i).condition_grip(
+                    &st.wheels[i].tire,
+                    &t.tread_load,
+                    t.pressure,
+                )
+            })
+            .sum();
         let prev = self.info;
         let info = StepInfo {
             progress,
@@ -231,6 +249,7 @@ impl Env {
             speed,
             offset: q.d / half_width,
             wheels_off,
+            grip_loss,
             barrier_impact,
             heading_cos,
             steer_change: self.input.steer - prev_steer,
