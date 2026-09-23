@@ -9,6 +9,8 @@ license.workspace = true
 default = ["burn-policy"]
 # Watch agents trained with the Burn trainer.
 burn-policy = ["dep:open-racing-train-burn"]
+# Faster incremental builds while developing: links Bevy as a DLL. Not for release builds.
+dev = ["bevy/dynamic_linking"]
 
 [dependencies]
 open-racing-sim.workspace = true
