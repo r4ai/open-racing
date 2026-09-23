@@ -189,9 +189,11 @@ impl Env {
         let prev_steer = self.input.steer;
         let substeps = cfg.substeps();
         self.actuator.decide(cfg, action);
+        let mut barrier_impact: f64 = 0.0;
         for _ in 0..substeps {
             let controls = self.actuator.controls(cfg, &self.car, action);
             self.car.step(track, &controls);
+            barrier_impact = barrier_impact.max(self.car.telemetry.barrier_impact);
         }
         self.input = self.actuator.applied(&self.car, action);
 
@@ -229,6 +231,7 @@ impl Env {
             speed,
             offset: q.d / half_width,
             wheels_off,
+            barrier_impact,
             heading_cos,
             steer_change: self.input.steer - prev_steer,
             time: st.time,

@@ -126,6 +126,9 @@ pub struct Telemetry {
     /// Aerodynamic downforce, front / rear, N.
     pub downforce: [f64; 2],
     pub drag: f64,
+    /// Speed into a wall or the run-off barrier taken away by a hit this step, m/s
+    /// (0 without an impact).
+    pub barrier_impact: f64,
 }
 
 /// A car driving on a track.
@@ -513,10 +516,12 @@ impl Car {
                 push = dir;
             }
         }
+        tel.barrier_impact = 0.0;
         if depth > 0.0 {
             st.position += push * depth;
             let outward = -st.velocity.dot(push);
             if outward > 0.0 {
+                tel.barrier_impact = outward;
                 // Inelastic hit; friction against the barrier scrubs speed along it.
                 let impulse = (1.0 + BARRIER_RESTITUTION) * outward;
                 let along = st.velocity + push * outward;

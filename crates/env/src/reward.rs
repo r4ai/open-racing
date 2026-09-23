@@ -12,6 +12,8 @@ pub struct StepInfo {
     pub offset: f64,
     /// Number of wheels on grass.
     pub wheels_off: usize,
+    /// Hardest hit into a wall or barrier during the step, m/s into the wall.
+    pub barrier_impact: f64,
     /// cos of the angle between the car's heading and the track direction.
     pub heading_cos: f64,
     /// Change of normalised steering input during the step.
@@ -90,6 +92,8 @@ pub struct DefaultTermination {
     pub max_stuck_time: f64,
     /// Allowed time facing the wrong way while moving, s.
     pub max_wrong_way_time: f64,
+    /// Hardest allowed hit into a wall, m/s into the wall; anything harder is a crash.
+    pub max_barrier_impact: f64,
 }
 
 impl Default for DefaultTermination {
@@ -99,6 +103,7 @@ impl Default for DefaultTermination {
             max_off_track_time: 0.5,
             max_stuck_time: 4.0,
             max_wrong_way_time: 1.0,
+            max_barrier_impact: 3.0,
         }
     }
 }
@@ -109,6 +114,7 @@ impl TerminationFn for DefaultTermination {
             || i.off_track_time > self.max_off_track_time
             || i.stuck_time > self.max_stuck_time
             || i.wrong_way_time > self.max_wrong_way_time
+            || i.barrier_impact > self.max_barrier_impact
         {
             Some(Done::Terminated)
         } else if i.time >= self.max_time {
