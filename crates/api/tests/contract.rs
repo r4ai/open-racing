@@ -97,6 +97,25 @@ fn manual_shift_adds_a_gear_action() {
 }
 
 #[test]
+fn manual_downshift_never_over_revs() {
+    let spec = spec(EnvConfig {
+        auto_shift: false,
+        random_start: false,
+        start_speed: (60.0, 60.0),
+        ..Default::default()
+    });
+    let mut env = spec.make_vec_env(1);
+    env.reset(0);
+    for _ in 0..50 {
+        env.step(&[0.0, 0.0, 0.0, -1.0]);
+    }
+    let car = env.cars().next().unwrap();
+    let dt = &car.state.drivetrain;
+    assert!(dt.gear > 1, "no gear below the limiter at speed");
+    assert!(dt.rpm() <= car.model.params.engine.limiter_rpm * 1.02);
+}
+
+#[test]
 fn reckless_driving_terminates_and_autoresets() {
     let spec = spec(EnvConfig::default());
     let mut env = spec.make_vec_env(4);

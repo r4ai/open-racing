@@ -299,10 +299,22 @@ impl Actuator {
         }
     }
 
-    /// The pending gear request; never shifts below first gear (into neutral or reverse).
+    /// The pending gear request; never shifts below first gear (into neutral or reverse),
+    /// and, like a GT3 gearbox controller, refuses a downshift that would over-rev the engine.
     fn take_shift(&mut self, car: &Car) -> Shift {
+        let dt = &car.state.drivetrain;
         match std::mem::take(&mut self.shift) {
-            Shift::Down if car.state.drivetrain.gear <= 1 => Shift::None,
+            Shift::Down if dt.gear <= 1 => Shift::None,
+            Shift::Down => {
+                let p = &car.model.params;
+                let g = &p.gearbox.ratios;
+                let idx = (dt.gear - 1) as usize;
+                if dt.rpm() * g[idx - 1] / g[idx] > p.engine.limiter_rpm {
+                    Shift::None
+                } else {
+                    Shift::Down
+                }
+            }
             shift => shift,
         }
     }
