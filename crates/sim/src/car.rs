@@ -7,7 +7,8 @@
 //! - Each corner: a vertical strut (body −z) with spring, bump/rebound damping,
 //!   anti-roll bar and bump stops; an unsprung mass on the strut; a tyre with
 //!   vertical stiffness/damping against the road surface.
-//! - Tyres: transient slips via relaxation length, Magic Formula combined forces.
+//! - Tyres: transient slips via relaxation length, Magic Formula combined forces,
+//!   grip scaled by tread temperature and wear.
 //! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly.
 
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use glam::{DMat3, DQuat, DVec3};
 use crate::controls::{Controls, Shift};
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::params::CarModel;
+use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
 use crate::{AIR_DENSITY, DT, GRAVITY, RL, RR};
 
@@ -45,6 +47,7 @@ pub struct WheelState {
     pub alpha: f64,
     /// Track query hint.
     pub hint: usize,
+    pub tire: TireCondition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +71,8 @@ pub struct WheelTelemetry {
     pub load: f64,
     pub slip_ratio: f64,
     pub slip_angle: f64,
+    /// Speed at which the contact patch slides over the road, m/s.
+    pub slide_speed: f64,
     /// Tyre forces in the contact frame, N.
     pub fx: f64,
     pub fy: f64,
@@ -90,6 +95,7 @@ impl Default for WheelTelemetry {
             load: 0.0,
             slip_ratio: 0.0,
             slip_angle: 0.0,
+            slide_speed: 0.0,
             fx: 0.0,
             fy: 0.0,
             mz: 0.0,
@@ -154,12 +160,13 @@ impl Car {
         let hint = track.nearest_index(surface);
 
         let mut wheels = [WheelState::default(); 4];
-        for (w, corner) in wheels.iter_mut().zip(&m.corners) {
-            let radius = m.axle(if corner.front { 0 } else { 2 }).tire.radius;
+        for (i, (w, corner)) in wheels.iter_mut().zip(&m.corners).enumerate() {
+            let tire = m.tire(i);
             *w = WheelState {
                 extension: corner.static_extension,
-                spin: speed / radius,
+                spin: speed / tire.p.radius,
                 hint,
+                tire: tire.fresh(),
                 ..Default::default()
             };
         }
@@ -282,7 +289,7 @@ impl Car {
 
             let optimal = -corner.side * tp.optimal_camber;
             let camber_grip = (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
-            let mu = q.grip * camber_grip;
+            let mu = q.grip * camber_grip * tire.condition_grip(&w.tire);
             let alpha_eff = w.alpha - tp.camber_thrust * inclination;
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu);
 
@@ -294,6 +301,9 @@ impl Car {
                 f.fx = (f.fx + damping * slip_vel).clamp(-limit_x, limit_x);
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
             }
+
+            let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
+            tire.update_condition(&mut w.tire, slide_power, tp.rolling_resistance * fz * speed, speed, fz > 0.0, dt);
 
             let rolling = (tp.rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
             road_torque[i] = -f.fx * radius - rolling;
@@ -310,6 +320,7 @@ impl Car {
                 load: fz,
                 slip_ratio: w.kappa,
                 slip_angle: w.alpha.atan(),
+                slide_speed: slip_vel.hypot(vy),
                 fx: f.fx,
                 fy: f.fy,
                 mz: f.mz,

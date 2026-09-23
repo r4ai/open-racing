@@ -22,6 +22,7 @@ pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
 pub use controls::{Controls, Shift};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{CarModel, CarParams, ParamsError};
+pub use tire::TireCondition;
 pub use track::{Surface, Track, TrackDef, TrackError, TrackPoint, TrackQuery};
 
 /// Fixed physics time step in seconds (1 kHz).
@@ -32,6 +33,9 @@ pub const GRAVITY: f64 = 9.80665;
 
 /// Air density at sea level, 15 °C, in kg/m³.
 pub const AIR_DENSITY: f64 = 1.225;
+
+/// Air and road temperature in °C.
+pub const AMBIENT_TEMPERATURE: f64 = 25.0;
 
 /// Wheel index order used everywhere: front-left, front-right, rear-left, rear-right.
 pub const FL: usize = 0;

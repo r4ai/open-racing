@@ -14,7 +14,7 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 
 | crate               | role                                                                                                                                                                                         |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber), engine / clutch / sequential gearbox / LSD, aero, tracks |
+| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber, tread temperature and wear), engine / clutch / sequential gearbox / LSD, aero, tracks |
 | `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
 | `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
 | `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |

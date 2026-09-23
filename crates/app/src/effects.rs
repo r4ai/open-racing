@@ -1,4 +1,5 @@
-//! Tyre marks and tyre smoke, driven by the simulated slip at each contact patch.
+//! Tyre marks and tyre smoke, driven by the simulated slip and tread temperature at
+//! each contact patch.
 //!
 //! Both are single dynamic meshes rebuilt on the CPU: skid marks are a ring buffer
 //! of quads laid on the road, smoke is a pool of camera-facing billboards. Nothing
@@ -11,7 +12,7 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use open_racing_sim::{GRAVITY, Surface, WheelTelemetry};
+use open_racing_sim::{GRAVITY, Surface, TireCondition, WheelTelemetry};
 
 use crate::driving::{self, Simulation};
 use crate::scene::to_bevy;
@@ -30,8 +31,12 @@ const MARK_THRESHOLD: f32 = 0.08;
 const MARK_OPACITY: f32 = 0.55;
 
 const SMOKE_CAPACITY: usize = 1024;
-/// Particles per second from one fully sliding tyre.
+/// Particles per second from one tyre at full smoke.
 const SMOKE_RATE: f32 = 70.0;
+/// Contact patch temperatures over which rubber starts to vaporise and smoke fully, °C.
+const SMOKE_TEMPERATURE: (f64, f64) = (130.0, 230.0);
+/// Flash heating of the contact patch above the tread surface per m/s of sliding, K.
+const FLASH_PER_SLIDE_SPEED: f64 = 4.0;
 /// Particles per second from one tyre on grass at speed.
 const DUST_RATE: f32 = 35.0;
 
@@ -205,6 +210,17 @@ fn wheel_slide(w: &WheelTelemetry, static_load: f64, moving: f64) -> f32 {
     (slide(w) * (w.load / static_load).min(1.5) * moving).min(1.0) as f32
 }
 
+/// How much a tyre smokes, 0..1: rubber vaporises once the sliding contact patch is hot
+/// enough, so a tyre at the grip limit stays clean while lock-ups, wheelspin and long
+/// slides that cook the tread smoke more and more.
+fn tire_smoke(w: &WheelTelemetry, tire: &TireCondition) -> f64 {
+    if w.load <= 0.0 {
+        return 0.0;
+    }
+    let contact = tire.surface_temperature + FLASH_PER_SLIDE_SPEED * w.slide_speed;
+    smoothstep(SMOKE_TEMPERATURE.0, SMOKE_TEMPERATURE.1, contact)
+}
+
 fn update_marks(sim: Res<Simulation>, mut marks: ResMut<SkidMarks>, mut meshes: ResMut<Assets<Mesh>>) {
     let car = &sim.car;
     let static_load = car.model.params.mass * GRAVITY / 4.0;
@@ -254,7 +270,6 @@ fn update_smoke(
 ) {
     let dt = time.delta_secs();
     let car = &sim.car;
-    let static_load = car.model.params.mass * GRAVITY / 4.0;
     let speed = car.speed();
     let moving = smoothstep(0.5, 3.0, speed);
     let car_vel = to_bevy(car.state.velocity);
@@ -277,10 +292,8 @@ fn update_smoke(
                 (DUST_RATE * dust, [0.45, 0.38, 0.27], 0.35 * dust, 1.4, (0.4, 2.2))
             }
             _ => {
-                let s = wheel_slide(w, static_load, moving);
-                // Only a real slide makes visible smoke.
-                let s = ((s - 0.25) / 0.75).max(0.0);
-                (SMOKE_RATE * s, [0.82, 0.82, 0.84], 0.4 * s.sqrt(), 2.6, (0.5, 3.5))
+                let s = tire_smoke(w, &car.state.wheels[i].tire) as f32;
+                (SMOKE_RATE * s, [0.82, 0.82, 0.84], 0.45 * s.sqrt(), 2.6, (0.5, 2.0 + 1.5 * s))
             }
         };
         smoke.owed[i] += rate * dt;
