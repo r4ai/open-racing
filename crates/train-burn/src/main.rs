@@ -86,6 +86,9 @@ enum Command {
         /// Hidden layer sizes of the actor and critic, e.g. 256,256.
         #[arg(long, value_delimiter = ',', default_values_t = PpoConfig::default().hidden)]
         hidden: Vec<usize>,
+        /// Anti-lock brakes.
+        #[arg(long)]
+        abs: bool,
         /// Let the policy shift gears itself instead of the automatic gear selector.
         #[arg(long)]
         manual_shift: bool,
@@ -137,6 +140,7 @@ fn main() {
             tyre_obs,
             edge_obs,
             safe_start,
+            abs,
             control_hz,
             max_steer_rate,
             hidden,
@@ -149,6 +153,7 @@ fn main() {
                 tyre_obs,
                 edge_obs,
                 safe_start,
+                abs,
                 control_hz,
                 max_steer_rate,
                 auto_shift: !manual_shift,
@@ -178,6 +183,7 @@ fn main() {
                 privileged_obs: config.privileged_obs,
                 tyre_obs: config.tyre_obs,
                 edge_obs: config.edge_obs,
+                abs: config.abs,
                 max_steer_rate: config.max_steer_rate,
                 auto_shift: config.auto_shift,
                 track,

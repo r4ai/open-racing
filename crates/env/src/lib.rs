@@ -43,6 +43,9 @@ pub struct EnvConfig {
     pub start_offset: (f64, f64),
     /// Let an automatic gear selector drive the sequential gearbox.
     pub auto_shift: bool,
+    /// Anti-lock brakes, as GT3 cars have: the brake pressure backs off while a wheel
+    /// locks. Without it the pedal locks the wheels well short of full travel.
+    pub abs: bool,
     /// Maximum steering wheel speed in rad/s (a human arm / wheel base limit).
     pub max_steer_rate: f64,
     pub lookahead_points: usize,
@@ -65,6 +68,7 @@ impl Default for EnvConfig {
             start_offset: (-2.0, 2.0),
             safe_start: false,
             auto_shift: true,
+            abs: false,
             max_steer_rate: 15.0,
             lookahead_points: 20,
             lookahead_spacing: 10.0,
@@ -297,6 +301,8 @@ impl Env {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Actuator {
     steer: f64,
+    /// Share of the brake pedal the anti-lock system currently takes away.
+    abs_release: f64,
     /// Gear request of the current decision, not yet sent to the gearbox.
     shift: Shift,
 }
@@ -320,7 +326,7 @@ impl Actuator {
         Controls {
             steer_wheel_angle: self.steer,
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
-            brake: f64::from(action[2]).clamp(0.0, 1.0),
+            brake: self.brake(cfg, car, f64::from(action[2]).clamp(0.0, 1.0)),
             clutch: 0.0,
             shift: if cfg.auto_shift {
                 AutoShift.shift(car)
@@ -328,6 +334,26 @@ impl Actuator {
                 self.take_shift(car)
             },
         }
+    }
+
+    /// Brake pressure for `pedal`: with [`EnvConfig::abs`], released while a wheel slips
+    /// past [`ABS_SLIP`] and reapplied once it grips again.
+    fn brake(&mut self, cfg: &EnvConfig, car: &Car, pedal: f64) -> f64 {
+        if !cfg.abs || pedal == 0.0 || car.speed() < ABS_MIN_SPEED {
+            self.abs_release = 0.0;
+            return pedal;
+        }
+        let locking = car
+            .telemetry
+            .wheels
+            .iter()
+            .any(|w| w.slip_ratio < -ABS_SLIP);
+        self.abs_release = if locking {
+            (self.abs_release + ABS_RELEASE_RATE * DT).min(1.0)
+        } else {
+            (self.abs_release - ABS_APPLY_RATE * DT).max(0.0)
+        };
+        pedal * (1.0 - self.abs_release)
     }
 
     /// The pending gear request; never shifts below first gear (into neutral or reverse),
@@ -359,6 +385,15 @@ impl Actuator {
         }
     }
 }
+
+/// Braking slip ratio beyond which the anti-lock system releases the brakes; the tyres
+/// peak around 0.1.
+pub const ABS_SLIP: f64 = 0.12;
+/// Rates at which the anti-lock system releases and reapplies the brakes, share of the
+/// pedal per second, and the speed below which it stays out of the way, m/s.
+const ABS_RELEASE_RATE: f64 = 20.0;
+const ABS_APPLY_RATE: f64 = 10.0;
+const ABS_MIN_SPEED: f64 = 3.0;
 
 /// Look-ahead distance and lateral acceleration of [`EnvConfig::safe_start`].
 pub const SAFE_START_DISTANCE: f64 = 60.0;
