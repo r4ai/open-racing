@@ -56,6 +56,9 @@ enum Command {
         /// Reward lost per unit of change in the normalised steering input (−1..1) per step.
         #[arg(long, default_value_t = DefaultReward::default().steer_change_weight)]
         steer_change_penalty: f64,
+        /// Reward lost per step for every wheel off the track.
+        #[arg(long, default_value_t = DefaultReward::default().off_track_weight)]
+        off_track_penalty: f64,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// Include ground-truth tyre state in the observation.
@@ -73,6 +76,9 @@ enum Command {
         /// Agent decisions per second.
         #[arg(long, default_value_t = EnvConfig::default().control_hz)]
         control_hz: f64,
+        /// Fastest the steering wheel turns, rad/s.
+        #[arg(long, default_value_t = EnvConfig::default().max_steer_rate)]
+        max_steer_rate: f64,
         /// Hidden layer sizes of the actor and critic, e.g. 256,256.
         #[arg(long, value_delimiter = ',', default_values_t = PpoConfig::default().hidden)]
         hidden: Vec<usize>,
@@ -120,12 +126,14 @@ fn main() {
             crash_penalty,
             grip_loss_penalty,
             steer_change_penalty,
+            off_track_penalty,
             seed,
             privileged,
             tyre_obs,
             edge_obs,
             safe_start,
             control_hz,
+            max_steer_rate,
             hidden,
             manual_shift,
             out,
@@ -137,6 +145,7 @@ fn main() {
                 edge_obs,
                 safe_start,
                 control_hz,
+                max_steer_rate,
                 auto_shift: !manual_shift,
                 seed,
                 ..EnvConfig::default()
@@ -147,6 +156,7 @@ fn main() {
                 termination_penalty: crash_penalty,
                 grip_loss_weight: grip_loss_penalty,
                 steer_change_weight: steer_change_penalty,
+                off_track_weight: off_track_penalty,
                 ..DefaultReward::default()
             });
             let mut env = spec.make_vec_env(envs);
