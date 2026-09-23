@@ -12,13 +12,15 @@ app layer  env        episodes, observations, rewards, termination, parallel Bat
 domain     sim        vehicle dynamics and tracks (deterministic, zero allocation in step)
 ```
 
-| crate | role |
-|---|---|
-| `crates/sim` | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber), engine / clutch / sequential gearbox / LSD, aero, tracks |
-| `crates/env` | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs` |
-| `crates/api` | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere) |
-| `crates/train-burn` | PPO (GAE, clipping, observation normalisation) and `BurnPolicy` |
-| `crates/app` | Driving, AI spectating, replay, HUD |
+| crate               | role                                                                                                                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber), engine / clutch / sequential gearbox / LSD, aero, tracks |
+| `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
+| `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
+| `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |
+| `crates/ac`         | Converter from track folders in the Assetto Corsa format to track packages                                                                                                                   |
+| `crates/train-burn` | PPO (GAE, clipping, observation normalisation) and `BurnPolicy`                                                                                                                              |
+| `crates/app`        | Driving, AI spectating, replay, HUD                                                                                                                                                          |
 
 Physics runs at a fixed 1 kHz. Everything is in SI units, and steering input is the steering wheel angle in radians, the same physical quantity a real wheel reports.
 
@@ -45,20 +47,20 @@ Use `--features ndarray` or `--features flex` for a CPU backend.
 
 ### Controls
 
-| key | action |
-|---|---|
-| W/S, ↑/↓ | throttle / brake |
-| A/D, ←/→ | steering |
-| E/Q | shift up / down (`--auto-shift` for automatic) |
-| C | clutch |
-| I | restart the engine after a stall |
-| Backspace | put the car back on the track |
-| V | switch camera (chase / cockpit / TV / top) |
-| P | replay since the last reset |
-| T | switch to the AI driver |
-| M | mute / unmute sound |
-| Tab | choose the input device |
-| Esc | input settings (assign steering, pedals and shift buttons) |
+| key       | action                                                     |
+| --------- | ---------------------------------------------------------- |
+| W/S, ↑/↓  | throttle / brake                                           |
+| A/D, ←/→  | steering                                                   |
+| E/Q       | shift up / down (`--auto-shift` for automatic)             |
+| C         | clutch                                                     |
+| I         | restart the engine after a stall                           |
+| Backspace | put the car back on the track                              |
+| V         | switch camera (chase / cockpit / TV / top)                 |
+| P         | replay since the last reset                                |
+| T         | switch to the AI driver                                    |
+| M         | mute / unmute sound                                        |
+| Tab       | choose the input device                                    |
+| Esc       | input settings (assign steering, pedals and shift buttons) |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
 
@@ -73,12 +75,54 @@ Force feedback (Windows, DirectInput) plays the simulated steering torque from t
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
 - Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template.
 
+### Track packages
+
+Tracks with 3D models are loaded from open-racing's own package format: a directory `content/tracks/<name>/` holding
+
+- `track.ron`: format version, centreline and surface types (grip, rolling resistance),
+- `ground.bin`: road meshes the tyres ride on, and walls,
+- `visual.bin`: meshes, materials and textures, read only by the app.
+
+Select one with `--track <name>`. `content/` is git-ignored; set `OPEN_RACING_CONTENT` to use a different directory. The physics data is a few MB, so training and evaluation start quickly and never read the render data.
+
+Packages are made ahead of time by converters from other formats. The runtime reads packages only.
+
+### Converting tracks
+
+No third-party tracks ship with open-racing. Only convert and use tracks whose licence allows it.
+
+**Assetto Corsa format** (`open-racing-ac`): reads KN5 models, `ai/fast_lane.ai` and `data/surfaces.ini` from a track folder anywhere on disk. The folder itself is not modified.
+
+```bash
+# Writes content/tracks/my_track/ and prints how well the centreline fits the road meshes
+cargo run --release -p open-racing-ac -- path/to/<track folder> --layout <layout> --name my_track
+cargo run --release -p open-racing-app -- --track my_track
+cargo run --release -p open-racing-train-burn -- train --track my_track
+```
+
+`--layout` picks a layout of a multi-layout folder (the `<layout>` in `models_<layout>.ini`); leave it out for a single-layout folder. The name defaults to the folder name.
+
+How the folder is converted:
+
+- **Tyres:** a mesh is physical when its name starts with digits followed by a surface key from `surfaces.ini` (e.g. `1ROAD_05`). Grip is `FRICTION` relative to the grippiest valid-track surface, and surfaces that are not valid track count as off track in rewards. Meshes named `<digits>WALL…` are solid walls.
+- **Centreline:** the AI line only defines the centreline and the track widths, which give progress, observations and lap timing. It is not used as a driving line. The start/finish line is at the timing markers.
+
+Limitations:
+
+- Point-to-point tracks (open AI line) are not supported.
+- Encrypted or otherwise protected KN5 files are rejected.
+- Materials keep the diffuse texture, plus the mask and detail layers of multi-layer materials; normal, specular and reflection maps are dropped.
+- Model rotations in `models_*.ini` are ignored.
+- Custom Shaders Patch extensions (`extension/`: generated trees, lights, mesh adjustments) are not applied, so a track looks as it does without the patch.
+
 ## Tests and benchmarks
 
 ```bash
 cargo test                      # physics plausibility, determinism, zero allocation, API contract
 cargo bench -p open-racing-sim  # one physics step
 cargo bench -p open-racing-env  # 256-env parallel throughput
+# A lap on every track package in content/tracks/ (ignored by default)
+cargo test -p open-racing-api --test content_tracks -- --ignored
 ```
 
 Reference results (Apple M5, 10 cores): 1 physics step ≈ 0.4 µs; `BatchEnv` ≈ 9.8M physics steps/s (≈ 9,800× real time).
@@ -95,11 +139,24 @@ cargo dev -- --ai runs/lakeside
 
 A rebuild after editing the app takes about 5 s this way (Windows, 16 threads), against 13–18 s for `--release`. `cargo test` without `--release` is enough for the same reason. Keep `--release` for training, evaluation and benchmarks. Don't combine the `dev` feature with `--release` or distribute its binary: it needs the Bevy DLL from `target/`.
 
-## Force-feedback wheels (planned)
-
-`Controls` takes the steering wheel angle and pedal travel directly, and `Telemetry::steering_torque` provides the steering torque from the tyre aligning moments. A wheel device only needs one system in `crates/app/src/input.rs` that writes these values.
-
 ## Training reference
 
 `train --envs 512 --iterations 400` (13M agent steps, ~12 min on an M5, wgpu): mean distance per episode rose from ~50 m to ~3–8 km, best lap 75.9 s on Lakeside (~4 km). This is still short; more training should make it more stable.
 Training throughput is ~18k agent steps/s, and the bottleneck is the NN update, not the simulation.
+
+## License
+
+open-racing's source code and the files in `assets/` are licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+### Distributing binaries
+
+Built executables contain third-party crates under their own licences, whose notices must accompany the binaries. Most are MIT or Apache-2.0; others include BSD, ISC, Zlib, Unicode-3.0 and MPL-2.0 (`colored` and `option-ext`, pulled in by Burn). For the MPL-2.0 crates, tell recipients where their source is available (crates.io). The app also embeds Bevy's default font, FiraMono, under the SIL Open Font License 1.1, which Cargo's licence metadata does not show.
+
+Generate the notices with [cargo-about](https://github.com/EmbarkStudios/cargo-about), using `about.toml` and `about.hbs` in this repository, and ship the result with the binaries:
+
+```bash
+cargo about generate about.hbs -o THIRD-PARTY-LICENSES.html
+```

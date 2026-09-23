@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>open-racing third-party licenses</title>
+    <style>
+        body { font-family: sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+        pre { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Third-party licenses</h1>
+    <p>open-racing includes the following crates. MPL-2.0 crates are unmodified; their source is available on <a href="https://crates.io">crates.io</a> under the name and version listed.</p>
+    <p>The app also embeds the FiraMono font (via Bevy), licensed under the SIL Open Font License 1.1; see <code>FiraMono-OFL-1.1.txt</code>.</p>
+    <h2>Overview</h2>
+    <ul>
+        {{#each overview}}
+        <li>{{name}} ({{count}})</li>
+        {{/each}}
+    </ul>
+    <h2>Licenses</h2>
+    {{#each licenses}}
+    <h3 id="{{id}}">{{name}}</h3>
+    <p>Used by:</p>
+    <ul>
+        {{#each used_by}}
+        <li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+        {{/each}}
+    </ul>
+    <pre>{{text}}</pre>
+    {{/each}}
+</body>
+</html>
