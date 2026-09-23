@@ -28,6 +28,12 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 64)]
         rollout: usize,
+        /// Samples per gradient step; larger batches keep a GPU busier.
+        #[arg(long, default_value_t = PpoConfig::default().minibatch)]
+        minibatch: usize,
+        /// Passes over each rollout.
+        #[arg(long, default_value_t = PpoConfig::default().epochs)]
+        epochs: usize,
         #[arg(long, default_value_t = 3e-4)]
         lr: f64,
         /// Discount per agent step; the planning horizon is about 1 / (1 − gamma) steps.
@@ -76,6 +82,8 @@ fn main() {
             envs,
             iterations,
             rollout,
+            minibatch,
+            epochs,
             lr,
             gamma,
             entropy,
@@ -118,6 +126,8 @@ fn main() {
             let cfg = PpoConfig {
                 iterations,
                 rollout_len: rollout,
+                minibatch,
+                epochs,
                 learning_rate: lr,
                 gamma,
                 entropy_coef: entropy,
