@@ -1,0 +1,3 @@
+[alias]
+# Run the app with Bevy linked as a DLL: the fastest edit-build-run loop.
+dev = "run -p open-racing-app --features dev"

@@ -76,13 +76,24 @@ Force feedback (Windows, DirectInput) plays the simulated steering torque from t
 ## Tests and benchmarks
 
 ```bash
-cargo test --release            # physics plausibility, determinism, zero allocation, API contract
+cargo test                      # physics plausibility, determinism, zero allocation, API contract
 cargo bench -p open-racing-sim  # one physics step
 cargo bench -p open-racing-env  # 256-env parallel throughput
 ```
 
 Reference results (Apple M5, 10 cores): 1 physics step ≈ 0.4 µs; `BatchEnv` ≈ 9.8M physics steps/s (≈ 9,800× real time).
 GT3 car: 0–100 km/h 3.2 s, top speed ≈ 274 km/h, 100–0 km/h ≈ 34 m, steady-state skidpad ≈ 1.43 g.
+
+## Development
+
+For the app, iterate in the dev profile with Bevy linked as a DLL. The dev profile builds the workspace with `opt-level = 1` and dependencies with `opt-level = 3` (without debug info), so a physics step is as fast as in `--release`:
+
+```bash
+cargo dev                       # = cargo run -p open-racing-app --features dev
+cargo dev -- --ai runs/lakeside
+```
+
+A rebuild after editing the app takes about 5 s this way (Windows, 16 threads), against 13–18 s for `--release`. `cargo test` without `--release` is enough for the same reason. Keep `--release` for training, evaluation and benchmarks. Don't combine the `dev` feature with `--release` or distribute its binary: it needs the Bevy DLL from `target/`.
 
 ## Force-feedback wheels (planned)
 
