@@ -67,7 +67,8 @@ pub struct Simulation {
 impl Simulation {
     /// Also returns the track's 3D model, if it has one, for the scene to spawn.
     pub fn new(args: &Args) -> Result<(Self, TrackModel), open_racing_api::Error> {
-        let (track, model) = open_racing_api::load_track_with_visual(&args.track)?;
+        let (track, model) =
+            open_racing_api::load_track_with_visual(args.track.as_deref().unwrap_or("lakeside"))?;
         let car_model = open_racing_api::load_car(&args.car)?;
         let spec = EnvSpec::new(track, car_model, Default::default());
         let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
@@ -130,6 +131,18 @@ impl Plugin for DrivingPlugin {
             (handle_requests, step_simulation.run_if(settings_closed)).chain(),
         );
     }
+}
+
+/// The track the `--ai` policy was trained on, if it can be read.
+pub fn policy_track(args: &Args) -> Option<String> {
+    #[cfg(feature = "burn-policy")]
+    if let Some(dir) = &args.ai {
+        return open_racing_train_burn::load_meta(dir)
+            .ok()
+            .map(|meta| meta.track);
+    }
+    let _ = args;
+    None
 }
 
 /// Loads the policy given on the command line, if any.

@@ -23,9 +23,10 @@ use clap::Parser;
 #[derive(Parser, Resource, Clone)]
 #[command(about = "open-racing: drive or watch AI agents")]
 pub struct Args {
-    /// Track name (assets/tracks/<name>.ron) or path.
-    #[arg(long, default_value = "lakeside")]
-    pub track: String,
+    /// Track name (assets/tracks/<name>.ron) or path. Defaults to the track the `--ai`
+    /// policy was trained on, otherwise lakeside.
+    #[arg(long)]
+    pub track: Option<String>,
     /// Car name (assets/cars/<name>.ron) or path.
     #[arg(long, default_value = "gt3")]
     pub car: String,
@@ -38,7 +39,10 @@ pub struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if args.track.is_none() {
+        args.track = driving::policy_track(&args);
+    }
     let (sim, track_model) = driving::Simulation::new(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
