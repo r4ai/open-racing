@@ -31,7 +31,10 @@ cargo run --release -p open-racing-app
 # Train (defaults to the wgpu backend: Metal / DX12 / Vulkan)
 cargo run --release -p open-racing-train-burn -- train --envs 512 --iterations 400 --out runs/lakeside
 
-# Evaluate
+# Continue training from a trained policy (--gamma sets the discount, i.e. the planning horizon)
+cargo run --release -p open-racing-train-burn -- train --init runs/lakeside --lr 1e-4 --out runs/lakeside-2
+
+# Evaluate: one car from the start line, then 64 cars from random points (crash rate and where they crash)
 cargo run --release -p open-racing-train-burn -- eval --model runs/lakeside
 
 # Watch the AI in the app (T switches between AI and human)

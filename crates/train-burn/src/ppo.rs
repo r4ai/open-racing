@@ -14,7 +14,7 @@ use burn::prelude::*;
 use burn::tensor::backend::AutodiffBackend;
 use open_racing_api::VecEnv;
 
-use crate::{Agent, Normalizer, PolicyMeta, save_policy, scale_action};
+use crate::{Agent, Normalizer, PolicyMeta, load_agent, load_meta, save_policy, scale_action};
 
 const LOG_2PI: f32 = 1.837_877_1;
 
@@ -37,6 +37,8 @@ pub struct PpoConfig {
     pub seed: u64,
     pub out_dir: PathBuf,
     pub save_every: usize,
+    /// Warm-start from the weights and observation normaliser saved in this directory.
+    pub init: Option<PathBuf>,
 }
 
 impl Default for PpoConfig {
@@ -58,6 +60,7 @@ impl Default for PpoConfig {
             seed: 0,
             out_dir: PathBuf::from("runs/ppo"),
             save_every: 10,
+            init: None,
         }
     }
 }
@@ -147,11 +150,21 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
     let act_space = env.action_space().clone();
     let act_dim = act_space.dim();
     let mut meta = ctx.meta;
-    meta.hidden = cfg.hidden.clone();
-    meta.normalizer = Normalizer::new(obs_dim);
-
     B::seed(device, cfg.seed);
-    let mut agent: Agent<B> = Agent::new(obs_dim, act_dim, &cfg.hidden, cfg.init_log_std, device);
+    let mut agent: Agent<B> = match &cfg.init {
+        Some(dir) => {
+            let init = load_meta(dir).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()));
+            assert_eq!(init.obs_names, meta.obs_names, "observation layout of {} differs from the env", dir.display());
+            meta.hidden = init.hidden;
+            meta.normalizer = init.normalizer;
+            load_agent(dir, &meta, device).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()))
+        }
+        None => {
+            meta.hidden = cfg.hidden.clone();
+            meta.normalizer = Normalizer::new(obs_dim);
+            Agent::new(obs_dim, act_dim, &cfg.hidden, cfg.init_log_std, device)
+        }
+    };
     let mut optim = AdamConfig::new()
         .with_epsilon(1e-5)
         .with_grad_clipping(Some(GradientClippingConfig::Norm(cfg.max_grad_norm)))
@@ -171,6 +184,8 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
 
     for iteration in 1..=cfg.iterations {
         let started = Instant::now();
+        // Linear decay to zero lets the policy settle instead of jittering around the optimum.
+        let learning_rate = cfg.learning_rate * (1.0 - (iteration - 1) as f64 / cfg.iterations as f64);
         let policy = agent.valid();
         let std: Vec<f32> = to_vec(policy.log_std.val().exp());
         let mut episodes = EpisodeSummary::default();
@@ -297,7 +312,7 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
                 updates += 1;
 
                 let grads = GradientsParams::from_grads(loss.backward(), &agent);
-                agent = optim.step(cfg.learning_rate, agent, grads);
+                agent = optim.step(learning_rate, agent, grads);
             }
         }
 

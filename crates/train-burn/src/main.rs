@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use open_racing_api::{EnvConfig, EnvSpec, Policy, VecEnv};
+use open_racing_api::{EnvConfig, EnvSpec, Policy, RacingVecEnv, VecEnv};
 use open_racing_train_burn::ppo::{self, PpoConfig, TrainContext};
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
@@ -28,6 +28,9 @@ enum Command {
         rollout: usize,
         #[arg(long, default_value_t = 3e-4)]
         lr: f64,
+        /// Discount per agent step; the planning horizon is about 1 / (1 − gamma) steps.
+        #[arg(long, default_value_t = 0.99)]
+        gamma: f32,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// Include ground-truth tyre state in the observation.
@@ -35,6 +38,9 @@ enum Command {
         privileged: bool,
         #[arg(long, default_value = "runs/ppo")]
         out: PathBuf,
+        /// Continue from a trained policy (weights and observation normaliser).
+        #[arg(long)]
+        init: Option<PathBuf>,
     },
     /// Run a trained policy and report lap times.
     Eval {
@@ -42,12 +48,15 @@ enum Command {
         model: PathBuf,
         #[arg(long, default_value_t = 180.0)]
         seconds: f64,
+        /// Cars started at random points for the robustness run (0 skips it).
+        #[arg(long, default_value_t = 64)]
+        envs: usize,
     },
 }
 
 fn main() {
     match Cli::parse().command {
-        Command::Train { track, car, envs, iterations, rollout, lr, seed, privileged, out } => {
+        Command::Train { track, car, envs, iterations, rollout, lr, gamma, seed, privileged, out, init } => {
             let config = EnvConfig { privileged_obs: privileged, seed, ..EnvConfig::default() };
             let spec = EnvSpec::from_names(&track, &car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
             let mut env = spec.make_vec_env(envs);
@@ -67,7 +76,7 @@ fn main() {
                 track,
                 car,
             };
-            let cfg = PpoConfig { iterations, rollout_len: rollout, learning_rate: lr, seed, out_dir: out, ..Default::default() };
+            let cfg = PpoConfig { iterations, rollout_len: rollout, learning_rate: lr, gamma, seed, out_dir: out, init, ..Default::default() };
             println!(
                 "training on {} envs, obs dim {}, {} physics steps per action",
                 envs,
@@ -76,38 +85,94 @@ fn main() {
             );
             ppo::train::<TrainBackend>(&mut env, &cfg, TrainContext { meta }, &Default::default());
         }
-        Command::Eval { model, seconds } => {
+        Command::Eval { model, seconds, envs } => {
             let mut policy = BurnPolicy::load(&model).unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
-            let config = EnvConfig {
-                random_start: false,
-                start_speed: (0.0, 0.0),
-                start_offset: (0.0, 0.0),
-                ..policy.meta.env_config()
-            };
-            let spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
-            let mut env = spec.make_vec_env(1);
-            policy.check_compatible(env.observation_space()).unwrap_or_else(|e| panic!("{e}"));
-            let mut obs = env.reset(0).to_vec();
-            let mut actions = vec![0.0; 3];
-            let steps = (seconds * config.control_hz) as usize;
-            for _ in 0..steps {
-                policy.act(&obs, &mut actions);
-                let r = env.step(&actions);
-                obs.copy_from_slice(r.obs);
-                if r.terminated[0] != 0 {
-                    let stats = env.finished_episodes()[0].1;
-                    println!("episode terminated after {:.1}s, {:.0} m", stats.time, stats.progress);
-                    return;
-                }
+            flying_lap(&mut policy, seconds);
+            if envs > 0 {
+                robustness(&mut policy, seconds, envs);
             }
-            let stats = env.episode_stats().next().copied().unwrap_or_default();
-            println!(
-                "{:.0} s: {:.0} m, {} laps, best lap {}",
-                stats.time,
-                stats.progress,
-                stats.laps,
-                stats.best_lap_time.map_or("-".into(), |l| format!("{l:.3}s"))
-            );
         }
+    }
+}
+
+fn eval_env(policy: &BurnPolicy, config: EnvConfig, envs: usize) -> (EnvSpec, RacingVecEnv) {
+    let spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config).unwrap_or_else(|e| panic!("{e}"));
+    let env = spec.make_vec_env(envs);
+    policy.check_compatible(env.observation_space()).unwrap_or_else(|e| panic!("{e}"));
+    (spec, env)
+}
+
+/// One car from a standing start on the start line, as in a race.
+fn flying_lap(policy: &mut BurnPolicy, seconds: f64) {
+    let config = EnvConfig { random_start: false, start_speed: (0.0, 0.0), start_offset: (0.0, 0.0), ..policy.meta.env_config() };
+    let (_, mut env) = eval_env(policy, config.clone(), 1);
+    let mut obs = env.reset(0).to_vec();
+    let mut actions = vec![0.0; 3];
+    let mut stats = Default::default();
+    let mut ending = "";
+    for _ in 0..(seconds * config.control_hz) as usize {
+        policy.act(&obs, &mut actions);
+        let r = env.step(&actions);
+        obs.copy_from_slice(r.obs);
+        let (terminated, truncated) = (r.terminated[0] != 0, r.truncated[0] != 0);
+        if terminated || truncated {
+            stats = env.finished_episodes()[0].1;
+            ending = if terminated { " (crashed)" } else { "" };
+            break;
+        }
+        stats = env.episode_stats().next().copied().unwrap_or_default();
+    }
+    println!(
+        "start line: {:.1} s{ending}, {:.0} m, {} laps, best lap {}",
+        stats.time,
+        stats.progress,
+        stats.laps,
+        stats.best_lap_time.map_or("-".into(), |l| format!("{l:.3}s"))
+    );
+}
+
+/// Many cars from random points and speeds (the training distribution): how often and
+/// where on the track the policy crashes.
+fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize) {
+    const BIN: f64 = 100.0;
+    let config = policy.meta.env_config();
+    let (spec, mut env) = eval_env(policy, config.clone(), envs);
+    let track = &*spec.track;
+    let mut obs = env.reset(1).to_vec();
+    let mut actions = vec![0.0; envs * 3];
+    let mut crashes_at = vec![0usize; (track.length / BIN).ceil() as usize];
+    let (mut crashes, mut distance, mut laps, mut best_lap) = (0usize, 0.0, 0u32, None::<f64>);
+    for _ in 0..(seconds * config.control_hz) as usize {
+        let before: Vec<_> = env.cars().map(|c| c.state.position).collect();
+        policy.act(&obs, &mut actions);
+        let r = env.step(&actions);
+        obs.copy_from_slice(r.obs);
+        for (e, pos) in before.iter().enumerate() {
+            if r.terminated[e] != 0 {
+                crashes += 1;
+                crashes_at[(track.query(*pos, track.nearest_index(*pos)).s / BIN) as usize] += 1;
+            }
+        }
+        for (_, stats) in env.finished_episodes() {
+            distance += stats.progress;
+            laps += stats.laps;
+            best_lap = stats.best_lap_time.map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
+        }
+    }
+    for stats in env.episode_stats() {
+        distance += stats.progress;
+        laps += stats.laps;
+        best_lap = stats.best_lap_time.map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
+    }
+    println!(
+        "random starts: {envs} cars × {seconds:.0} s, {:.0} km, {laps} laps, best lap {}, {crashes} crashes ({:.2} per lap)",
+        distance / 1000.0,
+        best_lap.map_or("-".into(), |l| format!("{l:.3}s")),
+        crashes as f64 * track.length / distance.max(1.0),
+    );
+    let mut hot: Vec<_> = crashes_at.iter().enumerate().filter(|(_, n)| **n > 0).collect();
+    hot.sort_by(|a, b| b.1.cmp(a.1));
+    for (bin, n) in hot.iter().take(5) {
+        println!("  crashes at {:>4.0}–{:<4.0} m: {n}", *bin as f64 * BIN, (*bin + 1) as f64 * BIN);
     }
 }

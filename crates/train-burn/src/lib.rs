@@ -175,6 +175,13 @@ pub fn load_meta(dir: &Path) -> std::io::Result<PolicyMeta> {
     ron::from_str(&std::fs::read_to_string(dir.join("meta.ron"))?).map_err(std::io::Error::other)
 }
 
+/// Rebuilds the network described by `meta` and loads the weights saved in `dir`.
+pub fn load_agent<B: Backend>(dir: &Path, meta: &PolicyMeta, device: &B::Device) -> std::io::Result<Agent<B>> {
+    Agent::new(meta.obs_names.len(), meta.act_low.len(), &meta.hidden, 0.0, device)
+        .load_file(dir.join("policy"), &recorder(), device)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 /// A trained policy running deterministically (distribution mean) for inference.
 pub struct BurnPolicy {
     agent: Agent<InferenceBackend>,
@@ -187,9 +194,7 @@ impl BurnPolicy {
     pub fn load(dir: &Path) -> std::io::Result<Self> {
         let meta = load_meta(dir)?;
         let device = Default::default();
-        let agent = Agent::<InferenceBackend>::new(meta.obs_names.len(), meta.act_low.len(), &meta.hidden, 0.0, &device)
-            .load_file(dir.join("policy"), &recorder(), &device)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let agent = load_agent(dir, &meta, &device)?;
         Ok(Self { agent, meta, device, norm_buf: Vec::new() })
     }
 
