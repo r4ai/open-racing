@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use open_racing_sim::{GRAVITY, Surface};
 
 use crate::driving::{self, Simulation};
+use crate::effects::{slide, smoothstep};
 use crate::input::AppRequests;
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -331,11 +332,6 @@ fn spawn(mut commands: Commands, mut synths: ResMut<Assets<CarSynth>>, sim: Res<
     });
 }
 
-fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<CarSound>) {
     if requests.toggle_mute {
         sound.muted = !sound.muted;
@@ -361,8 +357,7 @@ fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<Ca
             Surface::Grass => grass += 0.25,
         }
         if w.surface != Surface::Grass {
-            let slide = smoothstep(0.06, 0.15, w.slip_angle.abs()).max(smoothstep(0.1, 0.3, w.slip_ratio.abs()));
-            skid = skid.max(slide * (w.load / static_load).min(1.5));
+            skid = skid.max(slide(w) * (w.load / static_load).min(1.5));
         }
     }
 

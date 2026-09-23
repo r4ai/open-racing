@@ -5,6 +5,7 @@ mod audio;
 mod camera;
 mod capture;
 mod driving;
+mod effects;
 mod hud;
 mod input;
 mod scene;
@@ -51,7 +52,7 @@ fn main() {
     .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
     .insert_resource(sim)
     .insert_resource(args.clone())
-    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin));
+    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin, effects::EffectsPlugin));
     driving::install_policy(&mut app, &args);
     app.run();
 }
