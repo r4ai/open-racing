@@ -1,7 +1,11 @@
-//! Input settings screen (Esc): assign steering, pedals and shift buttons from any
-//! connected device and check the result on live values. Axes are calibrated while
-//! they are assigned, so inverted pedals and any axis layout work. The simulation
-//! is paused while the screen is open.
+//! Settings screen (Esc), with two pages switched by Tab:
+//! - Input: assign steering, pedals and shift buttons from any connected device and
+//!   check the result on live values. Axes are calibrated while they are assigned,
+//!   so inverted pedals and any axis layout work.
+//! - Force feedback: the base's peak torque, strength, maximum output in N·m, damping
+//!   and direction, with a test push.
+//!
+//! The simulation is paused while the screen is open.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -10,12 +14,19 @@ use bevy::input::gamepad::GamepadInput;
 use bevy::prelude::*;
 
 use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, Reported, Source};
+use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::input::InputSelection;
 
 /// Smallest movement over which an axis counts as moved when it is assigned.
 const MIN_TRAVEL: f32 = 0.3;
 const ROTATION_STEP: f64 = 90.0;
 const ROTATION_RANGE: (f64, f64) = (180.0, 1440.0);
+/// Force feedback settings: steps and ranges of torques (N·m) and percentages.
+const FFB_TORQUE_STEP: f64 = 0.5;
+const FFB_WHEEL_TORQUE_RANGE: (f64, f64) = (1.0, 40.0);
+const FFB_PERCENT_STEP: f64 = 5.0;
+const FFB_STRENGTH_RANGE: (f64, f64) = (0.0, 200.0);
+const FFB_DAMPING_RANGE: (f64, f64) = (0.0, 100.0);
 
 #[derive(Resource, Default)]
 pub struct SettingsOpen(pub bool);
@@ -23,6 +34,27 @@ pub struct SettingsOpen(pub bool);
 pub fn settings_closed(open: Res<SettingsOpen>) -> bool {
     !open.0
 }
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Page {
+    #[default]
+    Input,
+    ForceFeedback,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FfbRow {
+    Enabled,
+    WheelTorque,
+    Strength,
+    MaxTorque,
+    Damping,
+    Direction,
+    Test,
+}
+
+const FFB_ROWS: [FfbRow; 7] =
+    [FfbRow::Enabled, FfbRow::WheelTorque, FfbRow::Strength, FfbRow::MaxTorque, FfbRow::Damping, FfbRow::Direction, FfbRow::Test];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
@@ -60,6 +92,7 @@ impl Listen {
 
 #[derive(Resource, Default)]
 struct Screen {
+    page: Page,
     row: usize,
     listen: Option<Listen>,
     message: String,
@@ -75,7 +108,7 @@ impl Plugin for SettingsPlugin {
         app.init_resource::<SettingsOpen>()
             .init_resource::<Screen>()
             .add_systems(Startup, spawn)
-            .add_systems(Update, (toggle, navigate.run_if(|o: Res<SettingsOpen>| o.0), listen, render).chain());
+            .add_systems(Update, (toggle, (switch_page, navigate, navigate_ffb).chain().run_if(|o: Res<SettingsOpen>| o.0), listen, render).chain());
     }
 }
 
@@ -112,21 +145,71 @@ fn toggle(keys: Res<ButtonInput<KeyCode>>, mut open: ResMut<SettingsOpen>, mut s
     }
 }
 
+fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
+    if screen.listen.is_none() && keys.just_pressed(KeyCode::Tab) {
+        screen.page = match screen.page {
+            Page::Input => Page::ForceFeedback,
+            Page::ForceFeedback => Page::Input,
+        };
+        screen.row = 0;
+        screen.message.clear();
+    }
+}
+
+/// Moves the cursor over `rows` rows with Up/Down.
+fn move_cursor(keys: &ButtonInput<KeyCode>, row: &mut usize, rows: usize) {
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        *row = (*row + 1) % rows;
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        *row = (*row + rows - 1) % rows;
+    }
+}
+
+fn navigate_ffb(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>, mut settings: ResMut<FfbSettings>, mut test: ResMut<FfbTest>) {
+    if screen.page != Page::ForceFeedback {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, FFB_ROWS.len());
+    let (left, right, enter) = (keys.just_pressed(KeyCode::ArrowLeft), keys.just_pressed(KeyCode::ArrowRight), keys.just_pressed(KeyCode::Enter));
+    let step = |value: &mut f64, step: f64, (min, max): (f64, f64)| match (left, right) {
+        (true, false) => *value = (*value - step).max(min),
+        (false, true) => *value = (*value + step).min(max),
+        _ => {}
+    };
+    let before = settings.clone();
+    let s = &mut *settings;
+    match FFB_ROWS[screen.row] {
+        FfbRow::Enabled if left || right || enter => s.enabled = !s.enabled,
+        FfbRow::WheelTorque => {
+            step(&mut s.wheel_torque, FFB_TORQUE_STEP, FFB_WHEEL_TORQUE_RANGE);
+            s.max_torque = s.max_torque.min(s.wheel_torque);
+        }
+        FfbRow::Strength => step(&mut s.strength, FFB_PERCENT_STEP, FFB_STRENGTH_RANGE),
+        FfbRow::MaxTorque => step(&mut s.max_torque, FFB_TORQUE_STEP, (FFB_TORQUE_STEP, s.wheel_torque)),
+        FfbRow::Damping => step(&mut s.damping, FFB_PERCENT_STEP, FFB_DAMPING_RANGE),
+        FfbRow::Direction if left || right || enter => {
+            s.invert = !s.invert;
+            test.0 = ffb::TEST_DURATION;
+        }
+        FfbRow::Test if enter => test.0 = ffb::TEST_DURATION,
+        _ => {}
+    }
+    if *settings != before {
+        settings.save();
+    }
+}
+
 fn navigate(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut screen: ResMut<Screen>,
     mut bindings: ResMut<Bindings>,
 ) {
-    if screen.listen.is_some() {
+    if screen.listen.is_some() || screen.page != Page::Input {
         return;
     }
-    if keys.just_pressed(KeyCode::ArrowDown) {
-        screen.row = (screen.row + 1) % ROWS.len();
-    }
-    if keys.just_pressed(KeyCode::ArrowUp) {
-        screen.row = (screen.row + ROWS.len() - 1) % ROWS.len();
-    }
+    move_cursor(&keys, &mut screen.row, ROWS.len());
     match ROWS[screen.row] {
         Row::Rotation => {
             let step = match (keys.just_pressed(KeyCode::ArrowLeft), keys.just_pressed(KeyCode::ArrowRight)) {
@@ -223,12 +306,15 @@ fn bar(x: f32) -> String {
     format!("{}{}", "#".repeat(n), ".".repeat(10 - n))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     open: Res<SettingsOpen>,
     screen: Res<Screen>,
     bindings: Res<Bindings>,
     reported: Res<Reported>,
     selection: Res<InputSelection>,
+    ffb_settings: Res<FfbSettings>,
+    ffb_status: Res<FfbStatus>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
 ) {
@@ -238,8 +324,47 @@ fn render(
     if !open.0 {
         return;
     }
-    let mut s = String::new();
-    let _ = writeln!(s, "INPUT SETTINGS  (simulation paused)                     Esc close\n");
+    let tabs = match screen.page {
+        Page::Input => "[INPUT]  force feedback",
+        Page::ForceFeedback => " input  [FORCE FEEDBACK]",
+    };
+    let mut s = format!("{tabs}   (Tab page, simulation paused)            Esc close\n\n");
+    match screen.page {
+        Page::Input => render_input(&mut s, &screen, &bindings, &reported, *selection, &pads),
+        Page::ForceFeedback => render_ffb(&mut s, &screen, &ffb_settings, &ffb_status),
+    }
+    text.0 = s;
+}
+
+fn render_ffb(s: &mut String, screen: &Screen, settings: &FfbSettings, status: &FfbStatus) {
+    for (i, row) in FFB_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let line = match row {
+            FfbRow::Enabled => format!("{:<12} {}   (Enter)", "FFB", if settings.enabled { "on" } else { "off" }),
+            FfbRow::WheelTorque => {
+                format!("{:<12} {:.1} Nm   (Left/Right; the base's peak, with its own FFB gain at 100 %)", "Wheel torque", settings.wheel_torque)
+            }
+            FfbRow::Strength => format!("{:<12} {:.0} %   (Left/Right; share of the car's steering torque, 100 % = 1:1)", "Strength", settings.strength),
+            FfbRow::MaxTorque => format!("{:<12} {:.1} Nm   (Left/Right; the most torque ever sent)", "Max output", settings.max_torque),
+            FfbRow::Damping => format!("{:<12} {:.0} %   (Left/Right; steadies strong bases)", "Damping", settings.damping),
+            FfbRow::Direction => format!("{:<12} {}   (Enter flips it and tests)", "Direction", if settings.invert { "inverted" } else { "normal" }),
+            FfbRow::Test => format!("{:<12} Enter: a short push that must turn the wheel LEFT", "Test"),
+        };
+        let _ = writeln!(s, "{cursor} {line}");
+    }
+    let _ = writeln!(s, "\nDevice: {}\n", status.device);
+    let _ = writeln!(s, "Hold the wheel when testing. If the test turns it right, flip the direction,");
+    let _ = writeln!(s, "or the force drives the wheel into lock.");
+}
+
+fn render_input(
+    s: &mut String,
+    screen: &Screen,
+    bindings: &Bindings,
+    reported: &Reported,
+    selection: InputSelection,
+    pads: &Query<(Entity, &Gamepad, &Name)>,
+) {
     for (i, row) in ROWS.iter().enumerate() {
         let cursor = if i == screen.row { ">" } else { " " };
         let line = match *row {
@@ -248,9 +373,9 @@ fn render(
                 let assigned = bindings.get(action).map_or("-".into(), |b| b.label());
                 let live = match action {
                     _ if bindings.get(action).is_none() => String::new(),
-                    Action::Steer => format!("{:+5.0} deg", bindings.value(action, &pads, &reported) as f64 * bindings.steer_rotation / 2.0),
-                    Action::ShiftUp | Action::ShiftDown => (if bindings.value(action, &pads, &reported) > 0.5 { "pressed" } else { "" }).into(),
-                    _ => bar(bindings.value(action, &pads, &reported)),
+                    Action::Steer => format!("{:+5.0} deg", bindings.value(action, pads, reported) as f64 * bindings.steer_rotation / 2.0),
+                    Action::ShiftUp | Action::ShiftDown => (if bindings.value(action, pads, reported) > 0.5 { "pressed" } else { "" }).into(),
+                    _ => bar(bindings.value(action, pads, reported)),
                 };
                 format!("{:<11} {assigned:<46} {live}", action.name())
             }
@@ -277,7 +402,7 @@ fn render(
             let _ = writeln!(
                 s,
                 "{}",
-                if *selection == InputSelection::Custom {
+                if selection == InputSelection::Custom {
                     "Driving with these bindings (input: custom)."
                 } else {
                     "Not in use: press Tab outside this screen to select \"custom\"."
@@ -285,5 +410,4 @@ fn render(
             );
         }
     }
-    text.0 = s;
 }

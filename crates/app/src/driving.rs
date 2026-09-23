@@ -50,6 +50,8 @@ pub struct Simulation {
     pub lap: LapTimer,
     pub auto_shift: bool,
     pub controls: Controls,
+    /// Steering torque averaged over the physics steps of the last frame, for force feedback.
+    pub ffb_torque: f64,
     recording: Recording,
     spec: EnvSpec,
 }
@@ -71,6 +73,7 @@ impl Simulation {
             mode: Mode::Human,
             auto_shift: args.auto_shift,
             controls: Controls::default(),
+            ffb_torque: 0.0,
             spec,
         })
     }
@@ -182,6 +185,7 @@ pub fn step_simulation(
     let sim = &mut *sim;
     sim.accumulator += time.delta_secs_f64().min(0.25);
     let mut steps = 0;
+    let mut torque = 0.0;
     while sim.accumulator >= DT && steps < MAX_STEPS_PER_FRAME {
         let controls = match (sim.mode, ai.as_deref_mut()) {
             (Mode::Ai, Some(ai)) => ai.driver.controls(ai.policy.as_mut(), &sim.car, &sim.track),
@@ -211,6 +215,7 @@ pub fn step_simulation(
         sim.controls = controls;
         sim.previous = sim.car.state;
         sim.car.step(&sim.track, &controls);
+        torque += sim.car.telemetry.steering_torque;
         let (pos, t) = (sim.car.state.position, sim.car.state.time);
         sim.lap.update(&sim.track, pos, t);
         sim.accumulator -= DT;
@@ -218,6 +223,9 @@ pub fn step_simulation(
     }
     if steps == MAX_STEPS_PER_FRAME {
         sim.accumulator = 0.0;
+    }
+    if steps > 0 {
+        sim.ffb_torque = torque / steps as f64;
     }
     sim.alpha = sim.accumulator / DT;
 }

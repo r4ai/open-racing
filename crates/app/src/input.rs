@@ -2,8 +2,7 @@
 //!
 //! Every device writes the same `DriverInput` resource in physical units (steering
 //! wheel angle in radians, pedal travel 0..1). A steering wheel with force feedback
-//! plugs in as one more system here: it writes its angle/pedals directly and reads
-//! `Telemetry::steering_torque` for the FFB motor.
+//! plugs in as one more device here; `ffb` plays `Telemetry::steering_torque` on it.
 //!
 //! With several devices connected, `InputSelection` picks which one drives: in
 //! `Auto` any device that moves takes over, `Custom` uses the bindings from the
@@ -83,7 +82,7 @@ impl InputSelection {
     }
 }
 
-fn is_wheel(pad: &Gamepad, name: &str) -> bool {
+pub fn is_wheel(pad: &Gamepad, name: &str) -> bool {
     let name = name.to_lowercase();
     pad.vendor_id().is_some_and(|v| WHEEL_VENDORS.contains(&v)) || WHEEL_NAMES.iter().any(|w| name.contains(w))
 }

@@ -12,6 +12,7 @@ use bevy::input::gamepad::{
     AxisSettings, ButtonAxisSettings, GamepadAxisChangedEvent, GamepadButtonChangedEvent, GamepadConnectionEvent, GamepadInput, GamepadSettings,
 };
 use bevy::prelude::*;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Pedal travel ignored near rest, so sensor noise does not creep the throttle open.
@@ -215,38 +216,49 @@ impl Bindings {
         self.get(action).is_some_and(|b| b.device.find(pads).is_some_and(|(_, pad)| b.just_pressed(pad)))
     }
 
-    /// `%APPDATA%/open-racing/input.ron`, or `~/.config/open-racing/input.ron`.
-    fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("open-racing").join("input.ron"))
-    }
-
     pub fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default() };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => ron::from_str(&text).unwrap_or_else(|e| {
-                warn!("ignoring {}: {e}", path.display());
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
+        load_config(BINDINGS_FILE)
     }
 
     pub fn save(&self) {
-        let Some(path) = Self::path() else { return };
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| {
-                let text = ron::ser::to_string_pretty(self, Default::default()).map_err(std::io::Error::other)?;
-                std::fs::write(&path, text)
-            });
-        if let Err(e) = result {
-            warn!("could not save {}: {e}", path.display());
-        }
+        save_config(BINDINGS_FILE, self);
+    }
+}
+
+const BINDINGS_FILE: &str = "input.ron";
+
+/// `%APPDATA%/open-racing/<file>`, or `~/.config/open-racing/<file>`.
+fn config_path(file: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("open-racing").join(file))
+}
+
+/// Reads a settings file, falling back to the defaults when it is missing or invalid.
+pub fn load_config<T: DeserializeOwned + Default>(file: &str) -> T {
+    let Some(path) = config_path(file) else { return T::default() };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => ron::from_str(&text).unwrap_or_else(|e| {
+            warn!("ignoring {}: {e}", path.display());
+            T::default()
+        }),
+        Err(_) => T::default(),
+    }
+}
+
+pub fn save_config<T: Serialize>(file: &str, value: &T) {
+    let Some(path) = config_path(file) else { return };
+    let result = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|_| {
+            let text = ron::ser::to_string_pretty(value, Default::default()).map_err(std::io::Error::other)?;
+            std::fs::write(&path, text)
+        });
+    if let Err(e) = result {
+        warn!("could not save {}: {e}", path.display());
     }
 }
 

@@ -19,3 +19,7 @@ serde.workspace = true
 ron.workspace = true
 glam.workspace = true
 clap.workspace = true
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_System_LibraryLoader"] }

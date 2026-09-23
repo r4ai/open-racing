@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use crate::camera::CameraMode;
 use crate::driving::{Mode, Simulation};
+use crate::ffb::FfbStatus;
 use crate::input::{AppRequests, DriverInput, InputSelection};
 
 #[derive(Component)]
@@ -83,6 +84,7 @@ fn time(t: Option<f64>) -> String {
     t.map_or("--:--.---".into(), |t| format!("{}:{:06.3}", (t / 60.0) as u32, t % 60.0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update(
     sim: Res<Simulation>,
     input: Res<DriverInput>,
@@ -90,6 +92,7 @@ fn update(
     pads: Query<(Entity, &Gamepad, &Name)>,
     camera: Res<CameraMode>,
     diagnostics: Res<Time>,
+    ffb: Res<FfbStatus>,
     mut hud: Query<&mut Text, With<HudText>>,
 ) {
     let Ok(mut text) = hud.single_mut() else { return };
@@ -141,5 +144,9 @@ fn update(
         car.telemetry.steering_torque,
         car.telemetry.downforce[0] + car.telemetry.downforce[1]
     );
+    if !ffb.cut.is_empty() {
+        let _ = write!(s, "
+FFB {}", ffb.cut);
+    }
     text.0 = s;
 }
