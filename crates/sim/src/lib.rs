@@ -12,6 +12,7 @@ pub mod assist;
 pub mod car;
 pub mod controls;
 pub mod drivetrain;
+pub mod ground;
 pub mod params;
 pub mod tire;
 pub mod track;
@@ -19,6 +20,7 @@ pub mod track;
 pub use assist::AutoShift;
 pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
 pub use controls::{Controls, Shift};
+pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{CarModel, CarParams, ParamsError};
 pub use track::{Surface, Track, TrackDef, TrackError, TrackPoint, TrackQuery};
 

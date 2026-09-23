@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use glam::DVec3;
 use open_racing_sim::*;
 
 fn circle(radius: f64) -> Track {
@@ -163,4 +164,44 @@ fn runoff_barrier_contains_the_car() {
     }
     // The CG stops about half a car width inside the barrier.
     assert!(closest > -2.0, "never reached the barrier: {closest}");
+}
+
+/// Circle track whose tyres ride on a flat mesh, with a wall across the road ahead.
+fn walled_circle() -> Track {
+    let mut ground = GroundMeshBuilder::new();
+    let road = ground.add_surface(SurfaceProps::of(Surface::Asphalt));
+    let g = [DVec3::new(-200.0, -200.0, 0.0), DVec3::new(200.0, -200.0, 0.0), DVec3::new(200.0, 200.0, 0.0), DVec3::new(-200.0, 200.0, 0.0)];
+    ground.add_ground(&g, &[], &[0, 1, 2, 0, 2, 3], road);
+    // The car starts at (100, 0) heading +Y; the wall stands at y = 20.
+    let w = [DVec3::new(80.0, 20.0, 0.0), DVec3::new(120.0, 20.0, 0.0), DVec3::new(120.0, 20.0, 2.0), DVec3::new(80.0, 20.0, 2.0)];
+    ground.add_wall(&w, &[0, 1, 2, 0, 2, 3]);
+    circle(100.0).with_ground(ground.build())
+}
+
+#[test]
+fn rides_on_ground_mesh() {
+    let track = walled_circle();
+    let plain = circle(100.0);
+    let mut on_mesh = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 0);
+    let mut on_plane = Car::new(gt3(), &plain, 0.0, 0.0, 0.0, 0);
+    for _ in 0..3000 {
+        on_mesh.step(&track, &Controls::default());
+        on_plane.step(&plain, &Controls::default());
+    }
+    assert!((on_mesh.state.position - on_plane.state.position).length() < 1e-6);
+}
+
+#[test]
+fn wall_stops_the_car() {
+    let track = walled_circle();
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 15.0, 2);
+    let mut max_y = f64::NEG_INFINITY;
+    for _ in 0..5000 {
+        car.step(&track, &Controls { throttle: 0.3, ..Default::default() });
+        max_y = max_y.max(car.state.position.y);
+    }
+    // The CG stops about half a wheelbase plus a tyre radius short of the wall.
+    assert!(max_y < 20.0, "went through the wall: y = {max_y:.2}");
+    assert!(max_y > 16.0, "never reached the wall: y = {max_y:.2}");
+    assert!(car.speed() < 5.0, "still moving at {:.1} m/s", car.speed());
 }

@@ -1,8 +1,12 @@
 //! Track model: a closed centreline with width and banking, resampled into a
 //! uniform table for O(1) hinted queries.
 
+use std::sync::Arc;
+
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
+
+use crate::ground::{GroundMesh, SurfaceProps};
 
 /// One control point of the centreline, as authored in `assets/tracks/*.ron`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -52,7 +56,7 @@ fn default_spacing() -> f64 {
     1.0
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {
     Asphalt,
     Kerb,
@@ -110,6 +114,10 @@ pub struct TrackQuery {
     /// Unit lateral (to the left) lying in the surface.
     pub lateral: DVec3,
     pub surface: Surface,
+    /// Grip multiplier of the surface relative to the tyre's nominal μ.
+    pub grip: f64,
+    /// Extra rolling resistance coefficient of the surface.
+    pub drag: f64,
     pub width_left: f64,
     pub width_right: f64,
 }
@@ -157,7 +165,14 @@ pub struct Track {
     pub kerb_width: f64,
     pub kerb_height: f64,
     pub runoff_width: f64,
+    /// Road meshes and walls. When present the tyres ride on the meshes and the
+    /// centreline only provides track coordinates (s, d).
+    pub ground: Option<Arc<GroundMesh>>,
 }
+
+/// How far above a query point ground rays start, in m. Keeps wheels on their deck
+/// under an overpass.
+const RAY_UP: f64 = 1.0;
 
 impl Track {
     pub fn from_ron(src: &str) -> Result<Self, TrackError> {
@@ -197,7 +212,19 @@ impl Track {
             kerb_width: def.kerb_width,
             kerb_height: def.kerb_height,
             runoff_width: def.runoff_width,
+            ground: None,
         })
+    }
+
+    /// Makes the tyres ride on `ground` instead of the surface implied by the centreline.
+    pub fn with_ground(mut self, ground: GroundMesh) -> Self {
+        self.ground = Some(Arc::new(ground));
+        self
+    }
+
+    /// Deepest penetration of a sphere into the walls: (unit push-out direction, depth).
+    pub fn wall_contact(&self, center: DVec3, radius: f64) -> Option<(DVec3, f64)> {
+        self.ground.as_ref()?.wall_contact(center, radius)
     }
 
     #[inline]
@@ -277,20 +304,32 @@ impl Track {
 
         let rel = p - smp.pos;
         let d = rel.dot(smp.lateral);
-        let (surface, kerb_rise) = self.classify(d, smp.width_left, smp.width_right);
-        // Surface plane through the centreline point, offset by the kerb profile.
-        let height_along_normal = rel.dot(smp.normal);
-        let surface_point = p - smp.normal * (height_along_normal - kerb_rise);
+        let hit = self.ground.as_ref().and_then(|g| g.raycast_down(p, RAY_UP));
+        let (surface_point, normal, props) = match hit {
+            Some(hit) => (hit.point, hit.normal, hit.surface),
+            None => {
+                let (mut surface, kerb_rise) = self.classify(d, smp.width_left, smp.width_right);
+                if self.ground.is_some() {
+                    // Off the meshes: keep the car up on the centreline plane, as grass.
+                    surface = Surface::Grass;
+                }
+                // Surface plane through the centreline point, offset by the kerb profile.
+                let height_along_normal = rel.dot(smp.normal);
+                (p - smp.normal * (height_along_normal - kerb_rise), smp.normal, SurfaceProps::of(surface))
+            }
+        };
 
         TrackQuery {
             index: i,
             s: self.wrap_s((i as f64 + u) * self.spacing),
             d,
             surface_point,
-            normal: smp.normal,
+            normal,
             tangent: smp.tangent,
             lateral: smp.lateral,
-            surface,
+            surface: props.kind,
+            grip: props.grip,
+            drag: props.drag,
             width_left: smp.width_left,
             width_right: smp.width_right,
         }
@@ -313,7 +352,12 @@ impl Track {
     /// World pose (position on the surface, heading tangent) at track coordinates.
     pub fn pose_at(&self, s: f64, d: f64) -> (DVec3, DVec3, DVec3) {
         let smp = self.sample_at(s);
-        (smp.pos + smp.lateral * d, smp.tangent, smp.normal)
+        let pos = smp.pos + smp.lateral * d;
+        // The centreline may float a little above or below the meshes; start higher.
+        match self.ground.as_ref().and_then(|g| g.raycast_down(pos, 5.0)) {
+            Some(hit) => (hit.point, smp.tangent, hit.normal),
+            None => (pos, smp.tangent, smp.normal),
+        }
     }
 }
 

@@ -282,7 +282,7 @@ impl Car {
 
             let optimal = -corner.side * tp.optimal_camber;
             let camber_grip = (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
-            let mu = q.surface.grip() * camber_grip;
+            let mu = q.grip * camber_grip;
             let alpha_eff = w.alpha - tp.camber_thrust * inclination;
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu);
 
@@ -295,7 +295,7 @@ impl Car {
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
             }
 
-            let rolling = (tp.rolling_resistance + q.surface.drag()) * fz * radius * (w.spin * radius / 0.5).tanh();
+            let rolling = (tp.rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
             road_torque[i] = -f.fx * radius - rolling;
 
             let force = long * f.fx + lat * f.fy + n * fz;
@@ -435,8 +435,8 @@ impl Car {
         st.orientation = (st.orientation * DQuat::from_scaled_axis(w)).normalize();
         st.time += dt;
 
-        // ---- Barrier at the edge of the run-off ---------------------------------------
-        // Push the car back so no wheel is beyond it and remove the outward velocity.
+        // ---- Walls and the barrier at the edge of the run-off --------------------------
+        // Push the car back so no wheel is inside them and remove the outward velocity.
         let rot = DMat3::from_quat(st.orientation);
         let mut push = DVec3::ZERO;
         let mut depth = 0.0;
@@ -447,6 +447,12 @@ impl Car {
             if excess > depth {
                 depth = excess;
                 push = q.lateral * -q.d.signum();
+            }
+            if let Some((dir, excess)) = track.wall_contact(center, model.tire(i).p.radius)
+                && excess > depth
+            {
+                depth = excess;
+                push = dir;
             }
         }
         if depth > 0.0 {
