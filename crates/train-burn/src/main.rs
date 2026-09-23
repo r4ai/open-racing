@@ -42,6 +42,10 @@ enum Command {
         /// Weight of the entropy bonus that keeps the policy exploring.
         #[arg(long, default_value_t = 0.0)]
         entropy: f32,
+        /// Exploration noise (standard deviation, in normalised action units) that the cap
+        /// falls to by the last iteration; the cap starts at the initial noise.
+        #[arg(long)]
+        final_std: Option<f32>,
         /// Reward lost when an episode ends in a crash (100 m of progress earns 10).
         #[arg(long, default_value_t = DefaultReward::default().termination_penalty)]
         crash_penalty: f64,
@@ -93,6 +97,9 @@ enum Command {
         /// Write the start-line run step by step to this CSV file.
         #[arg(long)]
         trace: Option<PathBuf>,
+        /// Start the robustness cars no faster than the corners just ahead allow.
+        #[arg(long)]
+        safe_start: bool,
     },
 }
 
@@ -109,6 +116,7 @@ fn main() {
             lr,
             gamma,
             entropy,
+            final_std,
             crash_penalty,
             grip_loss_penalty,
             steer_change_penalty,
@@ -168,6 +176,7 @@ fn main() {
                 learning_rate: lr,
                 gamma,
                 entropy_coef: entropy,
+                final_log_std: final_std.map(f32::ln),
                 hidden,
                 seed,
                 out_dir: out,
@@ -187,12 +196,13 @@ fn main() {
             seconds,
             envs,
             trace,
+            safe_start,
         } => {
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
             flying_lap(&mut policy, seconds, trace.as_deref());
             if envs > 0 {
-                robustness(&mut policy, seconds, envs);
+                robustness(&mut policy, seconds, envs, safe_start);
             }
         }
     }
@@ -319,9 +329,12 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
 
 /// Many cars from random points and speeds (the training distribution): how often and
 /// where on the track the policy crashes.
-fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize) {
+fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize, safe_start: bool) {
     const BIN: f64 = 100.0;
-    let config = policy.meta.env_config();
+    let config = EnvConfig {
+        safe_start,
+        ..policy.meta.env_config()
+    };
     let (spec, mut env) = eval_env(policy, config.clone(), envs);
     let track = &*spec.track;
     let mut obs = env.reset(1).to_vec();
