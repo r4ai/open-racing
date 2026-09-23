@@ -251,7 +251,8 @@ impl Car {
 
             let center_body = corner.hardpoint - DVec3::Z * w.extension;
             let center = st.position + rot * center_body;
-            let center_vel = st.velocity + rot * (omega.cross(center_body) - DVec3::Z * w.extension_rate);
+            let center_vel =
+                st.velocity + rot * (omega.cross(center_body) - DVec3::Z * w.extension_rate);
 
             let q = track.query(center, w.hint);
             w.hint = q.index;
@@ -260,7 +261,9 @@ impl Car {
             let penetration = tp.radius - height;
             let pressure = w.tire.pressure(axle.pressure);
             let fz = if penetration > 0.0 {
-                (tire.vertical_stiffness(pressure) * penetration - tp.vertical_damping * center_vel.dot(n)).max(0.0)
+                (tire.vertical_stiffness(pressure) * penetration
+                    - tp.vertical_damping * center_vel.dot(n))
+                .max(0.0)
             } else {
                 0.0
             };
@@ -295,7 +298,8 @@ impl Car {
             w.alpha = w.alpha.clamp(-1.5, 1.5);
 
             let optimal = -corner.side * tp.optimal_camber;
-            let camber_grip = (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
+            let camber_grip =
+                (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
             let alpha_eff = w.alpha - tp.camber_thrust * inclination;
             // Lateral force towards the centreline per unit load, from the pure-slip curve.
             let inward_force = -corner.side * tp.mu_y * tire.lat.eval(alpha_eff);
@@ -314,9 +318,18 @@ impl Car {
 
             let rolling_resistance = tire.rolling_resistance(pressure);
             let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
-            tire.update_condition(&mut w.tire, &tread_load, slide_power, rolling_resistance * fz * speed, speed, fz > 0.0, dt);
+            tire.update_condition(
+                &mut w.tire,
+                &tread_load,
+                slide_power,
+                rolling_resistance * fz * speed,
+                speed,
+                fz > 0.0,
+                dt,
+            );
 
-            let rolling = (rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
+            let rolling =
+                (rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
             road_torque[i] = -f.fx * radius - rolling;
 
             let force = long * f.fx + lat * f.fy + n * fz;
@@ -360,7 +373,7 @@ impl Car {
             },
         );
 
-        for i in 0..4 {
+        for (i, &road_torque) in road_torque.iter().enumerate() {
             let axle = model.axle(i);
             let w = &mut st.wheels[i];
             let drive_torque = match i {
@@ -368,17 +381,25 @@ impl Car {
                 RR => drive[1],
                 _ => 0.0,
             };
-            let share = if i < 2 { p.brakes.front_bias } else { 1.0 - p.brakes.front_bias };
+            let share = if i < 2 {
+                p.brakes.front_bias
+            } else {
+                1.0 - p.brakes.front_bias
+            };
             let brake_torque = c.brake * p.brakes.max_torque * share * 0.5;
-            let free = w.spin + dt * (road_torque[i] + drive_torque) / axle.wheel_inertia;
+            let free = w.spin + dt * (road_torque + drive_torque) / axle.wheel_inertia;
             let brake_dv = dt * brake_torque / axle.wheel_inertia;
-            w.spin = if free.abs() <= brake_dv { 0.0 } else { free - brake_dv * free.signum() };
+            w.spin = if free.abs() <= brake_dv {
+                0.0
+            } else {
+                free - brake_dv * free.signum()
+            };
             w.angle = (w.angle + w.spin * dt).rem_euclid(std::f64::consts::TAU);
         }
 
         // ---- Suspension -------------------------------------------------------------
         let mut susp = [0.0; 4];
-        for i in 0..4 {
+        for (i, suspension) in susp.iter_mut().enumerate() {
             let corner = &model.corners[i];
             let axle = model.axle(i);
             let w = &st.wheels[i];
@@ -386,7 +407,12 @@ impl Car {
             let spring = axle.spring_rate * (corner.spring_free_extension - w.extension);
             let arb = axle.anti_roll_rate * (other.extension - w.extension);
             let compression_rate = -w.extension_rate;
-            let damper = compression_rate * if compression_rate > 0.0 { axle.bump_damping } else { axle.rebound_damping };
+            let damper = compression_rate
+                * if compression_rate > 0.0 {
+                    axle.bump_damping
+                } else {
+                    axle.rebound_damping
+                };
             let stop = if w.extension < corner.min_extension {
                 axle.bump_stop_rate * (corner.min_extension - w.extension)
             } else if w.extension > corner.max_extension {
@@ -394,8 +420,8 @@ impl Car {
             } else {
                 0.0
             };
-            susp[i] = spring + arb + damper + stop;
-            tel.wheels[i].suspension_force = susp[i];
+            *suspension = spring + arb + damper + stop;
+            tel.wheels[i].suspension_force = *suspension;
         }
 
         // ---- Body forces --------------------------------------------------------------
@@ -413,7 +439,10 @@ impl Car {
 
         let v_body = rot_t * st.velocity;
         let q_dyn = 0.5 * AIR_DENSITY * v_body.x * v_body.x;
-        let downforce = [q_dyn * p.aero.downforce_area_front, q_dyn * p.aero.downforce_area_rear];
+        let downforce = [
+            q_dyn * p.aero.downforce_area_front,
+            q_dyn * p.aero.downforce_area_rear,
+        ];
         let drag = -0.5 * AIR_DENSITY * p.aero.drag_area * v_body.length() * v_body;
         let drag_point = DVec3::new(0.0, 0.0, p.aero.drag_height);
         force += drag;
@@ -426,7 +455,11 @@ impl Car {
         tel.downforce = downforce;
         tel.drag = drag.length();
 
-        let accel = DVec3::new(force.x / p.mass, force.y / p.mass, force.z / model.sprung_mass);
+        let accel = DVec3::new(
+            force.x / p.mass,
+            force.y / p.mass,
+            force.z / model.sprung_mass,
+        );
         tel.acceleration = accel;
         let accel = accel + DVec3::new(gravity.x, gravity.y, gravity.z);
         let inertia = DVec3::from_array(p.inertia);
@@ -465,7 +498,8 @@ impl Car {
         let mut push = DVec3::ZERO;
         let mut depth = 0.0;
         for i in 0..4 {
-            let center = st.position + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
+            let center = st.position
+                + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
             let q = track.query(center, st.wheels[i].hint);
             let excess = q.beyond_barrier(track);
             if excess > depth {

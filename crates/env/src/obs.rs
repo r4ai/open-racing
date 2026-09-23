@@ -37,9 +37,23 @@ pub struct ObsLayout {
 impl ObsLayout {
     pub fn spec(&self) -> ObsSpec {
         let mut names: Vec<String> = [
-            "vel_long", "vel_lat", "yaw_rate", "accel_long", "accel_lat", "wheel_speed_fl", "wheel_speed_fr",
-            "wheel_speed_rl", "wheel_speed_rr", "rpm", "gear", "steer", "throttle", "brake", "track_offset",
-            "heading_sin", "heading_cos",
+            "vel_long",
+            "vel_lat",
+            "yaw_rate",
+            "accel_long",
+            "accel_lat",
+            "wheel_speed_fl",
+            "wheel_speed_fr",
+            "wheel_speed_rl",
+            "wheel_speed_rr",
+            "rpm",
+            "gear",
+            "steer",
+            "throttle",
+            "brake",
+            "track_offset",
+            "heading_sin",
+            "heading_cos",
         ]
         .map(String::from)
         .to_vec();
@@ -67,7 +81,14 @@ pub struct AppliedInput {
 }
 
 /// Writes the observation of `car` into `out` (length = `layout.spec().dim()`).
-pub fn encode(layout: &ObsLayout, car: &Car, track: &Track, hint: usize, input: &AppliedInput, out: &mut [f32]) {
+pub fn encode(
+    layout: &ObsLayout,
+    car: &Car,
+    track: &Track,
+    hint: usize,
+    input: &AppliedInput,
+    out: &mut [f32],
+) {
     let st = &car.state;
     let p = &car.model.params;
     let inv = st.orientation.inverse();
@@ -77,7 +98,11 @@ pub fn encode(layout: &ObsLayout, car: &Car, track: &Track, hint: usize, input: 
     let forward = st.orientation * DVec3::X;
     let heading_sin = q.tangent.truncate().perp_dot(forward.truncate());
     let heading_cos = q.tangent.truncate().dot(forward.truncate());
-    let half_width = if q.d >= 0.0 { q.width_left } else { q.width_right };
+    let half_width = if q.d >= 0.0 {
+        q.width_left
+    } else {
+        q.width_right
+    };
 
     let mut o = Writer { out, i: 0 };
     o.push(v.x / SPEED_SCALE);

@@ -4,7 +4,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::GeneratedEnvironmentMapLight;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension};
+use bevy::render::render_resource::{
+    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+};
 use glam::{DQuat, DVec3};
 use open_racing_sim::Track;
 
@@ -28,7 +30,14 @@ pub struct ScenePlugin;
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(TrackModelPlugin)
-            .add_systems(Startup, ((spawn_track, track_model::spawn).chain(), spawn_car, spawn_lights))
+            .add_systems(
+                Startup,
+                (
+                    (spawn_track, track_model::spawn).chain(),
+                    spawn_car,
+                    spawn_lights,
+                ),
+            )
             .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
     }
 }
@@ -64,22 +73,47 @@ pub fn sky_light(images: &mut Assets<Image>) -> GeneratedEnvironmentMapLight {
                     3 => -1.0,
                     _ => -v,
                 } / (1.0 + u * u + v * v).sqrt();
-                let c = if up >= 0.0 { horizon.mix(&zenith, up.sqrt()) } else { horizon.mix(&ground, (-4.0 * up).min(1.0)) };
+                let c = if up >= 0.0 {
+                    horizon.mix(&zenith, up.sqrt())
+                } else {
+                    horizon.mix(&ground, (-4.0 * up).min(1.0))
+                };
                 data.extend(Color::from(c).to_srgba().to_u8_array());
             }
         }
     }
-    let size = Extent3d { width: SKY_MAP_SIZE, height: SKY_MAP_SIZE, depth_or_array_layers: 6 };
-    let mut image = Image::new(size, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
-    image.texture_view_descriptor = Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
-    GeneratedEnvironmentMapLight { environment_map: images.add(image), intensity: SKY_BRIGHTNESS, ..default() }
+    let size = Extent3d {
+        width: SKY_MAP_SIZE,
+        height: SKY_MAP_SIZE,
+        depth_or_array_layers: 6,
+    };
+    let mut image = Image::new(
+        size,
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    GeneratedEnvironmentMapLight {
+        environment_map: images.add(image),
+        intensity: SKY_BRIGHTNESS,
+        ..default()
+    }
 }
 
 fn spawn_lights(mut commands: Commands) {
     // The sky light (see `sky_light`) replaces ambient light.
     commands.insert_resource(GlobalAmbientLight::NONE);
     commands.spawn((
-        DirectionalLight { illuminance: 12_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight {
+            illuminance: 12_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::from_xyz(100.0, 300.0, 150.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
@@ -93,12 +127,22 @@ struct Strip {
 
 impl Strip {
     fn new() -> Self {
-        Self { positions: Vec::new(), colors: Vec::new(), indices: Vec::new() }
+        Self {
+            positions: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+        }
     }
 
     /// Adds a closed ribbon along the track between two edges given per sample as
     /// (lateral offset, height above the surface). `left` must be left of `right`.
-    fn ribbon(&mut self, track: &Track, left: impl Fn(usize) -> (f64, f64), right: impl Fn(usize) -> (f64, f64), color: impl Fn(usize) -> [f32; 4]) {
+    fn ribbon(
+        &mut self,
+        track: &Track,
+        left: impl Fn(usize) -> (f64, f64),
+        right: impl Fn(usize) -> (f64, f64),
+        color: impl Fn(usize) -> [f32; 4],
+    ) {
         let base = self.positions.len() as u32;
         let n = track.samples.len();
         for i in 0..=n {
@@ -113,15 +157,19 @@ impl Strip {
         for i in 0..n as u32 {
             let v = base + 2 * i;
             // Counter-clockwise seen from above, so the surface faces up.
-            self.indices.extend_from_slice(&[v, v + 1, v + 2, v + 1, v + 3, v + 2]);
+            self.indices
+                .extend_from_slice(&[v, v + 1, v + 2, v + 1, v + 3, v + 2]);
         }
     }
 
     fn into_mesh(self) -> Mesh {
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
-            .with_inserted_indices(Indices::U32(self.indices));
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
+        .with_inserted_indices(Indices::U32(self.indices));
         mesh.compute_normals();
         mesh
     }
@@ -149,49 +197,119 @@ fn spawn_track(
     let grass = srgb(0.27, 0.45, 0.2);
     let red = srgb(0.8, 0.1, 0.08);
     let white = srgb(0.92, 0.92, 0.92);
-    let kerb_color = |i: usize| if ((i as f64 * spacing) / 3.0) as usize % 2 == 0 { red } else { white };
+    let kerb_color = |i: usize| {
+        if (((i as f64 * spacing) / 3.0) as usize).is_multiple_of(2) {
+            red
+        } else {
+            white
+        }
+    };
 
     let mut road = Strip::new();
-    road.ribbon(track, |k| (track.samples[k].width_left, 0.0), |k| (-track.samples[k].width_right, 0.0), |_| asphalt);
+    road.ribbon(
+        track,
+        |k| (track.samples[k].width_left, 0.0),
+        |k| (-track.samples[k].width_right, 0.0),
+        |_| asphalt,
+    );
     // Start/finish line.
     let mut line = Strip::new();
     let first = &track.samples[0];
     let fwd = first.tangent * 0.5;
-    for (p, off) in [(first.pos - fwd, first.width_left), (first.pos - fwd, -first.width_right), (first.pos + fwd, first.width_left), (first.pos + fwd, -first.width_right)] {
-        line.positions.push(to_bevy(p + first.lateral * off + first.normal * 0.02).to_array());
+    for (p, off) in [
+        (first.pos - fwd, first.width_left),
+        (first.pos - fwd, -first.width_right),
+        (first.pos + fwd, first.width_left),
+        (first.pos + fwd, -first.width_right),
+    ] {
+        line.positions
+            .push(to_bevy(p + first.lateral * off + first.normal * 0.02).to_array());
         line.colors.push(white);
     }
     line.indices.extend_from_slice(&[0, 1, 2, 1, 3, 2]);
 
     let mut kerbs = Strip::new();
-    kerbs.ribbon(track, |k| (track.samples[k].width_left + kerb, lift), |k| (track.samples[k].width_left, lift), kerb_color);
-    kerbs.ribbon(track, |k| (-track.samples[k].width_right, lift), |k| (-track.samples[k].width_right - kerb, lift), kerb_color);
+    kerbs.ribbon(
+        track,
+        |k| (track.samples[k].width_left + kerb, lift),
+        |k| (track.samples[k].width_left, lift),
+        kerb_color,
+    );
+    kerbs.ribbon(
+        track,
+        |k| (-track.samples[k].width_right, lift),
+        |k| (-track.samples[k].width_right - kerb, lift),
+        kerb_color,
+    );
 
     // Flat, in the plane of the road, like the simulated grass surface.
     let mut runoff = Strip::new();
     let run = track.runoff_width;
-    runoff.ribbon(track, |k| (track.samples[k].width_left + kerb + run, 0.0), |k| (track.samples[k].width_left + kerb, 0.0), |_| grass);
-    runoff.ribbon(track, |k| (-track.samples[k].width_right - kerb, 0.0), |k| (-track.samples[k].width_right - kerb - run, 0.0), |_| grass);
+    runoff.ribbon(
+        track,
+        |k| (track.samples[k].width_left + kerb + run, 0.0),
+        |k| (track.samples[k].width_left + kerb, 0.0),
+        |_| grass,
+    );
+    runoff.ribbon(
+        track,
+        |k| (-track.samples[k].width_right - kerb, 0.0),
+        |k| (-track.samples[k].width_right - kerb - run, 0.0),
+        |_| grass,
+    );
 
-    let material = materials.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 0.9, ..default() });
+    let material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.9,
+        ..default()
+    });
     for strip in [road, line, kerbs, runoff] {
-        commands.spawn((Mesh3d(meshes.add(strip.into_mesh())), MeshMaterial3d(material.clone())));
+        commands.spawn((
+            Mesh3d(meshes.add(strip.into_mesh())),
+            MeshMaterial3d(material.clone()),
+        ));
     }
 
     // Ground plane below the lowest point of the track.
-    let min_z = track.samples.iter().map(|s| s.pos.z).fold(f64::INFINITY, f64::min);
+    let min_z = track
+        .samples
+        .iter()
+        .map(|s| s.pos.z)
+        .fold(f64::INFINITY, f64::min);
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(6000.0, 6000.0))),
-        MeshMaterial3d(materials.add(StandardMaterial { base_color: Color::srgb(0.2, 0.36, 0.14), perceptual_roughness: 1.0, ..default() })),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.36, 0.14),
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
         Transform::from_xyz(0.0, (min_z - 1.2) as f32, 0.0),
     ));
 }
 
-fn spawn_car(mut commands: Commands, sim: Res<Simulation>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn spawn_car(
+    mut commands: Commands,
+    sim: Res<Simulation>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let p = &sim.car.model.params;
-    let paint = materials.add(StandardMaterial { base_color: Color::srgb(0.95, 0.45, 0.05), metallic: 0.3, perceptual_roughness: 0.35, ..default() });
-    let dark = materials.add(StandardMaterial { base_color: Color::srgb(0.05, 0.05, 0.06), perceptual_roughness: 0.6, ..default() });
-    let glass = materials.add(StandardMaterial { base_color: Color::srgb(0.1, 0.12, 0.15), perceptual_roughness: 0.1, ..default() });
+    let paint = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.45, 0.05),
+        metallic: 0.3,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    let dark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.05, 0.06),
+        perceptual_roughness: 0.6,
+        ..default()
+    });
+    let glass = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.1, 0.12, 0.15),
+        perceptual_roughness: 0.1,
+        ..default()
+    });
 
     // Body dimensions derived from the chassis so other cars look right too.
     let length = (p.wheelbase + 1.9) as f32;
@@ -244,7 +362,11 @@ fn spawn_car(mut commands: Commands, sim: Res<Simulation>, mut meshes: ResMut<As
             .with_children(|w| {
                 // Cylinder axis is Y; turn it onto the wheel's spin axis (local Z).
                 let axis = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-                w.spawn((Mesh3d(meshes.add(Cylinder::new(r, tire.width as f32))), MeshMaterial3d(dark.clone()), Transform::from_rotation(axis)));
+                w.spawn((
+                    Mesh3d(meshes.add(Cylinder::new(r, tire.width as f32))),
+                    MeshMaterial3d(dark.clone()),
+                    Transform::from_rotation(axis),
+                ));
                 // A spoke so wheel rotation is visible.
                 w.spawn((
                     Mesh3d(meshes.add(Cuboid::new(r * 1.6, 0.08, 0.32))),

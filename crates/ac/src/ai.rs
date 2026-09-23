@@ -28,7 +28,9 @@ pub fn parse(buf: &[u8]) -> Result<Vec<AiPoint>, Error> {
     let mut r = Reader::new(buf);
     let version = r.i32()?;
     if !(1..=64).contains(&version) {
-        return Err(Error::Format(format!("unsupported AI line version {version}")));
+        return Err(Error::Format(format!(
+            "unsupported AI line version {version}"
+        )));
     }
     let count = r.count(20)?;
     let _lap_time = r.i32()?;
@@ -38,10 +40,15 @@ pub fn parse(buf: &[u8]) -> Result<Vec<AiPoint>, Error> {
         let [x, y, z] = r.f32s::<3>()?;
         let _distance = r.f32()?;
         let _id = r.i32()?;
-        points.push(AiPoint { pos: DVec3::new(x.into(), y.into(), z.into()), side_left: None, side_right: None });
+        points.push(AiPoint {
+            pos: DVec3::new(x.into(), y.into(), z.into()),
+            side_left: None,
+            side_right: None,
+        });
     }
     // The extra block is optional in old files.
-    if r.remaining() >= 4 && r.i32()? as usize == count && r.remaining() >= count * EXTRA_FLOATS * 4 {
+    if r.remaining() >= 4 && r.i32()? as usize == count && r.remaining() >= count * EXTRA_FLOATS * 4
+    {
         for p in &mut points {
             let extra = r.f32s::<EXTRA_FLOATS>()?;
             p.side_left = Some(extra[SIDE_LEFT].into());

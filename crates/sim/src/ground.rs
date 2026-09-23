@@ -21,7 +21,11 @@ pub struct SurfaceProps {
 
 impl SurfaceProps {
     pub fn of(kind: Surface) -> Self {
-        Self { kind, grip: kind.grip(), drag: kind.drag() }
+        Self {
+            kind,
+            grip: kind.grip(),
+            drag: kind.drag(),
+        }
     }
 }
 
@@ -56,10 +60,17 @@ impl GroundMeshBuilder {
     }
 
     /// Adds a drivable mesh. `normals` may be empty to use face normals.
-    pub fn add_ground(&mut self, positions: &[DVec3], normals: &[DVec3], indices: &[u32], surface: u16) {
+    pub fn add_ground(
+        &mut self,
+        positions: &[DVec3],
+        normals: &[DVec3],
+        indices: &[u32],
+        surface: u16,
+    ) {
         let base = self.push_verts(positions, normals);
         for t in indices.as_chunks::<3>().0 {
-            self.ground.push(([base + t[0], base + t[1], base + t[2]], surface));
+            self.ground
+                .push(([base + t[0], base + t[1], base + t[2]], surface));
         }
     }
 
@@ -75,9 +86,11 @@ impl GroundMeshBuilder {
         let base = self.verts.len() as u32;
         self.verts.extend_from_slice(positions);
         if normals.len() == positions.len() {
-            self.normals.extend(normals.iter().map(|n| n.normalize_or_zero()));
+            self.normals
+                .extend(normals.iter().map(|n| n.normalize_or_zero()));
         } else {
-            self.normals.extend(std::iter::repeat_n(DVec3::ZERO, positions.len()));
+            self.normals
+                .extend(std::iter::repeat_n(DVec3::ZERO, positions.len()));
         }
         base
     }
@@ -134,7 +147,9 @@ impl GroundMesh {
         for &ti in self.ground_grid.cell(xy) {
             let (t, _) = &self.ground_tris[ti as usize];
             let [a, b, c] = t.map(|i| self.verts[i as usize]);
-            let Some(w) = barycentric(xy, a.truncate(), b.truncate(), c.truncate()) else { continue };
+            let Some(w) = barycentric(xy, a.truncate(), b.truncate(), c.truncate()) else {
+                continue;
+            };
             let z = w.x * a.z + w.y * b.z + w.z * c.z;
             if z <= top && best.is_none_or(|(bz, _, _)| z > bz) {
                 best = Some((z, ti as usize, w));
@@ -156,7 +171,11 @@ impl GroundMesh {
         if normal.dot(face) < 0.9 {
             normal = face;
         }
-        Some(GroundHit { point: xy.extend(z), normal, surface: self.surfaces[*surface as usize] })
+        Some(GroundHit {
+            point: xy.extend(z),
+            normal,
+            surface: self.surfaces[*surface as usize],
+        })
     }
 
     /// Deepest penetration of a sphere into the walls: (unit direction pushing the
@@ -170,7 +189,11 @@ impl GroundMesh {
             let dist = delta.length();
             let depth = radius - dist;
             if depth > 0.0 && best.is_none_or(|(_, d)| depth > d) {
-                let dir = if dist > 1e-9 { delta / dist } else { (b - a).cross(c - a).normalize_or_zero() };
+                let dir = if dist > 1e-9 {
+                    delta / dist
+                } else {
+                    (b - a).cross(c - a).normalize_or_zero()
+                };
                 best = Some((dir, depth));
             }
         }
@@ -240,16 +263,31 @@ impl Grid {
     /// query only needs the cell containing its centre (radius < cell).
     fn build(bounds: impl Iterator<Item = (DVec2, DVec2)> + Clone, cell: f64) -> Self {
         let pad = DVec2::splat(cell);
-        let (lo, hi) = bounds
-            .clone()
-            .fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+        let (lo, hi) = bounds.clone().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
+        );
         if !lo.is_finite() {
-            return Self { origin: DVec2::ZERO, cell, nx: 0, ny: 0, starts: vec![0], items: Vec::new() };
+            return Self {
+                origin: DVec2::ZERO,
+                cell,
+                nx: 0,
+                ny: 0,
+                starts: vec![0],
+                items: Vec::new(),
+            };
         }
         let (lo, hi) = (lo - pad, hi + pad);
         let nx = ((hi.x - lo.x) / cell).ceil() as usize + 1;
         let ny = ((hi.y - lo.y) / cell).ceil() as usize + 1;
-        let mut grid = Self { origin: lo, cell, nx, ny, starts: Vec::new(), items: Vec::new() };
+        let mut grid = Self {
+            origin: lo,
+            cell,
+            nx,
+            ny,
+            starts: Vec::new(),
+            items: Vec::new(),
+        };
 
         let cells = |g: &Self, a: DVec2, b: DVec2| {
             let (x0, y0) = g.coords(a - pad * 0.25);
@@ -281,7 +319,10 @@ impl Grid {
 
     fn coords(&self, p: DVec2) -> (usize, usize) {
         let q = ((p - self.origin) / self.cell).floor();
-        (q.x.clamp(0.0, (self.nx - 1) as f64) as usize, q.y.clamp(0.0, (self.ny - 1) as f64) as usize)
+        (
+            q.x.clamp(0.0, (self.nx - 1) as f64) as usize,
+            q.y.clamp(0.0, (self.ny - 1) as f64) as usize,
+        )
     }
 
     fn cell(&self, p: DVec2) -> &[u32] {
@@ -299,7 +340,12 @@ mod tests {
     use super::*;
 
     fn quad(b: &mut GroundMeshBuilder, lo: DVec2, hi: DVec2, z: f64, surface: u16) {
-        let p = [DVec3::new(lo.x, lo.y, z), DVec3::new(hi.x, lo.y, z), DVec3::new(hi.x, hi.y, z), DVec3::new(lo.x, hi.y, z)];
+        let p = [
+            DVec3::new(lo.x, lo.y, z),
+            DVec3::new(hi.x, lo.y, z),
+            DVec3::new(hi.x, hi.y, z),
+            DVec3::new(lo.x, hi.y, z),
+        ];
         b.add_ground(&p, &[DVec3::Z; 4], &[0, 1, 2, 0, 2, 3], surface);
     }
 
@@ -307,8 +353,20 @@ mod tests {
         let mut b = GroundMeshBuilder::new();
         let road = b.add_surface(SurfaceProps::of(Surface::Asphalt));
         let grass = b.add_surface(SurfaceProps::of(Surface::Grass));
-        quad(&mut b, DVec2::new(-50.0, -50.0), DVec2::new(50.0, 50.0), 0.0, grass);
-        quad(&mut b, DVec2::new(-5.0, -50.0), DVec2::new(5.0, 50.0), 6.0, road);
+        quad(
+            &mut b,
+            DVec2::new(-50.0, -50.0),
+            DVec2::new(50.0, 50.0),
+            0.0,
+            grass,
+        );
+        quad(
+            &mut b,
+            DVec2::new(-5.0, -50.0),
+            DVec2::new(5.0, 50.0),
+            6.0,
+            road,
+        );
         b.build()
     }
 
@@ -330,7 +388,12 @@ mod tests {
         let mut b = GroundMeshBuilder::new();
         let s = b.add_surface(SurfaceProps::of(Surface::Asphalt));
         // z = 0.1 x
-        let p = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(10.0, 0.0, 1.0), DVec3::new(10.0, 10.0, 1.0), DVec3::new(0.0, 10.0, 0.0)];
+        let p = [
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(10.0, 0.0, 1.0),
+            DVec3::new(10.0, 10.0, 1.0),
+            DVec3::new(0.0, 10.0, 0.0),
+        ];
         b.add_ground(&p, &[], &[0, 1, 2, 0, 2, 3], s);
         let g = b.build();
         let hit = g.raycast_down(DVec3::new(5.0, 5.0, 2.0), 1.0).unwrap();
@@ -343,7 +406,12 @@ mod tests {
     fn sphere_touches_wall() {
         let mut b = GroundMeshBuilder::new();
         // Wall in the plane x = 10.
-        let p = [DVec3::new(10.0, -5.0, 0.0), DVec3::new(10.0, 5.0, 0.0), DVec3::new(10.0, 5.0, 3.0), DVec3::new(10.0, -5.0, 3.0)];
+        let p = [
+            DVec3::new(10.0, -5.0, 0.0),
+            DVec3::new(10.0, 5.0, 0.0),
+            DVec3::new(10.0, 5.0, 3.0),
+            DVec3::new(10.0, -5.0, 3.0),
+        ];
         b.add_wall(&p, &[0, 1, 2, 0, 2, 3]);
         let g = b.build();
         let (dir, depth) = g.wall_contact(DVec3::new(9.8, 0.0, 0.3), 0.33).unwrap();

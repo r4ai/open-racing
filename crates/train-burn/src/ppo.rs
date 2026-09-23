@@ -144,7 +144,12 @@ pub struct TrainContext {
 }
 
 /// Trains a policy on `env` and writes checkpoints to `cfg.out_dir`.
-pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: TrainContext, device: &B::Device) {
+pub fn train<B: AutodiffBackend>(
+    env: &mut dyn VecEnv,
+    cfg: &PpoConfig,
+    ctx: TrainContext,
+    device: &B::Device,
+) {
     let n = env.num_envs();
     let obs_dim = env.observation_space().dim();
     let act_space = env.action_space().clone();
@@ -154,10 +159,16 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
     let mut agent: Agent<B> = match &cfg.init {
         Some(dir) => {
             let init = load_meta(dir).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()));
-            assert_eq!(init.obs_names, meta.obs_names, "observation layout of {} differs from the env", dir.display());
+            assert_eq!(
+                init.obs_names,
+                meta.obs_names,
+                "observation layout of {} differs from the env",
+                dir.display()
+            );
             meta.hidden = init.hidden;
             meta.normalizer = init.normalizer;
-            load_agent(dir, &meta, device).unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()))
+            load_agent(dir, &meta, device)
+                .unwrap_or_else(|e| panic!("loading {}: {e}", dir.display()))
         }
         None => {
             meta.hidden = cfg.hidden.clone();
@@ -185,7 +196,8 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
     for iteration in 1..=cfg.iterations {
         let started = Instant::now();
         // Linear decay to zero lets the policy settle instead of jittering around the optimum.
-        let learning_rate = cfg.learning_rate * (1.0 - (iteration - 1) as f64 / cfg.iterations as f64);
+        let learning_rate =
+            cfg.learning_rate * (1.0 - (iteration - 1) as f64 / cfg.iterations as f64);
         let policy = agent.valid();
         let std: Vec<f32> = to_vec(policy.log_std.val().exp());
         let mut episodes = EpisodeSummary::default();
@@ -225,13 +237,18 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
                 }
                 let mut normed = vec![0.0; rows.len()];
                 meta.normalizer.normalize(&rows, &mut normed);
-                let v = to_vec(policy.critic.forward(to_tensor(normed, [truncated.len(), obs_dim], device)));
+                let v = to_vec(policy.critic.forward(to_tensor(
+                    normed,
+                    [truncated.len(), obs_dim],
+                    device,
+                )));
                 for (k, &e) in truncated.iter().enumerate() {
                     rewards[e] += cfg.gamma * v[k];
                 }
             }
             for e in 0..n {
-                buf.dones[row + e] = (result.terminated[e] != 0 || result.truncated[e] != 0) as u8 as f32;
+                buf.dones[row + e] =
+                    (result.terminated[e] != 0 || result.truncated[e] != 0) as u8 as f32;
             }
             raw_obs.copy_from_slice(result.obs);
             for (_, stats) in env.finished_episodes() {
@@ -249,12 +266,20 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
 
         // ---- Advantages (GAE) ----------------------------------------------------------
         meta.normalizer.normalize(&raw_obs, &mut norm_obs);
-        let last_value = to_vec(policy.critic.forward(to_tensor(norm_obs.clone(), [n, obs_dim], device)));
+        let last_value = to_vec(policy.critic.forward(to_tensor(
+            norm_obs.clone(),
+            [n, obs_dim],
+            device,
+        )));
         let mut gae = vec![0.0f32; n];
         for t in (0..cfg.rollout_len).rev() {
             for e in 0..n {
                 let i = t * n + e;
-                let next_value = if t + 1 == cfg.rollout_len { last_value[e] } else { buf.values[i + n] };
+                let next_value = if t + 1 == cfg.rollout_len {
+                    last_value[e]
+                } else {
+                    buf.values[i + n]
+                };
                 let not_done = 1.0 - buf.dones[i];
                 let delta = buf.rewards[i] + cfg.gamma * next_value * not_done - buf.values[i];
                 gae[e] = delta + cfg.gamma * cfg.gae_lambda * not_done * gae[e];
@@ -274,7 +299,11 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
                 let m = chunk.len();
                 let mut obs = Vec::with_capacity(m * obs_dim);
                 let mut act = Vec::with_capacity(m * act_dim);
-                let (mut old_logp, mut adv, mut ret) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+                let (mut old_logp, mut adv, mut ret) = (
+                    Vec::with_capacity(m),
+                    Vec::with_capacity(m),
+                    Vec::with_capacity(m),
+                );
                 for &i in chunk {
                     obs.extend_from_slice(&buf.obs[i * obs_dim..(i + 1) * obs_dim]);
                     act.extend_from_slice(&buf.actions[i * act_dim..(i + 1) * act_dim]);
@@ -283,7 +312,9 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
                     ret.push(buf.returns[i]);
                 }
                 let adv_mean = adv.iter().sum::<f32>() / m as f32;
-                let adv_std = (adv.iter().map(|a| (a - adv_mean).powi(2)).sum::<f32>() / m as f32).sqrt() + 1e-8;
+                let adv_std = (adv.iter().map(|a| (a - adv_mean).powi(2)).sum::<f32>() / m as f32)
+                    .sqrt()
+                    + 1e-8;
                 adv.iter_mut().for_each(|a| *a = (*a - adv_mean) / adv_std);
 
                 let obs = to_tensor::<B>(obs, [m, obs_dim], device);
@@ -293,9 +324,14 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
                 let ret = to_tensor::<B>(ret, [m, 1], device);
 
                 let (mean, value) = agent.forward(obs);
-                let log_std = agent.log_std.val().unsqueeze_dim::<2>(0).expand([m, act_dim]);
+                let log_std = agent
+                    .log_std
+                    .val()
+                    .unsqueeze_dim::<2>(0)
+                    .expand([m, act_dim]);
                 let z = (act - mean) / log_std.clone().exp();
-                let logp = (z.powf_scalar(2.0).mul_scalar(-0.5) - log_std.clone() - 0.5 * LOG_2PI).sum_dim(1);
+                let logp = (z.powf_scalar(2.0).mul_scalar(-0.5) - log_std.clone() - 0.5 * LOG_2PI)
+                    .sum_dim(1);
                 let log_ratio = logp - old_logp;
                 let ratio = log_ratio.clone().exp();
                 let surr1 = ratio.clone() * adv.clone();
@@ -331,7 +367,9 @@ pub fn train<B: AutodiffBackend>(env: &mut dyn VecEnv, cfg: &PpoConfig, ctx: Tra
             episodes.return_sum / ep,
             episodes.progress_sum / ep,
             episodes.laps,
-            episodes.best_lap.map_or(String::new(), |l| format!("{l:.3}")),
+            episodes
+                .best_lap
+                .map_or(String::new(), |l| format!("{l:.3}")),
             pl_sum / u,
             vl_sum / u,
             kl_sum / u,

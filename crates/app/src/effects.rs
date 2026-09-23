@@ -54,8 +54,10 @@ pub struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn)
-            .add_systems(Update, (update_marks, update_smoke).after(driving::step_simulation));
+        app.add_systems(Startup, spawn).add_systems(
+            Update,
+            (update_marks, update_smoke).after(driving::step_simulation),
+        );
     }
 }
 
@@ -83,7 +85,15 @@ impl SkidMarks {
     fn push(&mut self, from: TrailEnd, to: TrailEnd, normal: Vec3) {
         let v = self.next * 4;
         let color = |a: f32| [0.02, 0.02, 0.02, a * MARK_OPACITY];
-        for (k, (p, a)) in [(from.left, from.alpha), (from.right, from.alpha), (to.left, to.alpha), (to.right, to.alpha)].into_iter().enumerate() {
+        for (k, (p, a)) in [
+            (from.left, from.alpha),
+            (from.right, from.alpha),
+            (to.left, to.alpha),
+            (to.right, to.alpha),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             self.positions[v + k] = p.to_array();
             self.normals[v + k] = normal.to_array();
             self.colors[v + k] = color(a);
@@ -124,17 +134,24 @@ impl Smoke {
 
 /// Quad indices for `quads` independent quads laid out as (a-left, a-right, b-left, b-right).
 fn quad_indices(quads: usize) -> Indices {
-    Indices::U32((0..quads as u32).flat_map(|q| [0, 1, 2, 1, 3, 2].map(|i| 4 * q + i)).collect())
+    Indices::U32(
+        (0..quads as u32)
+            .flat_map(|q| [0, 1, 2, 1, 3, 2].map(|i| 4 * q + i))
+            .collect(),
+    )
 }
 
 fn dynamic_mesh(quads: usize) -> Mesh {
     let n = quads * 4;
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; n])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; n])
-        .with_inserted_indices(quad_indices(quads))
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; n])
+    .with_inserted_indices(quad_indices(quads))
 }
 
 /// Soft round puff: white with alpha falling off towards the edge.
@@ -149,7 +166,11 @@ fn puff_texture() -> Image {
         })
         .collect();
     Image::new(
-        Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -157,7 +178,12 @@ fn puff_texture() -> Image {
     )
 }
 
-fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>) {
+fn spawn(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let marks = meshes.add(dynamic_mesh(MARK_CAPACITY));
     commands.spawn((
         Mesh3d(marks.clone()),
@@ -221,7 +247,11 @@ fn tire_smoke(w: &WheelTelemetry, tire: &TireCondition) -> f64 {
     smoothstep(SMOKE_TEMPERATURE.0, SMOKE_TEMPERATURE.1, contact)
 }
 
-fn update_marks(sim: Res<Simulation>, mut marks: ResMut<SkidMarks>, mut meshes: ResMut<Assets<Mesh>>) {
+fn update_marks(
+    sim: Res<Simulation>,
+    mut marks: ResMut<SkidMarks>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
     let car = &sim.car;
     let static_load = car.model.params.mass * GRAVITY / 4.0;
     let moving = smoothstep(0.5, 3.0, car.speed());
@@ -237,18 +267,41 @@ fn update_marks(sim: Res<Simulation>, mut marks: ResMut<SkidMarks>, mut meshes: 
         let normal = to_bevy(q.normal);
         let center = to_bevy(w.contact + q.normal * MARK_LIFT);
         let Some(last) = marks.trails[i] else {
-            marks.trails[i] = Some(TrailEnd { center, left: center, right: center, alpha });
+            marks.trails[i] = Some(TrailEnd {
+                center,
+                left: center,
+                right: center,
+                alpha,
+            });
             continue;
         };
         let step = center - last.center;
         let length = step.length();
         if length > MARK_BREAK {
-            marks.trails[i] = Some(TrailEnd { center, left: center, right: center, alpha });
+            marks.trails[i] = Some(TrailEnd {
+                center,
+                left: center,
+                right: center,
+                alpha,
+            });
         } else if length >= MARK_SEGMENT {
             let side = normal.cross(step / length).normalize_or_zero() * MARK_HALF_WIDTH;
-            let end = TrailEnd { center, left: center + side, right: center - side, alpha };
+            let end = TrailEnd {
+                center,
+                left: center + side,
+                right: center - side,
+                alpha,
+            };
             // A fresh trail has no width yet; give its first edge this segment's direction.
-            let start = if last.left == last.right { TrailEnd { left: last.center + side, right: last.center - side, ..last } } else { last };
+            let start = if last.left == last.right {
+                TrailEnd {
+                    left: last.center + side,
+                    right: last.center - side,
+                    ..last
+                }
+            } else {
+                last
+            };
             marks.push(start, end, normal);
             marks.trails[i] = Some(end);
             dirty = true;
@@ -289,11 +342,23 @@ fn update_smoke(
             Surface::Grass if w.load > 0.0 => {
                 // Thrown up by speed or by a spinning / sliding tyre.
                 let dust = smoothstep(3.0, 25.0, speed).max(slide(w) * moving) as f32;
-                (DUST_RATE * dust, [0.45, 0.38, 0.27], 0.35 * dust, 1.4, (0.4, 2.2))
+                (
+                    DUST_RATE * dust,
+                    [0.45, 0.38, 0.27],
+                    0.35 * dust,
+                    1.4,
+                    (0.4, 2.2),
+                )
             }
             _ => {
                 let s = tire_smoke(w, &car.state.wheels[i].tire) as f32;
-                (SMOKE_RATE * s, [0.82, 0.82, 0.84], 0.45 * s.sqrt(), 2.6, (0.5, 2.0 + 1.5 * s))
+                (
+                    SMOKE_RATE * s,
+                    [0.82, 0.82, 0.84],
+                    0.45 * s.sqrt(),
+                    2.6,
+                    (0.5, 2.0 + 1.5 * s),
+                )
             }
         };
         smoke.owed[i] += rate * dt;
@@ -321,21 +386,42 @@ fn update_smoke(
     }
 
     let Ok(camera) = cameras.single() else { return };
-    let Some(mut mesh) = meshes.get_mut(&smoke.mesh) else { return };
+    let Some(mut mesh) = meshes.get_mut(&smoke.mesh) else {
+        return;
+    };
     let eye = camera.translation();
     let (right, up) = (camera.right().as_vec3(), camera.up().as_vec3());
     // Blended without depth writes, so draw back to front.
-    smoke.particles.sort_by(|a, b| b.pos.distance_squared(eye).total_cmp(&a.pos.distance_squared(eye)));
+    smoke.particles.sort_by(|a, b| {
+        b.pos
+            .distance_squared(eye)
+            .total_cmp(&a.pos.distance_squared(eye))
+    });
 
     let n = SMOKE_CAPACITY * 4;
-    let (mut positions, mut uvs, mut colors) = (vec![[0.0f32; 3]; n], vec![[0.0f32; 2]; n], vec![[0.0f32; 4]; n]);
+    let (mut positions, mut uvs, mut colors) = (
+        vec![[0.0f32; 3]; n],
+        vec![[0.0f32; 2]; n],
+        vec![[0.0f32; 4]; n],
+    );
     for (q, p) in smoke.particles.iter().enumerate() {
         let t = p.age / p.life;
         let radius = 0.5 * (p.size.0 + (p.size.1 - p.size.0) * (1.0 - (1.0 - t).powi(2)));
         let alpha = p.opacity * (p.age / 0.12).min(1.0) * (1.0 - t).powf(1.5);
         let (sin, cos) = (p.spin + 0.3 * p.age).sin_cos();
-        let (r, u) = ((right * cos + up * sin) * radius, (up * cos - right * sin) * radius);
-        for (k, (corner, uv)) in [(-r + u, [0.0, 0.0]), (r + u, [1.0, 0.0]), (-r - u, [0.0, 1.0]), (r - u, [1.0, 1.0])].into_iter().enumerate() {
+        let (r, u) = (
+            (right * cos + up * sin) * radius,
+            (up * cos - right * sin) * radius,
+        );
+        for (k, (corner, uv)) in [
+            (-r + u, [0.0, 0.0]),
+            (r + u, [1.0, 0.0]),
+            (-r - u, [0.0, 1.0]),
+            (r - u, [1.0, 1.0]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             positions[4 * q + k] = (p.pos + corner).to_array();
             uvs[4 * q + k] = uv;
             colors[4 * q + k] = [p.color[0], p.color[1], p.color[2], alpha];

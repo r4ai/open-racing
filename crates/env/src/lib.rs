@@ -73,7 +73,11 @@ impl EnvConfig {
 
     /// Number of action dimensions: the gear request only exists without `auto_shift`.
     pub fn action_dim(&self) -> usize {
-        if self.auto_shift { MAX_ACTION_DIM - 1 } else { MAX_ACTION_DIM }
+        if self.auto_shift {
+            MAX_ACTION_DIM - 1
+        } else {
+            MAX_ACTION_DIM
+        }
     }
 
     pub fn obs_layout(&self) -> ObsLayout {
@@ -150,7 +154,11 @@ impl Env {
     pub fn reset(&mut self, shared: &EnvShared) {
         let cfg = &shared.config;
         let track = &*shared.track;
-        let s = if cfg.random_start { self.rng.uniform(0.0, track.length) } else { 0.0 };
+        let s = if cfg.random_start {
+            self.rng.uniform(0.0, track.length)
+        } else {
+            0.0
+        };
         let d = self.rng.uniform(cfg.start_offset.0, cfg.start_offset.1);
         let speed = self.rng.uniform(cfg.start_speed.0, cfg.start_speed.1);
         let gear = gear_for_speed(&shared.car, speed);
@@ -164,7 +172,14 @@ impl Env {
     }
 
     pub fn observe(&self, shared: &EnvShared, out: &mut [f32]) {
-        obs::encode(&shared.config.obs_layout(), &self.car, &shared.track, self.lap.hint(), &self.input, out);
+        obs::encode(
+            &shared.config.obs_layout(),
+            &self.car,
+            &shared.track,
+            self.lap.hint(),
+            &self.input,
+            out,
+        );
     }
 
     /// Applies one agent action. Returns the reward and whether the episode ended.
@@ -190,9 +205,23 @@ impl Env {
 
         let speed = self.car.speed();
         let forward = st.orientation * DVec3::X;
-        let heading_cos = q.tangent.truncate().normalize().dot(forward.truncate().normalize());
-        let half_width = if q.d >= 0.0 { q.width_left } else { q.width_right };
-        let wheels_off = self.car.telemetry.wheels.iter().filter(|w| w.surface == Surface::Grass).count();
+        let heading_cos = q
+            .tangent
+            .truncate()
+            .normalize()
+            .dot(forward.truncate().normalize());
+        let half_width = if q.d >= 0.0 {
+            q.width_left
+        } else {
+            q.width_right
+        };
+        let wheels_off = self
+            .car
+            .telemetry
+            .wheels
+            .iter()
+            .filter(|w| w.surface == Surface::Grass)
+            .count();
         let prev = self.info;
         let info = StepInfo {
             progress,
@@ -203,9 +232,21 @@ impl Env {
             heading_cos,
             steer_change: self.input.steer - prev_steer,
             time: st.time,
-            off_track_time: if wheels_off == 4 { prev.off_track_time + dt } else { 0.0 },
-            stuck_time: if speed < 1.0 && st.time > 3.0 { prev.stuck_time + dt } else { 0.0 },
-            wrong_way_time: if heading_cos < -0.3 && speed > 3.0 { prev.wrong_way_time + dt } else { 0.0 },
+            off_track_time: if wheels_off == 4 {
+                prev.off_track_time + dt
+            } else {
+                0.0
+            },
+            stuck_time: if speed < 1.0 && st.time > 3.0 {
+                prev.stuck_time + dt
+            } else {
+                0.0
+            },
+            wrong_way_time: if heading_cos < -0.3 && speed > 3.0 {
+                prev.wrong_way_time + dt
+            } else {
+                0.0
+            },
             invalid: !(st.position.is_finite() && st.velocity.is_finite()),
         };
         self.info = info;
@@ -250,7 +291,11 @@ impl Actuator {
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
             brake: f64::from(action[2]).clamp(0.0, 1.0),
             clutch: 0.0,
-            shift: if cfg.auto_shift { AutoShift.shift(car) } else { self.take_shift(car) },
+            shift: if cfg.auto_shift {
+                AutoShift.shift(car)
+            } else {
+                self.take_shift(car)
+            },
         }
     }
 
@@ -276,9 +321,14 @@ impl Actuator {
 fn gear_for_speed(car: &CarModel, speed: f64) -> i32 {
     let p = &car.params;
     let wheel = speed / car.rear_tire.p.radius;
-    let rpm = |g: usize| wheel * p.gearbox.ratios[g] * p.gearbox.final_drive * 60.0 / std::f64::consts::TAU;
+    let rpm = |g: usize| {
+        wheel * p.gearbox.ratios[g] * p.gearbox.final_drive * 60.0 / std::f64::consts::TAU
+    };
     let target = 0.55 * p.engine.limiter_rpm;
-    (0..p.gearbox.ratios.len()).rev().find(|&g| rpm(g) >= target).map_or(1, |g| g as i32 + 1)
+    (0..p.gearbox.ratios.len())
+        .rev()
+        .find(|&g| rpm(g) >= target)
+        .map_or(1, |g| g as i32 + 1)
 }
 
 /// Many environments stepped in parallel with results in flat buffers.
@@ -310,7 +360,16 @@ impl BatchEnv {
     pub fn new(shared: EnvShared, num_envs: usize) -> Self {
         let obs_dim = shared.config.obs_layout().spec().dim();
         let envs = (0..num_envs)
-            .map(|i| Env::new(&shared, shared.config.seed.wrapping_mul(0x1000_0001).wrapping_add(i as u64)))
+            .map(|i| {
+                Env::new(
+                    &shared,
+                    shared
+                        .config
+                        .seed
+                        .wrapping_mul(0x1000_0001)
+                        .wrapping_add(i as u64),
+                )
+            })
             .collect();
         let mut batch = Self {
             envs,
@@ -371,7 +430,11 @@ impl BatchEnv {
     pub fn step(&mut self, actions: &[f32]) -> BatchStep<'_> {
         let shared = &self.shared;
         let action_dim = shared.config.action_dim();
-        assert_eq!(actions.len(), self.envs.len() * action_dim, "actions must be num_envs × {action_dim}");
+        assert_eq!(
+            actions.len(),
+            self.envs.len() * action_dim,
+            "actions must be num_envs × {action_dim}"
+        );
         let d = self.obs_dim;
         (
             self.envs.par_iter_mut(),

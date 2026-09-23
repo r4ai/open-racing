@@ -15,7 +15,12 @@ struct PurePursuit {
 impl PurePursuit {
     fn new(space: &BoxSpace) -> Self {
         let idx = |n: &str| space.names.iter().position(|x| x == n).unwrap();
-        Self { ix: idx("ahead_2_x"), iy: idx("ahead_2_y"), iv: idx("vel_long"), obs_dim: space.dim() }
+        Self {
+            ix: idx("ahead_2_x"),
+            iy: idx("ahead_2_y"),
+            iv: idx("vel_long"),
+            obs_dim: space.dim(),
+        }
     }
 }
 
@@ -52,15 +57,28 @@ fn buffers_match_spaces() {
 #[test]
 fn privileged_obs_extends_space() {
     let base = spec(EnvConfig::default()).observation_space().dim();
-    let priv_ = spec(EnvConfig { privileged_obs: true, ..Default::default() }).observation_space().dim();
+    let priv_ = spec(EnvConfig {
+        privileged_obs: true,
+        ..Default::default()
+    })
+    .observation_space()
+    .dim();
     assert_eq!(priv_, base + 12);
 }
 
 #[test]
 fn manual_shift_adds_a_gear_action() {
-    let spec = spec(EnvConfig { auto_shift: false, random_start: false, start_speed: (0.0, 0.0), ..Default::default() });
+    let spec = spec(EnvConfig {
+        auto_shift: false,
+        random_start: false,
+        start_speed: (0.0, 0.0),
+        ..Default::default()
+    });
     let mut env = spec.make_vec_env(1);
-    assert_eq!(env.action_space().names, ["steer", "throttle", "brake", "shift"]);
+    assert_eq!(
+        env.action_space().names,
+        ["steer", "throttle", "brake", "shift"]
+    );
     env.reset(0);
     let mut run = |shifts: &[f32]| {
         for &shift in shifts {
@@ -70,7 +88,11 @@ fn manual_shift_adds_a_gear_action() {
     };
     let once = |shift: f32| [[shift].as_slice(), &[0.0; 9]].concat();
     assert_eq!(run(&once(1.0)), 2, "one request shifts exactly one gear");
-    assert_eq!(run(&[1.0; 50]), 6, "a held request keeps shifting up to the top gear");
+    assert_eq!(
+        run(&[1.0; 50]),
+        6,
+        "a held request keeps shifting up to the top gear"
+    );
     assert_eq!(run(&[-1.0; 50]), 1, "never shifts below first gear");
 }
 
@@ -86,7 +108,10 @@ fn reckless_driving_terminates_and_autoresets() {
         assert!(r.obs.iter().all(|x| x.is_finite()));
         episodes += r.terminated.iter().filter(|&&t| t != 0).count();
     }
-    assert!(episodes > 0, "full lock + full throttle should leave the track");
+    assert!(
+        episodes > 0,
+        "full lock + full throttle should leave the track"
+    );
 }
 
 #[test]
@@ -98,7 +123,12 @@ fn same_seed_same_rollout() {
         let actions = [0.1, 0.5, 0.0].repeat(4);
         let mut sum = 0.0;
         for _ in 0..500 {
-            sum += env.step(&actions).rewards.iter().map(|&r| r as f64).sum::<f64>();
+            sum += env
+                .step(&actions)
+                .rewards
+                .iter()
+                .map(|&r| r as f64)
+                .sum::<f64>();
         }
         (sum, env.reset(0).to_vec())
     };
@@ -107,7 +137,12 @@ fn same_seed_same_rollout() {
 
 #[test]
 fn observation_supports_a_simple_driver() {
-    let spec = spec(EnvConfig { random_start: false, start_speed: (20.0, 20.0), start_offset: (0.0, 0.0), ..Default::default() });
+    let spec = spec(EnvConfig {
+        random_start: false,
+        start_speed: (20.0, 20.0),
+        start_offset: (0.0, 0.0),
+        ..Default::default()
+    });
     let mut env = spec.make_vec_env(1);
     let mut policy = PurePursuit::new(env.observation_space());
     let mut obs = env.reset(0).to_vec();

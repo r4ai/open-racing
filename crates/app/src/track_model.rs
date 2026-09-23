@@ -3,7 +3,10 @@
 //! mask-blended detail layers.
 
 use bevy::asset::{RenderAssetUsages, embedded_asset};
-use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType};
+use bevy::image::{
+    CompressedImageFormatSupport, CompressedImageFormats, ImageAddressMode, ImageSampler,
+    ImageSamplerDescriptor, ImageType,
+};
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
@@ -104,15 +107,26 @@ struct Images<'a> {
 impl Images<'_> {
     fn get(&mut self, index: u32, srgb: bool) -> Option<Handle<Image>> {
         let i = index as usize;
-        let cache = if srgb { &mut self.srgb } else { &mut self.linear };
+        let cache = if srgb {
+            &mut self.srgb
+        } else {
+            &mut self.linear
+        };
         if let Some(handle) = &cache[i] {
             return handle.clone();
         }
         let data = &self.visual.textures[i].data;
-        let handle = Image::from_buffer(data, ImageType::Extension("dds"), self.formats, srgb, self.sampler.clone(), RenderAssetUsages::RENDER_WORLD)
-            .inspect_err(|e| warn!("track texture {i}: {e}"))
-            .ok()
-            .map(|img| self.images.add(img));
+        let handle = Image::from_buffer(
+            data,
+            ImageType::Extension("dds"),
+            self.formats,
+            srgb,
+            self.sampler.clone(),
+            RenderAssetUsages::RENDER_WORLD,
+        )
+        .inspect_err(|e| warn!("track texture {i}: {e}"))
+        .ok()
+        .map(|img| self.images.add(img));
         cache[i] = Some(handle.clone());
         handle
     }
@@ -136,7 +150,14 @@ pub fn spawn(
         ..ImageSamplerDescriptor::linear()
     });
     let n = visual.textures.len();
-    let mut images = Images { visual: &visual, formats, sampler, images: &mut images, srgb: vec![None; n], linear: vec![None; n] };
+    let mut images = Images {
+        visual: &visual,
+        formats,
+        sampler,
+        images: &mut images,
+        srgb: vec![None; n],
+        linear: vec![None; n],
+    };
     let mats: Vec<Handle<TrackMaterial>> = visual
         .materials
         .iter()
@@ -170,12 +191,20 @@ pub fn spawn(
             }
             if let Some(d) = &m.detail {
                 let layer = |i: usize| d.layers[i];
-                extension.params.scales = Vec4::from_array(std::array::from_fn(|i| layer(i).map_or(1.0, |l| l.scale)));
-                extension.params.enabled = Vec4::from_array(std::array::from_fn(|i| if layer(i).is_some() { 1.0 } else { 0.0 }));
+                extension.params.scales =
+                    Vec4::from_array(std::array::from_fn(|i| layer(i).map_or(1.0, |l| l.scale)));
+                extension.params.enabled = Vec4::from_array(std::array::from_fn(|i| {
+                    if layer(i).is_some() { 1.0 } else { 0.0 }
+                }));
                 extension.params.multiplier = d.multiplier;
                 extension.params.flags |= DETAIL | if d.world_uv { WORLD_UV } else { 0 };
                 extension.mask = images.get(d.mask, false);
-                [extension.layer_r, extension.layer_g, extension.layer_b, extension.layer_a] = std::array::from_fn(|i| layer(i).and_then(|l| images.get(l.texture, true)));
+                [
+                    extension.layer_r,
+                    extension.layer_g,
+                    extension.layer_b,
+                    extension.layer_a,
+                ] = std::array::from_fn(|i| layer(i).and_then(|l| images.get(l.texture, true)));
             }
             materials.add(TrackMaterial { base, extension })
         })
@@ -184,12 +213,24 @@ pub fn spawn(
     for m in visual.meshes {
         // As `to_bevy`, without the round trip through f64.
         let convert = |[x, y, z]: [f32; 3]| [x, z, -y];
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions.into_iter().map(convert).collect::<Vec<_>>());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m.normals.into_iter().map(convert).collect::<Vec<_>>());
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            m.positions.into_iter().map(convert).collect::<Vec<_>>(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            m.normals.into_iter().map(convert).collect::<Vec<_>>(),
+        );
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs);
         mesh.insert_indices(Indices::U32(m.indices));
-        let mut entity = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mats[m.material as usize].clone())));
+        let mut entity = commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(mats[m.material as usize].clone()),
+        ));
         if !m.cast_shadows {
             entity.insert(NotShadowCaster);
         }

@@ -41,11 +41,17 @@ pub struct Material {
 
 impl Material {
     pub fn property(&self, name: &str) -> Option<f32> {
-        self.properties.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+        self.properties
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|&(_, v)| v)
     }
 
     pub fn texture(&self, sampler: &str) -> Option<&str> {
-        self.samplers.iter().find(|(s, _)| s == sampler).map(|(_, t)| t.as_str())
+        self.samplers
+            .iter()
+            .find(|(s, _)| s == sampler)
+            .map(|(_, t)| t.as_str())
     }
 }
 
@@ -81,12 +87,20 @@ pub struct Kn5 {
 
 pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
     if !buf.starts_with(MAGIC) {
-        return Err(Error::Format("not a KN5 file (it may be encrypted or protected, which is not supported)".into()));
+        return Err(Error::Format(
+            "not a KN5 file (it may be encrypted or protected, which is not supported)".into(),
+        ));
     }
     let mut r = Reader::new(&buf[MAGIC.len()..]);
-    let mut kn5 = Kn5 { version: r.i32()?, ..Default::default() };
+    let mut kn5 = Kn5 {
+        version: r.i32()?,
+        ..Default::default()
+    };
     if !(1..=6).contains(&kn5.version) {
-        return Err(Error::Format(format!("unsupported KN5 version {}", kn5.version)));
+        return Err(Error::Format(format!(
+            "unsupported KN5 version {}",
+            kn5.version
+        )));
     }
     if kn5.version > 5 {
         r.i32()?;
@@ -96,12 +110,18 @@ pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
         let _kind = r.i32()?;
         let name = r.string()?;
         let size = r.count(1)?;
-        kn5.textures.push(Texture { name, data: r.bytes(size)?.to_vec() });
+        kn5.textures.push(Texture {
+            name,
+            data: r.bytes(size)?.to_vec(),
+        });
     }
 
     for _ in 0..r.count(12)? {
         let _name = r.string()?;
-        let mut m = Material { shader: r.string()?, ..Default::default() };
+        let mut m = Material {
+            shader: r.string()?,
+            ..Default::default()
+        };
         m.blend_mode = r.u8()?;
         if kn5.version > 4 {
             m.alpha_tested = r.u8()? != 0;
@@ -125,7 +145,10 @@ pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
     if r.remaining() > 0 {
         // Every byte of a plain file belongs to the node tree; leftovers mean a
         // variant this reader does not understand, such as a protected file.
-        return Err(Error::Format("unsupported KN5 variant (it may be encrypted or protected, which is not supported)".into()));
+        return Err(Error::Format(
+            "unsupported KN5 variant (it may be encrypted or protected, which is not supported)"
+                .into(),
+        ));
     }
     Ok(kn5)
 }
@@ -145,7 +168,10 @@ fn node(r: &mut Reader, kn5: &mut Kn5, parent: DMat4, depth: usize) -> Result<()
             // column-major layout glam expects for column vectors.
             let m: [f32; 16] = r.f32s()?;
             world = parent * DMat4::from_cols_array(&m.map(f64::from));
-            kn5.dummies.push(Dummy { name, position: world.w_axis.truncate() });
+            kn5.dummies.push(Dummy {
+                name,
+                position: world.w_axis.truncate(),
+            });
         }
         2 => mesh(r, kn5, name, parent)?,
         3 => skinned(r)?,
@@ -162,11 +188,19 @@ fn mesh(r: &mut Reader, kn5: &mut Kn5, name: String, world: DMat4) -> Result<(),
     let visible = r.u8()? != 0;
     let _transparent = r.u8()?;
     let vertex_count = r.count(VERTEX_SIZE)?;
-    let (mut positions, mut normals, mut uvs) = (Vec::with_capacity(vertex_count), Vec::with_capacity(vertex_count), Vec::with_capacity(vertex_count));
+    let (mut positions, mut normals, mut uvs) = (
+        Vec::with_capacity(vertex_count),
+        Vec::with_capacity(vertex_count),
+        Vec::with_capacity(vertex_count),
+    );
     for _ in 0..vertex_count {
         let [px, py, pz, nx, ny, nz, u, v, _, _, _] = r.f32s::<11>()?;
         positions.push(world.transform_point3(DVec3::new(px.into(), py.into(), pz.into())));
-        normals.push(world.transform_vector3(DVec3::new(nx.into(), ny.into(), nz.into())).normalize_or_zero());
+        normals.push(
+            world
+                .transform_vector3(DVec3::new(nx.into(), ny.into(), nz.into()))
+                .normalize_or_zero(),
+        );
         uvs.push([u, v]);
     }
     let index_count = r.count(2)?;
@@ -174,7 +208,9 @@ fn mesh(r: &mut Reader, kn5: &mut Kn5, name: String, world: DMat4) -> Result<(),
     for _ in 0..index_count {
         let i = r.u16()? as u32;
         if i as usize >= vertex_count {
-            return Err(Error::Format(format!("mesh {name}: index {i} out of range")));
+            return Err(Error::Format(format!(
+                "mesh {name}: index {i} out of range"
+            )));
         }
         indices.push(i);
     }
@@ -184,7 +220,17 @@ fn mesh(r: &mut Reader, kn5: &mut Kn5, name: String, world: DMat4) -> Result<(),
     let _lod_in_out: [f32; 2] = r.f32s()?;
     let _bounding_sphere: [f32; 4] = r.f32s()?;
     let renderable = r.u8()? != 0;
-    kn5.meshes.push(Mesh { name, visible, renderable, cast_shadows, material: material.max(0) as usize, positions, normals, uvs, indices });
+    kn5.meshes.push(Mesh {
+        name,
+        visible,
+        renderable,
+        cast_shadows,
+        material: material.max(0) as usize,
+        positions,
+        normals,
+        uvs,
+        indices,
+    });
     Ok(())
 }
 
@@ -214,24 +260,40 @@ pub(crate) mod tests {
         let mut w = Writer::default();
         w.raw(MAGIC).i32(6).i32(0);
         w.i32(1).i32(1).string("road.dds").i32(4).raw(b"DDS ");
-        w.i32(1).string("mat").string("ksPerPixel").u8(0).u8(1).i32(0);
+        w.i32(1)
+            .string("mat")
+            .string("ksPerPixel")
+            .u8(0)
+            .u8(1)
+            .i32(0);
         w.i32(1).string("ksAlphaRef").f32(0.5).f32s(&[0.0; 9]);
         w.i32(1).string("txDiffuse").i32(0).string("road.dds");
         // Root dummy, translation in the last row.
         w.i32(1).string("root").i32(2).u8(1);
-        w.f32s(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 10.0, 0.0, 0.0, 1.0]);
+        w.f32s(&[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 10.0, 0.0, 0.0, 1.0,
+        ]);
         // Child 1: mesh.
         w.i32(2).string("1ROAD_01").i32(0).u8(1);
         w.u8(1).u8(1).u8(0);
         w.i32(3);
         for p in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] {
-            w.f32s(&p).f32s(&[0.0, 1.0, 0.0]).f32s(&[0.5, 0.5]).f32s(&[1.0, 0.0, 0.0]);
+            w.f32s(&p)
+                .f32s(&[0.0, 1.0, 0.0])
+                .f32s(&[0.5, 0.5])
+                .f32s(&[1.0, 0.0, 0.0]);
         }
         w.i32(3).u16(0).u16(2).u16(1);
-        w.i32(0).i32(0).f32s(&[0.0, 1000.0]).f32s(&[0.0, 0.0, 0.0, 2.0]).u8(1);
+        w.i32(0)
+            .i32(0)
+            .f32s(&[0.0, 1000.0])
+            .f32s(&[0.0, 0.0, 0.0, 2.0])
+            .u8(1);
         // Child 2: marker dummy at (1, 2, 3) relative to the root.
         w.i32(1).string("AC_START_0").i32(0).u8(1);
-        w.f32s(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0]);
+        w.f32s(&[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0,
+        ]);
         w.0
     }
 

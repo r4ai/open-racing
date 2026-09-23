@@ -53,8 +53,15 @@ enum FfbRow {
     Test,
 }
 
-const FFB_ROWS: [FfbRow; 7] =
-    [FfbRow::Enabled, FfbRow::WheelTorque, FfbRow::Strength, FfbRow::MaxTorque, FfbRow::Damping, FfbRow::Direction, FfbRow::Test];
+const FFB_ROWS: [FfbRow; 7] = [
+    FfbRow::Enabled,
+    FfbRow::WheelTorque,
+    FfbRow::Strength,
+    FfbRow::MaxTorque,
+    FfbRow::Damping,
+    FfbRow::Direction,
+    FfbRow::Test,
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
@@ -108,7 +115,18 @@ impl Plugin for SettingsPlugin {
         app.init_resource::<SettingsOpen>()
             .init_resource::<Screen>()
             .add_systems(Startup, spawn)
-            .add_systems(Update, (toggle, (switch_page, navigate, navigate_ffb).chain().run_if(|o: Res<SettingsOpen>| o.0), listen, render).chain());
+            .add_systems(
+                Update,
+                (
+                    toggle,
+                    (switch_page, navigate, navigate_ffb)
+                        .chain()
+                        .run_if(|o: Res<SettingsOpen>| o.0),
+                    listen,
+                    render,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -124,7 +142,11 @@ fn spawn(mut commands: Commands) {
             position_type: PositionType::Absolute,
             left: Val::Percent(50.0),
             top: Val::Percent(50.0),
-            margin: UiRect { left: Val::Px(-400.0), top: Val::Px(-190.0), ..default() },
+            margin: UiRect {
+                left: Val::Px(-400.0),
+                top: Val::Px(-190.0),
+                ..default()
+            },
             width: Val::Px(800.0),
             padding: UiRect::all(Val::Px(16.0)),
             ..default()
@@ -133,7 +155,11 @@ fn spawn(mut commands: Commands) {
     ));
 }
 
-fn toggle(keys: Res<ButtonInput<KeyCode>>, mut open: ResMut<SettingsOpen>, mut screen: ResMut<Screen>) {
+fn toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut open: ResMut<SettingsOpen>,
+    mut screen: ResMut<Screen>,
+) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
     }
@@ -166,12 +192,21 @@ fn move_cursor(keys: &ButtonInput<KeyCode>, row: &mut usize, rows: usize) {
     }
 }
 
-fn navigate_ffb(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>, mut settings: ResMut<FfbSettings>, mut test: ResMut<FfbTest>) {
+fn navigate_ffb(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut settings: ResMut<FfbSettings>,
+    mut test: ResMut<FfbTest>,
+) {
     if screen.page != Page::ForceFeedback {
         return;
     }
     move_cursor(&keys, &mut screen.row, FFB_ROWS.len());
-    let (left, right, enter) = (keys.just_pressed(KeyCode::ArrowLeft), keys.just_pressed(KeyCode::ArrowRight), keys.just_pressed(KeyCode::Enter));
+    let (left, right, enter) = (
+        keys.just_pressed(KeyCode::ArrowLeft),
+        keys.just_pressed(KeyCode::ArrowRight),
+        keys.just_pressed(KeyCode::Enter),
+    );
     let step = |value: &mut f64, step: f64, (min, max): (f64, f64)| match (left, right) {
         (true, false) => *value = (*value - step).max(min),
         (false, true) => *value = (*value + step).min(max),
@@ -186,7 +221,11 @@ fn navigate_ffb(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>, mut
             s.max_torque = s.max_torque.min(s.wheel_torque);
         }
         FfbRow::Strength => step(&mut s.strength, FFB_PERCENT_STEP, FFB_STRENGTH_RANGE),
-        FfbRow::MaxTorque => step(&mut s.max_torque, FFB_TORQUE_STEP, (FFB_TORQUE_STEP, s.wheel_torque)),
+        FfbRow::MaxTorque => step(
+            &mut s.max_torque,
+            FFB_TORQUE_STEP,
+            (FFB_TORQUE_STEP, s.wheel_torque),
+        ),
         FfbRow::Damping => step(&mut s.damping, FFB_PERCENT_STEP, FFB_DAMPING_RANGE),
         FfbRow::Direction if left || right || enter => {
             s.invert = !s.invert;
@@ -212,17 +251,25 @@ fn navigate(
     move_cursor(&keys, &mut screen.row, ROWS.len());
     match ROWS[screen.row] {
         Row::Rotation => {
-            let step = match (keys.just_pressed(KeyCode::ArrowLeft), keys.just_pressed(KeyCode::ArrowRight)) {
+            let step = match (
+                keys.just_pressed(KeyCode::ArrowLeft),
+                keys.just_pressed(KeyCode::ArrowRight),
+            ) {
                 (true, false) => -ROTATION_STEP,
                 (false, true) => ROTATION_STEP,
                 _ => return,
             };
-            bindings.steer_rotation = (bindings.steer_rotation + step).clamp(ROTATION_RANGE.0, ROTATION_RANGE.1);
+            bindings.steer_rotation =
+                (bindings.steer_rotation + step).clamp(ROTATION_RANGE.0, ROTATION_RANGE.1);
             bindings.save();
         }
         Row::Action(action) => {
             if keys.just_pressed(KeyCode::Enter) {
-                let mut listen = Listen { action, fresh: true, ranges: HashMap::new() };
+                let mut listen = Listen {
+                    action,
+                    fresh: true,
+                    ranges: HashMap::new(),
+                };
                 track(&mut listen, &pads);
                 screen.listen = Some(listen);
                 screen.message.clear();
@@ -253,13 +300,19 @@ fn listen(
     mut bindings: ResMut<Bindings>,
     mut selection: ResMut<InputSelection>,
 ) {
-    let Some(listen) = &mut screen.listen else { return };
+    let Some(listen) = &mut screen.listen else {
+        return;
+    };
     if std::mem::take(&mut listen.fresh) {
         return;
     }
     let action = listen.action;
     let found = if action.is_button() {
-        pads.iter().find_map(|(e, pad, _)| pad.get_just_pressed().next().map(|&b| (e, Source::Button(b), Calibration::Button)))
+        pads.iter().find_map(|(e, pad, _)| {
+            pad.get_just_pressed()
+                .next()
+                .map(|&b| (e, Source::Button(b), Calibration::Button))
+        })
     } else {
         track(listen, &pads);
         if !keys.just_pressed(KeyCode::Enter) {
@@ -268,11 +321,25 @@ fn listen(
         match listen.best() {
             Some((e, input, (min, max))) if max - min >= MIN_TRAVEL => {
                 // The input is back at rest (pedal) or centred (wheel) when Enter is pressed.
-                let now = pads.get(e).ok().and_then(|(_, pad, _)| pad.get(input)).unwrap_or(0.0);
-                let far = if (max - now).abs() > (min - now).abs() { max } else { min };
+                let now = pads
+                    .get(e)
+                    .ok()
+                    .and_then(|(_, pad, _)| pad.get(input))
+                    .unwrap_or(0.0);
+                let far = if (max - now).abs() > (min - now).abs() {
+                    max
+                } else {
+                    min
+                };
                 let calibration = match action {
-                    Action::Steer => Calibration::Steer { centre: now, sign: (far - now).signum() },
-                    _ => Calibration::Pedal { rest: now, full: far },
+                    Action::Steer => Calibration::Steer {
+                        centre: now,
+                        sign: (far - now).signum(),
+                    },
+                    _ => Calibration::Pedal {
+                        rest: now,
+                        full: far,
+                    },
                 };
                 Some((e, input.into(), calibration))
             }
@@ -283,9 +350,17 @@ fn listen(
             }
         }
     };
-    let Some((e, source, calibration)) = found else { return };
-    let Ok((_, pad, name)) = pads.get(e) else { return };
-    let binding = Binding { device: DeviceId::of(pad, name), source, calibration };
+    let Some((e, source, calibration)) = found else {
+        return;
+    };
+    let Ok((_, pad, name)) = pads.get(e) else {
+        return;
+    };
+    let binding = Binding {
+        device: DeviceId::of(pad, name),
+        source,
+        calibration,
+    };
     screen.message = format!("{} -> {}", action.name(), binding.label());
     bindings.set(action, Some(binding));
     bindings.save();
@@ -295,7 +370,9 @@ fn listen(
 
 fn instructions(action: Action) -> &'static str {
     match action {
-        Action::Steer => "Turn the wheel (or stick) fully to the RIGHT, bring it back to centre, then press Enter.",
+        Action::Steer => {
+            "Turn the wheel (or stick) fully to the RIGHT, bring it back to centre, then press Enter."
+        }
         Action::ShiftUp | Action::ShiftDown => "Press the button or paddle to use.",
         _ => "Press the pedal (or trigger) fully, release it, then press Enter.",
     }
@@ -318,8 +395,14 @@ fn render(
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
 ) {
-    let Ok((mut text, mut visibility)) = panel.single_mut() else { return };
-    let shown = if open.0 { Visibility::Inherited } else { Visibility::Hidden };
+    let Ok((mut text, mut visibility)) = panel.single_mut() else {
+        return;
+    };
+    let shown = if open.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     visibility.set_if_neq(shown);
     if !open.0 {
         return;
@@ -340,20 +423,50 @@ fn render_ffb(s: &mut String, screen: &Screen, settings: &FfbSettings, status: &
     for (i, row) in FFB_ROWS.iter().enumerate() {
         let cursor = if i == screen.row { ">" } else { " " };
         let line = match row {
-            FfbRow::Enabled => format!("{:<12} {}   (Enter)", "FFB", if settings.enabled { "on" } else { "off" }),
+            FfbRow::Enabled => format!(
+                "{:<12} {}   (Enter)",
+                "FFB",
+                if settings.enabled { "on" } else { "off" }
+            ),
             FfbRow::WheelTorque => {
-                format!("{:<12} {:.1} Nm   (Left/Right; the base's peak, with its own FFB gain at 100 %)", "Wheel torque", settings.wheel_torque)
+                format!(
+                    "{:<12} {:.1} Nm   (Left/Right; the base's peak, with its own FFB gain at 100 %)",
+                    "Wheel torque", settings.wheel_torque
+                )
             }
-            FfbRow::Strength => format!("{:<12} {:.0} %   (Left/Right; share of the car's steering torque, 100 % = 1:1)", "Strength", settings.strength),
-            FfbRow::MaxTorque => format!("{:<12} {:.1} Nm   (Left/Right; the most torque ever sent)", "Max output", settings.max_torque),
-            FfbRow::Damping => format!("{:<12} {:.0} %   (Left/Right; steadies strong bases)", "Damping", settings.damping),
-            FfbRow::Direction => format!("{:<12} {}   (Enter flips it and tests)", "Direction", if settings.invert { "inverted" } else { "normal" }),
-            FfbRow::Test => format!("{:<12} Enter: a short push that must turn the wheel LEFT", "Test"),
+            FfbRow::Strength => format!(
+                "{:<12} {:.0} %   (Left/Right; share of the car's steering torque, 100 % = 1:1)",
+                "Strength", settings.strength
+            ),
+            FfbRow::MaxTorque => format!(
+                "{:<12} {:.1} Nm   (Left/Right; the most torque ever sent)",
+                "Max output", settings.max_torque
+            ),
+            FfbRow::Damping => format!(
+                "{:<12} {:.0} %   (Left/Right; steadies strong bases)",
+                "Damping", settings.damping
+            ),
+            FfbRow::Direction => format!(
+                "{:<12} {}   (Enter flips it and tests)",
+                "Direction",
+                if settings.invert {
+                    "inverted"
+                } else {
+                    "normal"
+                }
+            ),
+            FfbRow::Test => format!(
+                "{:<12} Enter: a short push that must turn the wheel LEFT",
+                "Test"
+            ),
         };
         let _ = writeln!(s, "{cursor} {line}");
     }
     let _ = writeln!(s, "\nDevice: {}\n", status.device);
-    let _ = writeln!(s, "Hold the wheel when testing. If the test turns it right, flip the direction,");
+    let _ = writeln!(
+        s,
+        "Hold the wheel when testing. If the test turns it right, flip the direction,"
+    );
     let _ = writeln!(s, "or the force drives the wheel into lock.");
 }
 
@@ -368,13 +481,27 @@ fn render_input(
     for (i, row) in ROWS.iter().enumerate() {
         let cursor = if i == screen.row { ">" } else { " " };
         let line = match *row {
-            Row::Rotation => format!("{:<11} {:.0} deg lock to lock   (Left/Right)", "Rotation", bindings.steer_rotation),
+            Row::Rotation => format!(
+                "{:<11} {:.0} deg lock to lock   (Left/Right)",
+                "Rotation", bindings.steer_rotation
+            ),
             Row::Action(action) => {
                 let assigned = bindings.get(action).map_or("-".into(), |b| b.label());
                 let live = match action {
                     _ if bindings.get(action).is_none() => String::new(),
-                    Action::Steer => format!("{:+5.0} deg", bindings.value(action, pads, reported) as f64 * bindings.steer_rotation / 2.0),
-                    Action::ShiftUp | Action::ShiftDown => (if bindings.value(action, pads, reported) > 0.5 { "pressed" } else { "" }).into(),
+                    Action::Steer => format!(
+                        "{:+5.0} deg",
+                        bindings.value(action, pads, reported) as f64 * bindings.steer_rotation
+                            / 2.0
+                    ),
+                    Action::ShiftUp | Action::ShiftDown => {
+                        (if bindings.value(action, pads, reported) > 0.5 {
+                            "pressed"
+                        } else {
+                            ""
+                        })
+                        .into()
+                    }
                     _ => bar(bindings.value(action, pads, reported)),
                 };
                 format!("{:<11} {assigned:<46} {live}", action.name())
@@ -385,12 +512,23 @@ fn render_input(
     let _ = writeln!(s);
     match &screen.listen {
         Some(listen) => {
-            let _ = writeln!(s, "Assigning {}: {}", listen.action.name(), instructions(listen.action));
-            if let Some((e, input, (min, max))) = listen.best().filter(|_| !listen.action.is_button())
+            let _ = writeln!(
+                s,
+                "Assigning {}: {}",
+                listen.action.name(),
+                instructions(listen.action)
+            );
+            if let Some((e, input, (min, max))) =
+                listen.best().filter(|_| !listen.action.is_button())
                 && let Ok((_, pad, name)) = pads.get(e)
                 && max - min >= MIN_TRAVEL
             {
-                let _ = writeln!(s, "Detected: {} {:?}", DeviceId::of(pad, name).label(), Source::from(input));
+                let _ = writeln!(
+                    s,
+                    "Detected: {} {:?}",
+                    DeviceId::of(pad, name).label(),
+                    Source::from(input)
+                );
             }
             let _ = writeln!(s, "Esc cancel");
         }

@@ -53,7 +53,13 @@ const MAX_LOOP_GAP: f64 = 40.0;
 const DEFAULT_HALF_WIDTH: f64 = 5.0;
 /// Name prefixes of the game's marker objects (grid and pit positions, timing lines),
 /// which it never renders. Other `AC_` objects, such as start lights, are rendered.
-const MARKER_PREFIXES: [&str; 5] = ["AC_START_", "AC_PIT_", "AC_TIME_", "AC_HOTLAP_START_", "AC_AB_"];
+const MARKER_PREFIXES: [&str; 5] = [
+    "AC_START_",
+    "AC_PIT_",
+    "AC_TIME_",
+    "AC_HOTLAP_START_",
+    "AC_AB_",
+];
 
 fn is_marker(mesh_name: &str) -> bool {
     MARKER_PREFIXES.iter().any(|p| mesh_name.starts_with(p))
@@ -70,7 +76,12 @@ struct SurfaceDef {
 
 /// Surfaces a track may use without defining them itself.
 fn builtin_surfaces() -> Vec<SurfaceDef> {
-    let s = |key: &str, friction, damping, valid_track| SurfaceDef { key: key.into(), friction, damping, valid_track };
+    let s = |key: &str, friction, damping, valid_track| SurfaceDef {
+        key: key.into(),
+        friction,
+        damping,
+        valid_track,
+    };
     vec![
         s("ROAD", 1.0, 0.0, true),
         s("KERB", 0.95, 0.0, true),
@@ -88,7 +99,9 @@ fn surfaces(ini_src: Option<&str>) -> Vec<SurfaceDef> {
         if !sec.name.starts_with("SURFACE") {
             continue;
         }
-        let Some(key) = sec.get("KEY").filter(|k| !k.is_empty()) else { continue };
+        let Some(key) = sec.get("KEY").filter(|k| !k.is_empty()) else {
+            continue;
+        };
         let def = SurfaceDef {
             key: key.to_ascii_uppercase(),
             friction: sec.get_f64("FRICTION").unwrap_or(1.0),
@@ -131,7 +144,11 @@ fn classify(mesh_name: &str, surfaces: &[SurfaceDef]) -> Option<Physical> {
 /// Simulation properties of each surface. Grip is relative to the grippiest
 /// valid-track surface; anything that does not count as track is `Grass`.
 fn surface_props(surfaces: &[SurfaceDef]) -> Vec<SurfaceProps> {
-    let reference = surfaces.iter().filter(|s| s.valid_track).map(|s| s.friction).fold(0.0, f64::max);
+    let reference = surfaces
+        .iter()
+        .filter(|s| s.valid_track)
+        .map(|s| s.friction)
+        .fold(0.0, f64::max);
     let reference = if reference > 0.0 { reference } else { 1.0 };
     surfaces
         .iter()
@@ -143,7 +160,11 @@ fn surface_props(surfaces: &[SurfaceDef]) -> Vec<SurfaceProps> {
             } else {
                 Surface::Grass
             };
-            SurfaceProps { kind, grip: (s.friction / reference).clamp(0.05, 1.5), drag: s.damping.clamp(0.0, 0.3) }
+            SurfaceProps {
+                kind,
+                grip: (s.friction / reference).clamp(0.05, 1.5),
+                drag: s.damping.clamp(0.0, 0.3),
+            }
         })
         .collect()
 }
@@ -172,8 +193,17 @@ fn layout_files(dir: &Path, layout: Option<&str>) -> Result<LayoutFiles, Error> 
             .filter(|s| s.name.starts_with("MODEL"))
             .filter_map(|s| {
                 let file = s.get("FILE")?;
-                let pos: Vec<f64> = s.get("POSITION").unwrap_or("0,0,0").split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                let offset = if pos.len() == 3 { DVec3::new(pos[0], pos[1], pos[2]) } else { DVec3::ZERO };
+                let pos: Vec<f64> = s
+                    .get("POSITION")
+                    .unwrap_or("0,0,0")
+                    .split(',')
+                    .filter_map(|v| v.trim().parse().ok())
+                    .collect();
+                let offset = if pos.len() == 3 {
+                    DVec3::new(pos[0], pos[1], pos[2])
+                } else {
+                    DVec3::ZERO
+                };
                 Some((dir.join(file), offset))
             })
             .collect(),
@@ -183,9 +213,16 @@ fn layout_files(dir: &Path, layout: Option<&str>) -> Result<LayoutFiles, Error> 
         }
     };
     if models.is_empty() {
-        return Err(Error::Format(format!("{}: no models listed", models_ini.display())));
+        return Err(Error::Format(format!(
+            "{}: no models listed",
+            models_ini.display()
+        )));
     }
-    Ok(LayoutFiles { models, ai_line: data_dir.join("ai/fast_lane.ai"), surfaces: data_dir.join("data/surfaces.ini") })
+    Ok(LayoutFiles {
+        models,
+        ai_line: data_dir.join("ai/fast_lane.ai"),
+        surfaces: data_dir.join("data/surfaces.ini"),
+    })
 }
 
 /// Layouts of a track folder: `[None]` for a single-layout track, otherwise the names
@@ -197,12 +234,22 @@ pub fn layouts(dir: &Path) -> Vec<Option<String>> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
-            let layout = name.strip_prefix("models_")?.strip_suffix(".ini")?.to_string();
-            dir.join(&layout).join("ai/fast_lane.ai").exists().then_some(Some(layout))
+            let layout = name
+                .strip_prefix("models_")?
+                .strip_suffix(".ini")?
+                .to_string();
+            dir.join(&layout)
+                .join("ai/fast_lane.ai")
+                .exists()
+                .then_some(Some(layout))
         })
         .collect();
     named.sort();
-    if named.is_empty() && dir.join("ai/fast_lane.ai").exists() { vec![None] } else { named }
+    if named.is_empty() && dir.join("ai/fast_lane.ai").exists() {
+        vec![None]
+    } else {
+        named
+    }
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, Error> {
@@ -220,35 +267,63 @@ pub fn convert(dir: &Path, layout: Option<&str>, name: &str) -> Result<TrackPack
     let mut textures = material::TextureCache::default();
 
     for (path, offset) in &files.models {
-        let kn5 = kn5::parse(&read(path)?).map_err(|e| Error::Format(format!("{}: {e}", path.display())))?;
+        let kn5 = kn5::parse(&read(path)?)
+            .map_err(|e| Error::Format(format!("{}: {e}", path.display())))?;
         let place = |p: DVec3| to_sim(p + *offset).as_vec3().to_array();
-        markers.extend(kn5.dummies.iter().map(|d| (d.name.clone(), to_sim(d.position + *offset))));
-        let rendered = |m: &&kn5::Mesh| m.visible && m.renderable && !m.indices.is_empty() && !is_marker(&m.name);
-        let mut materials = material::Materials::new(&kn5, kn5.meshes.iter().filter(rendered).map(|m| m.material), &mut textures);
+        markers.extend(
+            kn5.dummies
+                .iter()
+                .map(|d| (d.name.clone(), to_sim(d.position + *offset))),
+        );
+        let rendered = |m: &&kn5::Mesh| {
+            m.visible && m.renderable && !m.indices.is_empty() && !is_marker(&m.name)
+        };
+        let mut materials = material::Materials::new(
+            &kn5,
+            kn5.meshes.iter().filter(rendered).map(|m| m.material),
+            &mut textures,
+        );
 
         for mesh in &kn5.meshes {
             if mesh.indices.is_empty() {
                 continue;
             }
             let positions: Vec<[f32; 3]> = mesh.positions.iter().map(|&p| place(p)).collect();
-            let normals: Vec<[f32; 3]> = mesh.normals.iter().map(|&n| to_sim(n).as_vec3().to_array()).collect();
+            let normals: Vec<[f32; 3]> = mesh
+                .normals
+                .iter()
+                .map(|&n| to_sim(n).as_vec3().to_array())
+                .collect();
             let indices = oriented(&positions, &normals, &mesh.indices);
             match classify(&mesh.name, &surfaces) {
-                Some(Physical::Ground(s)) => ground.add(PatchKind::Ground(s as u16), &positions, &normals, &indices),
+                Some(Physical::Ground(s)) => {
+                    ground.add(PatchKind::Ground(s as u16), &positions, &normals, &indices)
+                }
                 Some(Physical::Wall) => ground.add(PatchKind::Wall, &positions, &[], &indices),
                 None => {}
             }
             if rendered(&mesh) {
                 let material = materials.get(&mut visual, &mut textures, mesh.material);
-                visual.add_mesh(material, mesh.cast_shadows, &positions, &normals, &mesh.uvs, &indices);
+                visual.add_mesh(
+                    material,
+                    mesh.cast_shadows,
+                    &positions,
+                    &normals,
+                    &mesh.uvs,
+                    &indices,
+                );
             }
         }
     }
     if !ground.is_drivable() {
-        return Err(Error::Format(format!("{}: no road meshes found", dir.display())));
+        return Err(Error::Format(format!(
+            "{}: no road meshes found",
+            dir.display()
+        )));
     }
 
-    let ai_points = ai::parse(&read(&files.ai_line)?).map_err(|e| Error::Format(format!("{}: {e}", files.ai_line.display())))?;
+    let ai_points = ai::parse(&read(&files.ai_line)?)
+        .map_err(|e| Error::Format(format!("{}: {e}", files.ai_line.display())))?;
     let marker = |n: &str| markers.iter().find(|(m, _)| m == n).map(|(_, p)| *p);
     let start = match (marker("AC_TIME_0_L"), marker("AC_TIME_0_R")) {
         (Some(l), Some(r)) => Some((l + r) * 0.5),
@@ -292,9 +367,21 @@ fn centreline(name: &str, points: &[ai::AiPoint], start: Option<DVec3>) -> Resul
         )));
     }
     let first = start
-        .map(|s| (0..pos.len()).min_by(|&a, &b| (pos[a] - s).length_squared().total_cmp(&(pos[b] - s).length_squared())).unwrap_or(0))
+        .map(|s| {
+            (0..pos.len())
+                .min_by(|&a, &b| {
+                    (pos[a] - s)
+                        .length_squared()
+                        .total_cmp(&(pos[b] - s).length_squared())
+                })
+                .unwrap_or(0)
+        })
         .unwrap_or(0);
-    let half = |w: Option<f64>| w.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(DEFAULT_HALF_WIDTH).clamp(1.0, 40.0);
+    let half = |w: Option<f64>| {
+        w.filter(|w| w.is_finite() && *w > 0.0)
+            .unwrap_or(DEFAULT_HALF_WIDTH)
+            .clamp(1.0, 40.0)
+    };
 
     let mut out: Vec<TrackPoint> = Vec::new();
     let mut last: Option<DVec3> = None;
@@ -312,10 +399,20 @@ fn centreline(name: &str, points: &[ai::AiPoint], start: Option<DVec3>) -> Resul
         });
     }
     // Drop trailing points that crowd the start.
-    while out.len() > 4 && (DVec3::from(out[out.len() - 1].pos) - DVec3::from(out[0].pos)).length() < CONTROL_SPACING * 0.5 {
+    while out.len() > 4
+        && (DVec3::from(out[out.len() - 1].pos) - DVec3::from(out[0].pos)).length()
+            < CONTROL_SPACING * 0.5
+    {
         out.pop();
     }
-    Ok(TrackDef { name: name.into(), points: out, kerb_width: 1.0, kerb_height: 0.0, runoff_width: 60.0, spacing: 1.0 })
+    Ok(TrackDef {
+        name: name.into(),
+        points: out,
+        kerb_width: 1.0,
+        kerb_height: 0.0,
+        runoff_width: 60.0,
+        spacing: 1.0,
+    })
 }
 
 #[cfg(test)]
@@ -326,7 +423,9 @@ mod tests {
 
     #[test]
     fn classifies_mesh_names() {
-        let s = surfaces(Some("[SURFACE_0]\nKEY=ROAD_B\nFRICTION=0.9\nIS_VALID_TRACK=1\n"));
+        let s = surfaces(Some(
+            "[SURFACE_0]\nKEY=ROAD_B\nFRICTION=0.9\nIS_VALID_TRACK=1\n",
+        ));
         let key = |p: Option<Physical>| match p {
             Some(Physical::Ground(i)) => Some(s[i].key.as_str()),
             _ => None,
@@ -341,7 +440,9 @@ mod tests {
 
     #[test]
     fn surface_grip_is_relative_to_the_track() {
-        let s = surfaces(Some("[SURFACE_0]\nKEY=ROAD\nFRICTION=0.98\nIS_VALID_TRACK=1\n[SURFACE_1]\nKEY=OUT\nFRICTION=0.49\n"));
+        let s = surfaces(Some(
+            "[SURFACE_0]\nKEY=ROAD\nFRICTION=0.98\nIS_VALID_TRACK=1\n[SURFACE_1]\nKEY=OUT\nFRICTION=0.49\n",
+        ));
         let p = surface_props(&s);
         let road = s.iter().position(|s| s.key == "ROAD").unwrap();
         let out = s.iter().position(|s| s.key == "OUT").unwrap();
@@ -361,7 +462,11 @@ mod tests {
         assert_eq!(def.points[0].pos, (100.0, 100.0, 0.0));
         assert_eq!(def.points[0].width_left, 5.0);
         assert_eq!(def.points[0].width_right, 3.0);
-        assert!(def.points.len() >= 80 && def.points.len() <= 100, "{}", def.points.len());
+        assert!(
+            def.points.len() >= 80 && def.points.len() <= 100,
+            "{}",
+            def.points.len()
+        );
         let track = Track::new(&def).unwrap();
         assert!((track.length - 400.0).abs() < 10.0, "{}", track.length);
     }
@@ -388,17 +493,40 @@ mod tests {
         assert_eq!(oriented(&p, &[[0.0, 0.0, -1.0]; 3], &[0, 1, 2]), [0, 2, 1]);
         assert_eq!(oriented(&p, &[], &[0, 1, 2]), [0, 1, 2]);
         // A two-sided pair: each triangle faces its own normals.
-        let quad = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let normals = [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0]];
-        assert_eq!(oriented(&quad, &normals, &[0, 1, 2, 3, 4, 5]), [0, 1, 2, 3, 5, 4]);
+        let quad = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let normals = [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        assert_eq!(
+            oriented(&quad, &normals, &[0, 1, 2, 3, 4, 5]),
+            [0, 1, 2, 3, 5, 4]
+        );
     }
 
     #[test]
     fn converts_a_synthetic_folder() {
-        let dir = std::env::temp_dir().join(format!("open-racing-ac-{}", std::process::id())).join("sample_track");
+        let dir = std::env::temp_dir()
+            .join(format!("open-racing-ac-{}", std::process::id()))
+            .join("sample_track");
         std::fs::create_dir_all(dir.join("ai")).unwrap();
         std::fs::write(dir.join("sample_track.kn5"), kn5::tests::sample()).unwrap();
-        std::fs::write(dir.join("ai/fast_lane.ai"), ai::tests::sample_square(100.0, 50, true)).unwrap();
+        std::fs::write(
+            dir.join("ai/fast_lane.ai"),
+            ai::tests::sample_square(100.0, 50, true),
+        )
+        .unwrap();
 
         let pkg = convert(&dir, None, "sample").unwrap();
         assert_eq!(pkg.centreline.name, "sample");
@@ -409,7 +537,10 @@ mod tests {
         // The texture in the sample is not a valid image, so the material has none.
         assert!(v.textures.is_empty());
         assert_eq!(v.materials[0].base_color_texture, None);
-        assert_eq!(v.materials[0].alpha_mode, open_racing_track::AlphaMode::Mask(0.5));
+        assert_eq!(
+            v.materials[0].alpha_mode,
+            open_racing_track::AlphaMode::Mask(0.5)
+        );
         // File (10, 0, 1) -> sim (10, -1, 0).
         assert_eq!(v.meshes[0].positions[2], [10.0, -1.0, 0.0]);
         // The start marker at file (11, 2, 3) -> sim (11, -3, 2) picks the AI point at (10, 0, 0).

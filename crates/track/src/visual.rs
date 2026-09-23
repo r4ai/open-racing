@@ -144,7 +144,10 @@ impl VisualBuilder {
         let mut h = DefaultHasher::new();
         texture.data.hash(&mut h);
         let same = self.textures.entry(h.finish()).or_default();
-        if let Some(&i) = same.iter().find(|&&i| self.visual.textures[i as usize] == texture) {
+        if let Some(&i) = same
+            .iter()
+            .find(|&&i| self.visual.textures[i as usize] == texture)
+        {
             return i;
         }
         let i = self.visual.textures.len() as u32;
@@ -160,18 +163,41 @@ impl VisualBuilder {
 
     /// Adds a mesh to the batch of its material, shadow flag and tile. `normals` and
     /// `uvs` have one entry per position.
-    pub fn add_mesh(&mut self, material: u32, cast_shadows: bool, positions: &[[f32; 3]], normals: &[[f32; 3]], uvs: &[[f32; 2]], indices: &[u32]) {
+    pub fn add_mesh(
+        &mut self,
+        material: u32,
+        cast_shadows: bool,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+    ) {
         if indices.is_empty() {
             return;
         }
-        let (lo, hi) = positions.iter().fold(([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]), |(lo, hi), p| {
-            ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
-        });
+        let (lo, hi) = positions.iter().fold(
+            ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]),
+            |(lo, hi), p| {
+                (
+                    [lo[0].min(p[0]), lo[1].min(p[1])],
+                    [hi[0].max(p[0]), hi[1].max(p[1])],
+                )
+            },
+        );
         let tile = |a: f32, b: f32| ((a + b) * 0.5 / BATCH_TILE).floor() as i32;
-        let key = (material, cast_shadows, tile(lo[0], hi[0]), tile(lo[1], hi[1]));
+        let key = (
+            material,
+            cast_shadows,
+            tile(lo[0], hi[0]),
+            tile(lo[1], hi[1]),
+        );
         let meshes = &mut self.visual.meshes;
         let i = *self.batches.entry(key).or_insert_with(|| {
-            meshes.push(Mesh { material, cast_shadows, ..Default::default() });
+            meshes.push(Mesh {
+                material,
+                cast_shadows,
+                ..Default::default()
+            });
             meshes.len() - 1
         });
         let m = &mut meshes[i];
@@ -192,7 +218,9 @@ impl Visual {
         let bad = |what: &str| Err(Error::Format(format!("visual: {what}")));
         let missing = |t: u32| t as usize >= self.textures.len();
         for m in &self.materials {
-            let detail = m.detail.iter().flat_map(|d| std::iter::once(d.mask).chain(d.layers.iter().flatten().map(|l| l.texture)));
+            let detail = m.detail.iter().flat_map(|d| {
+                std::iter::once(d.mask).chain(d.layers.iter().flatten().map(|l| l.texture))
+            });
             let own = [m.base_color_texture, m.surface_texture, m.normal_texture];
             if own.into_iter().flatten().chain(detail).any(missing) {
                 return bad("material refers to a missing texture");
@@ -264,7 +292,9 @@ impl Visual {
         let mut r = Reader::new(buf, MAGIC, VERSION, "visual.bin")?;
         let mut v = Visual::default();
         for _ in 0..r.u32()? {
-            v.textures.push(Texture { data: r.bytes()?.to_vec() });
+            v.textures.push(Texture {
+                data: r.bytes()?.to_vec(),
+            });
         }
         for _ in 0..r.u32()? {
             let base_color = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
@@ -288,10 +318,26 @@ impl Visual {
                         let (texture, scale) = (r.u32()?, r.f32()?);
                         *layer = (texture != NONE).then_some(DetailLayer { texture, scale });
                     }
-                    Some(Detail { mask, layers, multiplier: r.f32()?, world_uv: r.u8()? != 0 })
+                    Some(Detail {
+                        mask,
+                        layers,
+                        multiplier: r.f32()?,
+                        world_uv: r.u8()? != 0,
+                    })
                 }
             };
-            v.materials.push(Material { base_color, base_color_texture, roughness, reflectance, reflection, surface_texture, normal_texture, alpha_mode, double_sided, detail });
+            v.materials.push(Material {
+                base_color,
+                base_color_texture,
+                roughness,
+                reflectance,
+                reflection,
+                surface_texture,
+                normal_texture,
+                alpha_mode,
+                double_sided,
+                detail,
+            });
         }
         for _ in 0..r.u32()? {
             v.meshes.push(Mesh {
@@ -316,17 +362,30 @@ mod tests {
 
     fn add(b: &mut VisualBuilder, material: u32, x: f32) {
         let p = TRI.map(|v| [v[0] + x, v[1], v[2]]);
-        b.add_mesh(material, true, &p, &[[0.0, 0.0, 1.0]; 3], &[[0.0; 2]; 3], &[0, 1, 2]);
+        b.add_mesh(
+            material,
+            true,
+            &p,
+            &[[0.0, 0.0, 1.0]; 3],
+            &[[0.0; 2]; 3],
+            &[0, 1, 2],
+        );
     }
 
     #[test]
     fn meshes_batch_by_material_and_tile() {
         let mut b = VisualBuilder::new();
-        let tex = Texture { data: vec![1, 2, 3] };
+        let tex = Texture {
+            data: vec![1, 2, 3],
+        };
         assert_eq!(b.add_texture(tex.clone()), 0);
         assert_eq!(b.add_texture(Texture { data: vec![4] }), 1);
         assert_eq!(b.add_texture(tex), 0);
-        let mat = Material { base_color: [1.0; 4], base_color_texture: Some(0), ..Default::default() };
+        let mat = Material {
+            base_color: [1.0; 4],
+            base_color_texture: Some(0),
+            ..Default::default()
+        };
         let (m0, m1) = (b.add_material(mat.clone()), b.add_material(mat));
         add(&mut b, m0, 0.0);
         add(&mut b, m0, 10.0);

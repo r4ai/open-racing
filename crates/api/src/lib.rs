@@ -8,10 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use open_racing_env::{ACTION_HIGH, ACTION_LOW, ACTION_NAMES, Actuator, AppliedInput, BatchEnv, EnvShared, MAX_ACTION_DIM};
+use open_racing_env::{
+    ACTION_HIGH, ACTION_LOW, ACTION_NAMES, Actuator, AppliedInput, BatchEnv, EnvShared,
+    MAX_ACTION_DIM,
+};
 
 pub use open_racing_env::{
-    DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, RewardFn, StepInfo, TerminationFn,
+    DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, RewardFn, StepInfo,
+    TerminationFn,
 };
 pub use open_racing_sim::{Car, CarModel, Controls, Track};
 
@@ -90,8 +94,16 @@ pub fn assets_dir() -> PathBuf {
 
 fn resolve(kind: &str, name_or_path: &str) -> Result<PathBuf, Error> {
     let direct = PathBuf::from(name_or_path);
-    let path = if direct.extension().is_some() { direct } else { assets_dir().join(kind).join(format!("{name_or_path}.ron")) };
-    if path.exists() { Ok(path) } else { Err(Error::NotFound(path)) }
+    let path = if direct.extension().is_some() {
+        direct
+    } else {
+        assets_dir().join(kind).join(format!("{name_or_path}.ron"))
+    };
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(Error::NotFound(path))
+    }
 }
 
 /// Loads a track by name (`assets/tracks/<name>.ron` or the package
@@ -101,13 +113,18 @@ pub fn load_track(name_or_path: &str) -> Result<Track, Error> {
 }
 
 /// Like `load_track`, plus the 3D model for rendering when the track has one.
-pub fn load_track_with_visual(name_or_path: &str) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
+pub fn load_track_with_visual(
+    name_or_path: &str,
+) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
     load_track_and_model(name_or_path, true)
 }
 
 /// Tries a package directory given by path, then `assets/tracks/<name>.ron` (or a file
 /// path), then the package `<content>/tracks/<name>/`.
-fn load_track_and_model(name_or_path: &str, visual: bool) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
+fn load_track_and_model(
+    name_or_path: &str,
+    visual: bool,
+) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
     let direct = Path::new(name_or_path);
     let named = open_racing_track::tracks_dir().join(name_or_path);
     let dir = match resolve("tracks", name_or_path) {
@@ -116,8 +133,12 @@ fn load_track_and_model(name_or_path: &str, visual: bool) -> Result<(Track, Opti
         Err(_) if direct.extension().is_none() && open_racing_track::is_package(&named) => named,
         Err(not_found) => return Err(not_found),
     };
-    let mut package = open_racing_track::TrackPackage::load(&dir, visual).map_err(Error::Package)?;
-    Ok((package.build_track().map_err(Error::Package)?, package.visual.take()))
+    let mut package =
+        open_racing_track::TrackPackage::load(&dir, visual).map_err(Error::Package)?;
+    Ok((
+        package.build_track().map_err(Error::Package)?,
+        package.visual.take(),
+    ))
 }
 
 /// Loads a car by name (`assets/cars/<name>.ron`) or by path.
@@ -180,7 +201,11 @@ impl EnvSpec {
     pub fn observation_space(&self) -> BoxSpace {
         let names = self.config.obs_layout().spec().names;
         let n = names.len();
-        BoxSpace { names, low: vec![f32::NEG_INFINITY; n], high: vec![f32::INFINITY; n] }
+        BoxSpace {
+            names,
+            low: vec![f32::NEG_INFINITY; n],
+            high: vec![f32::INFINITY; n],
+        }
     }
 
     pub fn action_space(&self) -> BoxSpace {
@@ -284,7 +309,14 @@ impl AgentDriver {
     pub fn controls(&mut self, policy: &mut dyn Policy, car: &Car, track: &Track) -> Controls {
         if self.countdown == 0 {
             self.hint = track.query(car.state.position, self.hint).index;
-            open_racing_env::obs::encode(&self.config.obs_layout(), car, track, self.hint, &self.input, &mut self.obs);
+            open_racing_env::obs::encode(
+                &self.config.obs_layout(),
+                car,
+                track,
+                self.hint,
+                &self.input,
+                &mut self.obs,
+            );
             let action = &mut self.action[..self.config.action_dim()];
             policy.act(&self.obs, action);
             self.actuator.decide(&self.config, action);

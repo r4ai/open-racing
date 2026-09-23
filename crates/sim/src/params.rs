@@ -174,18 +174,42 @@ impl CarParams {
     }
 
     fn validate(&self) -> Result<(), ParamsError> {
-        let check = |ok: bool, msg| if ok { Ok(()) } else { Err(ParamsError::Invalid(msg)) };
+        let check = |ok: bool, msg| {
+            if ok {
+                Ok(())
+            } else {
+                Err(ParamsError::Invalid(msg))
+            }
+        };
         check(self.mass > 0.0, "mass must be positive")?;
-        check(self.inertia.iter().all(|&i| i > 0.0), "inertia must be positive")?;
-        check((0.0..=1.0).contains(&self.front_weight), "front_weight must be in 0..1")?;
-        check(!self.gearbox.ratios.is_empty(), "gearbox needs at least one ratio")?;
-        check(self.engine.torque_curve.len() >= 2, "torque_curve needs two points")?;
-        check(self.engine.drag_curve.len() >= 2, "drag_curve needs two points")?;
+        check(
+            self.inertia.iter().all(|&i| i > 0.0),
+            "inertia must be positive",
+        )?;
+        check(
+            (0.0..=1.0).contains(&self.front_weight),
+            "front_weight must be in 0..1",
+        )?;
+        check(
+            !self.gearbox.ratios.is_empty(),
+            "gearbox needs at least one ratio",
+        )?;
+        check(
+            self.engine.torque_curve.len() >= 2,
+            "torque_curve needs two points",
+        )?;
+        check(
+            self.engine.drag_curve.len() >= 2,
+            "drag_curve needs two points",
+        )?;
         check(
             self.engine.stall_rpm < self.clutch.anti_stall_rpm,
             "anti_stall_rpm must exceed stall_rpm",
         )?;
-        check(self.front.pressure > 0.0 && self.rear.pressure > 0.0, "tyre pressure must be positive")?;
+        check(
+            self.front.pressure > 0.0 && self.rear.pressure > 0.0,
+            "tyre pressure must be positive",
+        )?;
         let sprung = self.mass - 2.0 * (self.front.unsprung_mass + self.rear.unsprung_mass);
         check(sprung > 0.0, "unsprung mass exceeds total mass")
     }
@@ -220,7 +244,11 @@ pub struct CarModel {
 
 impl CarModel {
     /// Builds the model of `params` fitted with the given front and rear tyres.
-    pub fn new(params: CarParams, front_tire: TireParams, rear_tire: TireParams) -> Result<Self, ParamsError> {
+    pub fn new(
+        params: CarParams,
+        front_tire: TireParams,
+        rear_tire: TireParams,
+    ) -> Result<Self, ParamsError> {
         params.validate()?;
         let p = &params;
         let unsprung_total = 2.0 * (p.front.unsprung_mass + p.rear.unsprung_mass);
@@ -232,7 +260,11 @@ impl CarModel {
         let corner = |front: bool, side: f64| {
             let axle = if front { &p.front } else { &p.rear };
             let tire = if front { &front_tire } else { &rear_tire };
-            let axle_weight = if front { p.front_weight } else { 1.0 - p.front_weight };
+            let axle_weight = if front {
+                p.front_weight
+            } else {
+                1.0 - p.front_weight
+            };
             // Load carried by the spring at this corner in static equilibrium.
             let corner_sprung = 0.5 * p.mass * axle_weight - axle.unsprung_mass;
             let spring_load = corner_sprung * GRAVITY;
@@ -242,7 +274,11 @@ impl CarModel {
             let static_extension = p.cg_height - (tire.radius - tire_deflection);
             let track = if front { p.track_front } else { p.track_rear };
             CornerModel {
-                hardpoint: DVec3::new(if front { front_x } else { rear_x }, side * 0.5 * track, 0.0),
+                hardpoint: DVec3::new(
+                    if front { front_x } else { rear_x },
+                    side * 0.5 * track,
+                    0.0,
+                ),
                 side,
                 front,
                 driven: !front,
@@ -253,7 +289,12 @@ impl CarModel {
             }
         };
 
-        let corners = [corner(true, 1.0), corner(true, -1.0), corner(false, 1.0), corner(false, -1.0)];
+        let corners = [
+            corner(true, 1.0),
+            corner(true, -1.0),
+            corner(false, 1.0),
+            corner(false, -1.0),
+        ];
         Ok(Self {
             sprung_mass,
             corners,
@@ -264,7 +305,10 @@ impl CarModel {
     }
 
     /// Parses a car and fits the tyres it names, read by `tire`.
-    pub fn from_ron(src: &str, tire: impl Fn(&str) -> Result<TireParams, ParamsError>) -> Result<Self, ParamsError> {
+    pub fn from_ron(
+        src: &str,
+        tire: impl Fn(&str) -> Result<TireParams, ParamsError>,
+    ) -> Result<Self, ParamsError> {
         let params = CarParams::from_ron(src)?;
         let (front, rear) = (tire(&params.front.tire)?, tire(&params.rear.tire)?);
         Self::new(params, front, rear)
@@ -274,16 +318,27 @@ impl CarModel {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ParamsError> {
         let path = path.as_ref();
         let dir = path.parent().unwrap_or(Path::new("."));
-        Self::from_ron(&std::fs::read_to_string(path).map_err(ParamsError::Io)?, |name| TireParams::load(tire_path(dir, name)))
+        Self::from_ron(
+            &std::fs::read_to_string(path).map_err(ParamsError::Io)?,
+            |name| TireParams::load(tire_path(dir, name)),
+        )
     }
 
     /// The bundled GT3-class car on GT3-class slicks.
     pub fn gt3() -> Self {
         Self::from_ron(include_str!("../../../assets/cars/gt3.ron"), |name| {
             TireParams::from_ron(match name {
-                "velloni_zeta_gt_front" => include_str!("../../../assets/tires/velloni_zeta_gt_front.ron"),
-                "velloni_zeta_gt_rear" => include_str!("../../../assets/tires/velloni_zeta_gt_rear.ron"),
-                _ => return Err(ParamsError::Invalid("bundled gt3.ron names a tyre that is not bundled")),
+                "velloni_zeta_gt_front" => {
+                    include_str!("../../../assets/tires/velloni_zeta_gt_front.ron")
+                }
+                "velloni_zeta_gt_rear" => {
+                    include_str!("../../../assets/tires/velloni_zeta_gt_rear.ron")
+                }
+                _ => {
+                    return Err(ParamsError::Invalid(
+                        "bundled gt3.ron names a tyre that is not bundled",
+                    ));
+                }
             })
         })
         .expect("bundled gt3.ron is valid")
@@ -291,12 +346,20 @@ impl CarModel {
 
     #[inline]
     pub fn axle(&self, wheel: usize) -> &AxleParams {
-        if wheel < 2 { &self.params.front } else { &self.params.rear }
+        if wheel < 2 {
+            &self.params.front
+        } else {
+            &self.params.rear
+        }
     }
 
     #[inline]
     pub fn tire(&self, wheel: usize) -> &TireModel {
-        if wheel < 2 { &self.front_tire } else { &self.rear_tire }
+        if wheel < 2 {
+            &self.front_tire
+        } else {
+            &self.rear_tire
+        }
     }
 }
 
@@ -331,7 +394,9 @@ mod tests {
 
     #[test]
     fn load_reads_the_tyres_the_car_names() {
-        let car = CarModel::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/cars/gt3.ron")).unwrap();
+        let car =
+            CarModel::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/cars/gt3.ron"))
+                .unwrap();
         let bundled = CarModel::gt3();
         assert_eq!(car.front_tire.p.name, bundled.front_tire.p.name);
         assert_eq!(car.rear_tire.p.name, bundled.rear_tire.p.name);

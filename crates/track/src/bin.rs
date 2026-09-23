@@ -45,7 +45,8 @@ impl Writer {
 
     pub fn vecs<const N: usize>(&mut self, v: &[[f32; N]]) {
         self.len(v.len());
-        self.0.extend(v.iter().flatten().flat_map(|x| x.to_le_bytes()));
+        self.0
+            .extend(v.iter().flatten().flat_map(|x| x.to_le_bytes()));
     }
 }
 
@@ -58,12 +59,19 @@ impl<'a> Reader<'a> {
     /// Checks the magic and version; `what` names the file in errors.
     pub fn new(buf: &'a [u8], magic: &[u8; 4], version: u32, what: &str) -> Result<Self, Error> {
         if !buf.starts_with(magic) {
-            return Err(Error::Format(format!("{what}: not an open-racing track file")));
+            return Err(Error::Format(format!(
+                "{what}: not an open-racing track file"
+            )));
         }
-        let mut r = Self { buf, pos: magic.len() };
+        let mut r = Self {
+            buf,
+            pos: magic.len(),
+        };
         let found = r.u32()?;
         if found != version {
-            return Err(Error::Format(format!("{what}: format version {found}, expected {version}; convert the track again")));
+            return Err(Error::Format(format!(
+                "{what}: format version {found}, expected {version}; convert the track again"
+            )));
         }
         Ok(r)
     }
@@ -78,7 +86,10 @@ impl<'a> Reader<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if n > self.buf.len() - self.pos {
-            return Err(Error::Format(format!("unexpected end of data at byte {}", self.pos)));
+            return Err(Error::Format(format!(
+                "unexpected end of data at byte {}",
+                self.pos
+            )));
         }
         let out = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -108,13 +119,31 @@ impl<'a> Reader<'a> {
 
     pub fn u32s(&mut self) -> Result<Vec<u32>, Error> {
         let n = self.u32()? as usize;
-        let raw = self.take(n.checked_mul(4).ok_or_else(|| Error::Format("array too long".into()))?)?;
-        Ok(raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect())
+        let raw = self.take(
+            n.checked_mul(4)
+                .ok_or_else(|| Error::Format("array too long".into()))?,
+        )?;
+        Ok(raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect())
     }
 
     pub fn vecs<const N: usize>(&mut self) -> Result<Vec<[f32; N]>, Error> {
         let n = self.u32()? as usize;
-        let raw = self.take(n.checked_mul(4 * N).ok_or_else(|| Error::Format("array too long".into()))?)?;
-        Ok(raw.as_chunks::<4>().0.as_chunks::<N>().0.iter().map(|v| v.map(f32::from_le_bytes)).collect())
+        let raw = self.take(
+            n.checked_mul(4 * N)
+                .ok_or_else(|| Error::Format("array too long".into()))?,
+        )?;
+        Ok(raw
+            .as_chunks::<4>()
+            .0
+            .as_chunks::<N>()
+            .0
+            .iter()
+            .map(|v| v.map(f32::from_le_bytes))
+            .collect())
     }
 }

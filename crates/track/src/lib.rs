@@ -115,7 +115,8 @@ impl TrackPackage {
     pub fn load(dir: &Path, visual: bool) -> Result<Self, Error> {
         let path = dir.join(MANIFEST);
         let src = String::from_utf8_lossy(&read(&path)?).into_owned();
-        let manifest: Manifest = ron::from_str(&src).map_err(|e| Error::Manifest(path.clone(), Box::new(e)))?;
+        let manifest: Manifest =
+            ron::from_str(&src).map_err(|e| Error::Manifest(path.clone(), Box::new(e)))?;
         if manifest.format != FORMAT_VERSION {
             return Err(Error::Format(format!(
                 "{}: format version {}, expected {FORMAT_VERSION}; convert the track again",
@@ -133,7 +134,12 @@ impl TrackPackage {
         } else {
             None
         };
-        Ok(Self { centreline: manifest.centreline, surfaces: manifest.surfaces, ground, visual })
+        Ok(Self {
+            centreline: manifest.centreline,
+            surfaces: manifest.surfaces,
+            ground,
+            visual,
+        })
     }
 
     /// Writes the package into `dir`, creating it if needed.
@@ -143,13 +149,20 @@ impl TrackPackage {
             v.validate()?;
         }
         std::fs::create_dir_all(dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
-        let manifest = Manifest { format: FORMAT_VERSION, centreline: self.centreline.clone(), surfaces: self.surfaces.clone() };
-        let ron = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).expect("manifest serialises");
+        let manifest = Manifest {
+            format: FORMAT_VERSION,
+            centreline: self.centreline.clone(),
+            surfaces: self.surfaces.clone(),
+        };
+        let ron = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
+            .expect("manifest serialises");
         write(&dir.join(GROUND), &self.ground.encode())?;
         let visual_path = dir.join(VISUAL);
         match &self.visual {
             Some(v) => write(&visual_path, &v.encode())?,
-            None if visual_path.exists() => std::fs::remove_file(&visual_path).map_err(|e| Error::Io(visual_path, e))?,
+            None if visual_path.exists() => {
+                std::fs::remove_file(&visual_path).map_err(|e| Error::Io(visual_path, e))?
+            }
             None => {}
         }
         // Last, so a directory with a manifest is always a complete package.
@@ -159,9 +172,14 @@ impl TrackPackage {
     /// The simulation's track: the centreline with the tyres riding on the ground.
     pub fn build_track(&self) -> Result<Track, Error> {
         if !self.ground.is_drivable() {
-            return Err(Error::Format(format!("{}: no drivable surface", self.centreline.name)));
+            return Err(Error::Format(format!(
+                "{}: no drivable surface",
+                self.centreline.name
+            )));
         }
-        Ok(Track::new(&self.centreline).map_err(Error::Track)?.with_ground(self.ground.build(&self.surfaces)))
+        Ok(Track::new(&self.centreline)
+            .map_err(Error::Track)?
+            .with_ground(self.ground.build(&self.surfaces)))
     }
 }
 
@@ -176,19 +194,65 @@ mod tests {
         let points = (0..n)
             .map(|i| {
                 let a = std::f64::consts::TAU * i as f64 / n as f64;
-                TrackPoint { pos: (100.0 * a.cos(), 100.0 * a.sin(), 0.0), width_left: 6.0, width_right: 6.0, bank: 0.0 }
+                TrackPoint {
+                    pos: (100.0 * a.cos(), 100.0 * a.sin(), 0.0),
+                    width_left: 6.0,
+                    width_right: 6.0,
+                    bank: 0.0,
+                }
             })
             .collect();
-        let centreline = TrackDef { name: "ring".into(), points, kerb_width: 1.0, kerb_height: 0.0, runoff_width: 30.0, spacing: 1.0 };
+        let centreline = TrackDef {
+            name: "ring".into(),
+            points,
+            kerb_width: 1.0,
+            kerb_height: 0.0,
+            runoff_width: 30.0,
+            spacing: 1.0,
+        };
         let mut ground = Ground::default();
-        let quad = [[-200.0, -200.0, 0.0], [200.0, -200.0, 0.0], [200.0, 200.0, 0.0], [-200.0, 200.0, 0.0]];
-        ground.add(PatchKind::Ground(0), &quad, &[[0.0, 0.0, 1.0]; 4], &[0, 1, 2, 0, 2, 3]);
-        ground.add(PatchKind::Wall, &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], &[], &[0, 1, 2]);
+        let quad = [
+            [-200.0, -200.0, 0.0],
+            [200.0, -200.0, 0.0],
+            [200.0, 200.0, 0.0],
+            [-200.0, 200.0, 0.0],
+        ];
+        ground.add(
+            PatchKind::Ground(0),
+            &quad,
+            &[[0.0, 0.0, 1.0]; 4],
+            &[0, 1, 2, 0, 2, 3],
+        );
+        ground.add(
+            PatchKind::Wall,
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            &[],
+            &[0, 1, 2],
+        );
         let mut v = VisualBuilder::new();
-        let t = v.add_texture(Texture { data: b"DDS data".to_vec() });
-        let mask = v.add_texture(Texture { data: b"DDS mask".to_vec() });
-        let normal = v.add_texture(Texture { data: b"DDS normal".to_vec() });
-        let detail = Detail { mask, layers: [None, Some(DetailLayer { texture: t, scale: 20.0 }), None, None], multiplier: 2.0, world_uv: true };
+        let t = v.add_texture(Texture {
+            data: b"DDS data".to_vec(),
+        });
+        let mask = v.add_texture(Texture {
+            data: b"DDS mask".to_vec(),
+        });
+        let normal = v.add_texture(Texture {
+            data: b"DDS normal".to_vec(),
+        });
+        let detail = Detail {
+            mask,
+            layers: [
+                None,
+                Some(DetailLayer {
+                    texture: t,
+                    scale: 20.0,
+                }),
+                None,
+                None,
+            ],
+            multiplier: 2.0,
+            world_uv: true,
+        };
         let m = v.add_material(Material {
             base_color: [0.5, 0.5, 0.5, 1.0],
             base_color_texture: Some(t),
@@ -201,12 +265,25 @@ mod tests {
             double_sided: true,
             detail: Some(detail),
         });
-        v.add_mesh(m, false, &quad, &[[0.0, 0.0, 1.0]; 4], &[[0.0, 0.0]; 4], &[0, 1, 2, 0, 2, 3]);
-        TrackPackage { centreline, surfaces: vec![SurfaceProps::of(Surface::Asphalt)], ground, visual: Some(v.build()) }
+        v.add_mesh(
+            m,
+            false,
+            &quad,
+            &[[0.0, 0.0, 1.0]; 4],
+            &[[0.0, 0.0]; 4],
+            &[0, 1, 2, 0, 2, 3],
+        );
+        TrackPackage {
+            centreline,
+            surfaces: vec![SurfaceProps::of(Surface::Asphalt)],
+            ground,
+            visual: Some(v.build()),
+        }
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("open-racing-track-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-track-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
