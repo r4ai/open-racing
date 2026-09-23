@@ -6,7 +6,8 @@ use bevy::prelude::*;
 use glam::{DQuat, DVec3};
 use open_racing_sim::Track;
 
-use crate::driving::Simulation;
+use crate::driving::{Simulation, TrackModel};
+use crate::track_model::{self, TrackModelPlugin};
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
 pub fn to_bevy(v: DVec3) -> Vec3 {
@@ -24,7 +25,8 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_track, spawn_car, spawn_lights))
+        app.add_plugins(TrackModelPlugin)
+            .add_systems(Startup, ((spawn_track, track_model::spawn).chain(), spawn_car, spawn_lights))
             .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
     }
 }
@@ -86,7 +88,17 @@ impl Strip {
     }
 }
 
-fn spawn_track(mut commands: Commands, sim: Res<Simulation>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn spawn_track(
+    mut commands: Commands,
+    sim: Res<Simulation>,
+    model: Res<TrackModel>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // `track_model::spawn` draws tracks that come with a 3D model.
+    if model.0.is_some() {
+        return;
+    }
     let track = &*sim.track;
     let kerb = track.kerb_width;
     let lift = 0.01; // Keep strips from z-fighting.

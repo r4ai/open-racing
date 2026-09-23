@@ -1,0 +1,13 @@
+[package]
+name = "open-racing-ac"
+description = "Converts track folders in the Assetto Corsa format into open-racing track packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-sim.workspace = true
+open-racing-track = { workspace = true, features = ["encode"] }
+rayon.workspace = true
+glam.workspace = true
+clap.workspace = true

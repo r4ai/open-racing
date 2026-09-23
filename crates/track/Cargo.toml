@@ -1,0 +1,19 @@
+[package]
+name = "open-racing-track"
+description = "open-racing's track package format: centreline, road meshes and render data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-sim.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+texpresso = { version = "2.0", optional = true }
+png = { version = "0.18", optional = true }
+
+[features]
+# Texture preparation (decoding, mipmaps, block compression) for converters. The
+# runtime only reads prepared textures and does not need it.
+encode = ["dep:texpresso", "dep:png"]

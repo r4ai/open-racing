@@ -12,6 +12,7 @@ mod hud;
 mod input;
 mod scene;
 mod settings;
+mod track_model;
 
 use std::path::PathBuf;
 
@@ -38,7 +39,7 @@ pub struct Args {
 
 fn main() {
     let args = Args::parse();
-    let sim = driving::Simulation::new(&args).unwrap_or_else(|e| {
+    let (sim, track_model) = driving::Simulation::new(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
@@ -54,6 +55,7 @@ fn main() {
     }))
     .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
     .insert_resource(sim)
+    .insert_resource(track_model)
     .insert_resource(args.clone())
     .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin, effects::EffectsPlugin, settings::SettingsPlugin, ffb::FfbPlugin));
     driving::install_policy(&mut app, &args);

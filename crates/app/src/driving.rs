@@ -37,6 +37,10 @@ impl Recording {
     }
 }
 
+/// 3D model of a track package, taken by the scene when it spawns.
+#[derive(Resource, Default)]
+pub struct TrackModel(pub Option<open_racing_track::Visual>);
+
 #[derive(Resource)]
 pub struct Simulation {
     pub track: Arc<Track>,
@@ -57,12 +61,13 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    pub fn new(args: &Args) -> Result<Self, open_racing_api::Error> {
-        let track = open_racing_api::load_track(&args.track)?;
+    /// Also returns the track's 3D model, if it has one, for the scene to spawn.
+    pub fn new(args: &Args) -> Result<(Self, TrackModel), open_racing_api::Error> {
+        let (track, model) = open_racing_api::load_track_with_visual(&args.track)?;
         let car_model = open_racing_api::load_car(&args.car)?;
         let spec = EnvSpec::new(track, car_model, Default::default());
         let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
-        Ok(Self {
+        let sim = Self {
             lap: LapTimer::new(&spec.track, car.state.position),
             previous: car.state,
             recording: Recording::new(car.state),
@@ -75,7 +80,8 @@ impl Simulation {
             controls: Controls::default(),
             ffb_torque: 0.0,
             spec,
-        })
+        };
+        Ok((sim, TrackModel(model)))
     }
 
     /// Body pose interpolated between the last two physics states.

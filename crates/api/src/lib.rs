@@ -64,6 +64,7 @@ pub trait Policy {
 pub enum Error {
     Track(open_racing_sim::TrackError),
     Car(open_racing_sim::ParamsError),
+    Package(open_racing_track::Error),
     NotFound(PathBuf),
 }
 
@@ -72,6 +73,7 @@ impl std::fmt::Display for Error {
         match self {
             Self::Track(e) => e.fmt(f),
             Self::Car(e) => e.fmt(f),
+            Self::Package(e) => e.fmt(f),
             Self::NotFound(p) => write!(f, "asset not found: {}", p.display()),
         }
     }
@@ -92,9 +94,30 @@ fn resolve(kind: &str, name_or_path: &str) -> Result<PathBuf, Error> {
     if path.exists() { Ok(path) } else { Err(Error::NotFound(path)) }
 }
 
-/// Loads a track by name (`assets/tracks/<name>.ron`) or by path.
+/// Loads a track by name (`assets/tracks/<name>.ron` or the package
+/// `<content>/tracks/<name>/`), or by path to either.
 pub fn load_track(name_or_path: &str) -> Result<Track, Error> {
-    Track::load(resolve("tracks", name_or_path)?).map_err(Error::Track)
+    Ok(load_track_and_model(name_or_path, false)?.0)
+}
+
+/// Like `load_track`, plus the 3D model for rendering when the track has one.
+pub fn load_track_with_visual(name_or_path: &str) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
+    load_track_and_model(name_or_path, true)
+}
+
+/// Tries a package directory given by path, then `assets/tracks/<name>.ron` (or a file
+/// path), then the package `<content>/tracks/<name>/`.
+fn load_track_and_model(name_or_path: &str, visual: bool) -> Result<(Track, Option<open_racing_track::Visual>), Error> {
+    let direct = Path::new(name_or_path);
+    let named = open_racing_track::tracks_dir().join(name_or_path);
+    let dir = match resolve("tracks", name_or_path) {
+        _ if open_racing_track::is_package(direct) => direct.to_path_buf(),
+        Ok(ron) => return Ok((Track::load(ron).map_err(Error::Track)?, None)),
+        Err(_) if direct.extension().is_none() && open_racing_track::is_package(&named) => named,
+        Err(not_found) => return Err(not_found),
+    };
+    let mut package = open_racing_track::TrackPackage::load(&dir, visual).map_err(Error::Package)?;
+    Ok((package.build_track().map_err(Error::Package)?, package.visual.take()))
 }
 
 /// Loads a car by name (`assets/cars/<name>.ron`) or by path.
@@ -102,7 +125,7 @@ pub fn load_car(name_or_path: &str) -> Result<CarModel, Error> {
     CarModel::load(resolve("cars", name_or_path)?).map_err(Error::Car)
 }
 
-/// Names of the tracks available in the assets directory.
+/// Names of the tracks in the assets directory, then of the packages in the content directory.
 pub fn list_tracks() -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(assets_dir().join("tracks"))
         .into_iter()
@@ -114,6 +137,7 @@ pub fn list_tracks() -> Vec<String> {
         })
         .collect();
     names.sort();
+    names.extend(open_racing_track::list());
     names
 }
 
@@ -138,7 +162,7 @@ impl EnvSpec {
         }
     }
 
-    /// Loads track and car from the assets directory by name.
+    /// Loads track and car by name (see `load_track` and `load_car`).
     pub fn from_names(track: &str, car: &str, config: EnvConfig) -> Result<Self, Error> {
         Ok(Self::new(load_track(track)?, load_car(car)?, config))
     }

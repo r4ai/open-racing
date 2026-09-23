@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 open-racing-sim.workspace = true
 open-racing-env.workspace = true
+open-racing-track.workspace = true

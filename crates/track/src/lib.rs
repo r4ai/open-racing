@@ -1,0 +1,246 @@
+//! open-racing's track package format.
+//!
+//! A package is a directory holding one track:
+//! - `track.ron`: format version, centreline and surface table. Small and readable.
+//! - `ground.bin`: drivable surfaces and walls for the physics.
+//! - `visual.bin` (optional): meshes, materials and textures for rendering.
+//!
+//! Physics and rendering data live in separate files so that simulation-only processes
+//! (training, evaluation) never read the bulk of a package. All geometry is in the
+//! simulation's world frame (m, Z up), stored as `f32`.
+//!
+//! The runtime reads only this format. Tracks made in other formats are converted into
+//! packages ahead of time by separate converter crates.
+
+mod bin;
+pub mod ground;
+#[cfg(feature = "encode")]
+pub mod texture;
+pub mod visual;
+
+use std::path::{Path, PathBuf};
+
+use open_racing_sim::{SurfaceProps, Track, TrackDef, TrackError};
+use serde::{Deserialize, Serialize};
+
+pub use ground::{Ground, Patch, PatchKind};
+pub use visual::{AlphaMode, Detail, DetailLayer, Material, Mesh, Texture, Visual, VisualBuilder};
+
+/// Version of the package layout and of `track.ron`.
+pub const FORMAT_VERSION: u32 = 1;
+const MANIFEST: &str = "track.ron";
+const GROUND: &str = "ground.bin";
+const VISUAL: &str = "visual.bin";
+
+#[derive(Debug)]
+pub enum Error {
+    Io(PathBuf, std::io::Error),
+    Manifest(PathBuf, Box<ron::error::SpannedError>),
+    Format(String),
+    Track(TrackError),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(p, e) => write!(f, "{}: {e}", p.display()),
+            Self::Manifest(p, e) => write!(f, "{}: {e}", p.display()),
+            Self::Format(msg) => f.write_str(msg),
+            Self::Track(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Directory for user-supplied content, which is never part of the repository.
+/// Override with `OPEN_RACING_CONTENT`.
+pub fn content_dir() -> PathBuf {
+    std::env::var_os("OPEN_RACING_CONTENT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"))
+}
+
+/// Where packages are looked up by name: `<content>/tracks/<name>/`.
+pub fn tracks_dir() -> PathBuf {
+    content_dir().join("tracks")
+}
+
+/// Whether `dir` holds a package.
+pub fn is_package(dir: &Path) -> bool {
+    dir.join(MANIFEST).is_file()
+}
+
+/// Names of the packages in `tracks_dir()`, sorted.
+pub fn list() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(tracks_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| is_package(&e.path()))
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+    names.sort();
+    names
+}
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    format: u32,
+    /// Centreline for track coordinates (progress, observations, lap timing). The
+    /// start/finish line is at its first point.
+    centreline: TrackDef,
+    /// Surface types; `PatchKind::Ground` indexes into this.
+    surfaces: Vec<SurfaceProps>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPackage {
+    pub centreline: TrackDef,
+    pub surfaces: Vec<SurfaceProps>,
+    pub ground: Ground,
+    pub visual: Option<Visual>,
+}
+
+fn read(path: &Path) -> Result<Vec<u8>, Error> {
+    std::fs::read(path).map_err(|e| Error::Io(path.to_path_buf(), e))
+}
+
+fn write(path: &Path, data: &[u8]) -> Result<(), Error> {
+    std::fs::write(path, data).map_err(|e| Error::Io(path.to_path_buf(), e))
+}
+
+impl TrackPackage {
+    /// Reads a package; `visual` also reads the render data when there is any.
+    pub fn load(dir: &Path, visual: bool) -> Result<Self, Error> {
+        let path = dir.join(MANIFEST);
+        let src = String::from_utf8_lossy(&read(&path)?).into_owned();
+        let manifest: Manifest = ron::from_str(&src).map_err(|e| Error::Manifest(path.clone(), Box::new(e)))?;
+        if manifest.format != FORMAT_VERSION {
+            return Err(Error::Format(format!(
+                "{}: format version {}, expected {FORMAT_VERSION}; convert the track again",
+                path.display(),
+                manifest.format
+            )));
+        }
+        let ground = Ground::decode(&read(&dir.join(GROUND))?)?;
+        ground.validate(manifest.surfaces.len())?;
+        let visual_path = dir.join(VISUAL);
+        let visual = if visual && visual_path.is_file() {
+            let v = Visual::decode(&read(&visual_path)?)?;
+            v.validate()?;
+            Some(v)
+        } else {
+            None
+        };
+        Ok(Self { centreline: manifest.centreline, surfaces: manifest.surfaces, ground, visual })
+    }
+
+    /// Writes the package into `dir`, creating it if needed.
+    pub fn save(&self, dir: &Path) -> Result<(), Error> {
+        self.ground.validate(self.surfaces.len())?;
+        if let Some(v) = &self.visual {
+            v.validate()?;
+        }
+        std::fs::create_dir_all(dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+        let manifest = Manifest { format: FORMAT_VERSION, centreline: self.centreline.clone(), surfaces: self.surfaces.clone() };
+        let ron = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).expect("manifest serialises");
+        write(&dir.join(GROUND), &self.ground.encode())?;
+        let visual_path = dir.join(VISUAL);
+        match &self.visual {
+            Some(v) => write(&visual_path, &v.encode())?,
+            None if visual_path.exists() => std::fs::remove_file(&visual_path).map_err(|e| Error::Io(visual_path, e))?,
+            None => {}
+        }
+        // Last, so a directory with a manifest is always a complete package.
+        write(&dir.join(MANIFEST), ron.as_bytes())
+    }
+
+    /// The simulation's track: the centreline with the tyres riding on the ground.
+    pub fn build_track(&self) -> Result<Track, Error> {
+        if !self.ground.is_drivable() {
+            return Err(Error::Format(format!("{}: no drivable surface", self.centreline.name)));
+        }
+        Ok(Track::new(&self.centreline).map_err(Error::Track)?.with_ground(self.ground.build(&self.surfaces)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use open_racing_sim::{Surface, TrackPoint};
+
+    use super::*;
+
+    fn package() -> TrackPackage {
+        let n = 64;
+        let points = (0..n)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / n as f64;
+                TrackPoint { pos: (100.0 * a.cos(), 100.0 * a.sin(), 0.0), width_left: 6.0, width_right: 6.0, bank: 0.0 }
+            })
+            .collect();
+        let centreline = TrackDef { name: "ring".into(), points, kerb_width: 1.0, kerb_height: 0.0, runoff_width: 30.0, spacing: 1.0 };
+        let mut ground = Ground::default();
+        let quad = [[-200.0, -200.0, 0.0], [200.0, -200.0, 0.0], [200.0, 200.0, 0.0], [-200.0, 200.0, 0.0]];
+        ground.add(PatchKind::Ground(0), &quad, &[[0.0, 0.0, 1.0]; 4], &[0, 1, 2, 0, 2, 3]);
+        ground.add(PatchKind::Wall, &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], &[], &[0, 1, 2]);
+        let mut v = VisualBuilder::new();
+        let t = v.add_texture(Texture { data: b"DDS data".to_vec() });
+        let mask = v.add_texture(Texture { data: b"DDS mask".to_vec() });
+        let detail = Detail { mask, layers: [None, Some(DetailLayer { texture: t, scale: 20.0 }), None, None], multiplier: 2.0, world_uv: true };
+        let m = v.add_material(Material {
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            base_color_texture: Some(t),
+            alpha_mode: AlphaMode::Mask(0.4),
+            double_sided: true,
+            detail: Some(detail),
+        });
+        v.add_mesh(m, false, &quad, &[[0.0, 0.0, 1.0]; 4], &[[0.0, 0.0]; 4], &[0, 1, 2, 0, 2, 3]);
+        TrackPackage { centreline, surfaces: vec![SurfaceProps::of(Surface::Asphalt)], ground, visual: Some(v.build()) }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("open-racing-track-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn round_trips_through_files() {
+        let dir = temp_dir("round-trip");
+        let pkg = package();
+        pkg.save(&dir).unwrap();
+        assert!(is_package(&dir));
+
+        let physics = TrackPackage::load(&dir, false).unwrap();
+        assert!(physics.visual.is_none());
+        assert_eq!(physics.ground, pkg.ground);
+        assert_eq!(physics.surfaces, pkg.surfaces);
+        assert_eq!(physics.centreline.points.len(), 64);
+
+        let full = TrackPackage::load(&dir, true).unwrap();
+        assert_eq!(full.visual, pkg.visual);
+
+        let track = full.build_track().unwrap();
+        let q = track.query(glam::DVec3::new(100.0, 0.0, 0.5), 0);
+        assert!(q.surface_point.z.abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_broken_packages() {
+        let dir = temp_dir("broken");
+        let mut pkg = package();
+        pkg.ground.patches[0].indices.push(99);
+        assert!(pkg.save(&dir).is_err());
+
+        let pkg = package();
+        pkg.save(&dir).unwrap();
+        let ground = dir.join(GROUND);
+        let mut bytes = std::fs::read(&ground).unwrap();
+        bytes.truncate(bytes.len() - 5);
+        std::fs::write(&ground, &bytes).unwrap();
+        assert!(TrackPackage::load(&dir, false).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
