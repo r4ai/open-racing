@@ -54,8 +54,11 @@ Use `--features ndarray` or `--features flex` for a CPU backend.
 | P | replay since the last reset |
 | T | switch to the AI driver |
 | M | mute / unmute sound |
+| Tab | choose the input device |
 
-Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift.
+Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
+
+With several devices connected, Tab cycles auto → keyboard → each connected gamepad / wheel. In auto, whichever device was used last drives; otherwise only the chosen device is read. Steering wheels (recognised by name, e.g. G29 or T300, or by vendor: MOZA, Fanatec) steer 1:1 over a 900° rotation range.
 
 ## Adding content
 

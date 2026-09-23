@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::camera::CameraMode;
 use crate::driving::{Mode, Simulation};
-use crate::input::{AppRequests, DriverInput};
+use crate::input::{AppRequests, DriverInput, InputSelection};
 
 #[derive(Component)]
 struct HudText;
@@ -33,8 +33,10 @@ V                cycle camera
 P                replay since last reset / stop replay
 T                toggle AI driver (with --ai)
 M                mute / unmute sound
+Tab              choose input device (auto / keyboard / each pad or wheel)
 H                hide this help
-Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift";
+Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
+Wheel: steers 1:1 (900 deg), pedals and paddles as on a gamepad";
 
 fn spawn(mut commands: Commands) {
     let panel = |top: bool| Node {
@@ -80,7 +82,15 @@ fn time(t: Option<f64>) -> String {
     t.map_or("--:--.---".into(), |t| format!("{}:{:06.3}", (t / 60.0) as u32, t % 60.0))
 }
 
-fn update(sim: Res<Simulation>, input: Res<DriverInput>, camera: Res<CameraMode>, diagnostics: Res<Time>, mut hud: Query<&mut Text, With<HudText>>) {
+fn update(
+    sim: Res<Simulation>,
+    input: Res<DriverInput>,
+    selection: Res<InputSelection>,
+    pads: Query<(Entity, &Gamepad, &Name)>,
+    camera: Res<CameraMode>,
+    diagnostics: Res<Time>,
+    mut hud: Query<&mut Text, With<HudText>>,
+) {
     let Ok(mut text) = hud.single_mut() else { return };
     let car = &sim.car;
     let st = &car.state;
@@ -100,6 +110,7 @@ fn update(sim: Res<Simulation>, input: Res<DriverInput>, camera: Res<CameraMode>
 
     let mut s = String::new();
     let _ = writeln!(s, "{mode}   camera: {}   {:.0} fps", camera.name(), 1.0 / diagnostics.delta_secs().max(1e-3));
+    let _ = writeln!(s, "input: {} (Tab)", selection.label(&pads));
     let _ = writeln!(
         s,
         "{:5.0} km/h   gear {gear}   {:5.0} rpm{}",
