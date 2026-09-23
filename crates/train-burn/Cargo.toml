@@ -1,0 +1,19 @@
+[package]
+name = "open-racing-train-burn"
+description = "PPO trainer and policy adapter built on Burn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["wgpu"]
+wgpu = ["burn/wgpu"]
+ndarray = ["burn/ndarray"]
+flex = ["burn/flex"]
+
+[dependencies]
+open-racing-api.workspace = true
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff"] }
+clap.workspace = true
+serde.workspace = true
+ron.workspace = true

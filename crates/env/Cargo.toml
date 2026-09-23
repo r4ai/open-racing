@@ -1,0 +1,19 @@
+[package]
+name = "open-racing-env"
+description = "Reinforcement-learning environment on top of the racing simulation (application layer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-sim.workspace = true
+glam.workspace = true
+rayon.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "batch"
+harness = false

@@ -1,0 +1,127 @@
+// Generic GT3-class car (front-engine-less mid/rear layout, RWD, slick tyres).
+// Values are representative of the class, not of any particular model.
+// Units: SI (m, kg, N, s). Angles in radians.
+(
+    name: "GT3",
+    mass: 1330.0,                 // incl. driver and ~half fuel
+    inertia: (500.0, 1900.0, 2150.0),
+    cg_height: 0.42,
+    front_weight: 0.45,
+    wheelbase: 2.65,
+    track_front: 1.65,
+    track_rear: 1.62,
+
+    front: (
+        tire: (
+            radius: 0.330,
+            vertical_stiffness: 280000.0,
+            vertical_damping: 400.0,
+            mu_x: 1.65,
+            mu_y: 1.60,
+            nominal_load: 3500.0,
+            load_sensitivity: -0.12,
+            longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
+            lateral: (peak_slip: 0.115, shape: 1.45, curvature: 0.3),   // ~6.6 deg
+            relaxation_x: 0.15,
+            relaxation_y: 0.35,
+            camber_thrust: 0.12,
+            optimal_camber: -0.035,
+            camber_grip_loss: 20.0,
+            pneumatic_trail: 0.035,
+            rolling_resistance: 0.012,
+        ),
+        unsprung_mass: 45.0,
+        wheel_inertia: 1.1,
+        spring_rate: 120000.0,
+        bump_damping: 5500.0,
+        rebound_damping: 8000.0,
+        anti_roll_rate: 60000.0,
+        bump_travel: 0.040,
+        droop_travel: 0.070,
+        bump_stop_rate: 1000000.0,
+        static_camber: -0.061,       // -3.5 deg
+    ),
+
+    rear: (
+        tire: (
+            radius: 0.350,
+            vertical_stiffness: 300000.0,
+            vertical_damping: 400.0,
+            mu_x: 1.65,
+            mu_y: 1.60,
+            nominal_load: 4000.0,
+            load_sensitivity: -0.12,
+            longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
+            lateral: (peak_slip: 0.105, shape: 1.45, curvature: 0.3),   // ~6.0 deg
+            relaxation_x: 0.15,
+            relaxation_y: 0.35,
+            camber_thrust: 0.12,
+            optimal_camber: -0.030,
+            camber_grip_loss: 20.0,
+            pneumatic_trail: 0.035,
+            rolling_resistance: 0.012,
+        ),
+        unsprung_mass: 50.0,
+        wheel_inertia: 1.4,
+        spring_rate: 140000.0,
+        bump_damping: 6000.0,
+        rebound_damping: 9000.0,
+        anti_roll_rate: 40000.0,
+        bump_travel: 0.045,
+        droop_travel: 0.070,
+        bump_stop_rate: 1000000.0,
+        static_camber: -0.044,       // -2.5 deg
+    ),
+
+    steering: (
+        ratio: 13.0,
+        lock: 4.712,                 // 270 deg each way
+        ackermann: 0.3,
+    ),
+
+    brakes: (
+        max_torque: 11000.0,
+        front_bias: 0.60,
+    ),
+
+    engine: (
+        torque_curve: [
+            (1000.0, 250.0), (2000.0, 320.0), (3000.0, 380.0), (4000.0, 420.0),
+            (5000.0, 450.0), (6000.0, 470.0), (7000.0, 465.0), (8000.0, 450.0),
+            (8750.0, 430.0), (9500.0, 380.0),
+        ],
+        drag_curve: [
+            (0.0, 15.0), (1000.0, 20.0), (3000.0, 35.0), (6000.0, 60.0), (9500.0, 95.0),
+        ],
+        inertia: 0.20,
+        idle_rpm: 1500.0,
+        limiter_rpm: 9250.0,
+        stall_rpm: 700.0,
+    ),
+
+    clutch: (
+        max_torque: 900.0,
+        anti_stall_rpm: 1600.0,
+    ),
+
+    gearbox: (
+        ratios: [3.15, 2.37, 1.93, 1.62, 1.39, 1.20],
+        reverse: 3.0,
+        final_drive: 3.4,
+        shift_time: 0.05,
+        efficiency: 0.92,
+    ),
+
+    differential: (
+        preload: 100.0,
+        power_ramp: 0.35,
+        coast_ramp: 0.25,
+    ),
+
+    aero: (
+        drag_area: 0.85,
+        downforce_area_front: 1.2,
+        downforce_area_rear: 1.8,
+        drag_height: 0.10,
+    ),
+)

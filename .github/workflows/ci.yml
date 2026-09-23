@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test simulation layers
+        run: cargo test --release -p open-racing-sim -p open-racing-env -p open-racing-api
+      - name: Build trainer (CPU backend)
+        run: cargo build --release -p open-racing-train-burn --no-default-features --features ndarray
+      - name: Build app
+        run: cargo build -p open-racing-app
