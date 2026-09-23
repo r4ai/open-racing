@@ -49,6 +49,9 @@ enum Command {
         /// (summed over the four tyres).
         #[arg(long, default_value_t = DefaultReward::default().grip_loss_weight)]
         grip_loss_penalty: f64,
+        /// Reward lost per unit of change in the normalised steering input (−1..1) per step.
+        #[arg(long, default_value_t = DefaultReward::default().steer_change_weight)]
+        steer_change_penalty: f64,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// Include ground-truth tyre state in the observation.
@@ -108,6 +111,7 @@ fn main() {
             entropy,
             crash_penalty,
             grip_loss_penalty,
+            steer_change_penalty,
             seed,
             privileged,
             tyre_obs,
@@ -134,6 +138,7 @@ fn main() {
             spec.reward = Arc::new(DefaultReward {
                 termination_penalty: crash_penalty,
                 grip_loss_weight: grip_loss_penalty,
+                steer_change_weight: steer_change_penalty,
                 ..DefaultReward::default()
             });
             let mut env = spec.make_vec_env(envs);
@@ -218,7 +223,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         );
         writeln!(
             file,
-            "time,s,offset,speed,steer,throttle,brake,gear,curvature,sideslip_deg,tread_fl,tread_fr,tread_rl,tread_rr,grip_fl,grip_fr,grip_rl,grip_rr,wheels_off"
+            "time,s,offset,speed,steer,throttle,brake,gear,curvature,sideslip_deg,tread_fl,tread_fr,tread_rl,tread_rr,grip_fl,grip_fr,grip_rl,grip_rr,wheels_off,width_left,width_right"
         )
         .unwrap();
         file
@@ -273,7 +278,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
                 .count();
             writeln!(
                 file,
-                "{:.2},{:.1},{:.2},{:.2},{:.3},{:.3},{:.3},{},{:.5},{:.1},{:.0},{:.0},{:.0},{:.0},{:.3},{:.3},{:.3},{:.3},{}",
+                "{:.2},{:.1},{:.2},{:.2},{:.3},{:.3},{:.3},{},{:.5},{:.1},{:.0},{:.0},{:.0},{:.0},{:.3},{:.3},{:.3},{:.3},{},{:.2},{:.2}",
                 stats.time,
                 q.s,
                 q.d,
@@ -293,6 +298,8 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
                 grips[2],
                 grips[3],
                 wheels_off,
+                q.width_left,
+                q.width_right,
             )
             .unwrap();
         }
