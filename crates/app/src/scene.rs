@@ -237,14 +237,14 @@ fn spawn_car(mut commands: Commands, sim: Res<Simulation>, mut meshes: ResMut<As
         });
 
     for i in 0..4 {
-        let tire = &sim.car.model.axle(i).tire;
+        let tire = &sim.car.model.tire(i).p;
         let r = tire.radius as f32;
         commands
             .spawn((CarWheel(i), Transform::default(), Visibility::default()))
             .with_children(|w| {
                 // Cylinder axis is Y; turn it onto the wheel's spin axis (local Z).
                 let axis = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-                w.spawn((Mesh3d(meshes.add(Cylinder::new(r, 0.3))), MeshMaterial3d(dark.clone()), Transform::from_rotation(axis)));
+                w.spawn((Mesh3d(meshes.add(Cylinder::new(r, tire.width as f32))), MeshMaterial3d(dark.clone()), Transform::from_rotation(axis)));
                 // A spoke so wheel rotation is visible.
                 w.spawn((
                     Mesh3d(meshes.add(Cuboid::new(r * 1.6, 0.08, 0.32))),

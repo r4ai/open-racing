@@ -73,7 +73,8 @@ Force feedback (Windows, DirectInput) plays the simulated steering torque from t
 ## Adding content
 
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
-- Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template.
+- Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template. Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
+- Tyres: add `assets/tires/<name>.ron` using `velloni_zeta_gt_front.ron` as a template. A tyre file holds the size, the force curves, how pressure changes stiffness, peak slip, rolling resistance and grip, and the thermal model (inner / middle / outer tread zones and carcass, cooling, operating window, wear). Hot pressure follows the carcass temperature (gas law), so the cold pressure, camber and driving style show up in the tread temperatures on the HUD as they would on a real car. The bundled GT3 runs on the fictional Velloni Zeta GT, modelled on public figures for GT3 slicks (30/68-18 front, 31/71-18 rear).
 
 ### Track packages
 

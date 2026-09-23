@@ -217,7 +217,7 @@ fn tire_smoke(w: &WheelTelemetry, tire: &TireCondition) -> f64 {
     if w.load <= 0.0 {
         return 0.0;
     }
-    let contact = tire.surface_temperature + FLASH_PER_SLIDE_SPEED * w.slide_speed;
+    let contact = tire.surface_temperature(&w.tread_load) + FLASH_PER_SLIDE_SPEED * w.slide_speed;
     smoothstep(SMOKE_TEMPERATURE.0, SMOKE_TEMPERATURE.1, contact)
 }
 

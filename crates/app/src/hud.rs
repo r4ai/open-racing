@@ -131,19 +131,20 @@ fn update(
         bar(c.brake),
         c.steer_wheel_angle.to_degrees()
     );
-    let _ = writeln!(s, "tyre   load N   slip deg   slip %   surf/core C   wear %   grip %");
+    let _ = writeln!(s, "tyre   load N   slip deg   slip %    in  mid  out  core C    bar   wear %   grip %");
     for (i, (name, w)) in ["FL", "FR", "RL", "RR"].iter().zip(&car.telemetry.wheels).enumerate() {
         let t = &st.wheels[i].tire;
+        let [inner, middle, outer] = t.tread_temperature;
         let _ = writeln!(
             s,
-            "{name}   {:6.0}   {:8.1}   {:6.1}   {:4.0}/{:<4.0}   {:6.1}   {:6.1}",
+            "{name}   {:6.0}   {:8.1}   {:6.1}   {inner:4.0} {middle:4.0} {outer:4.0}   {:4.0}   {:5.2}   {:6.1}   {:6.1}",
             w.load,
             w.slip_angle.to_degrees(),
             w.slip_ratio * 100.0,
-            t.surface_temperature,
             t.core_temperature,
+            w.pressure,
             t.wear * 100.0,
-            car.model.tire(i).condition_grip(t) * 100.0
+            car.model.tire(i).condition_grip(t, &w.tread_load, w.pressure) * 100.0
         );
     }
     let a = car.telemetry.acceleration;

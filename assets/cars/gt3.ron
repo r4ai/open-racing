@@ -1,4 +1,4 @@
-// Generic GT3-class car (front-engine-less mid/rear layout, RWD, slick tyres).
+// Generic GT3-class car (front-engine-less mid/rear layout, RWD) on GT3-class slicks.
 // Values are representative of the class, not of any particular model.
 // Units: SI (m, kg, N, s). Angles in radians.
 (
@@ -12,40 +12,8 @@
     track_rear: 1.62,
 
     front: (
-        tire: (
-            radius: 0.330,
-            vertical_stiffness: 280000.0,
-            vertical_damping: 400.0,
-            mu_x: 1.65,
-            mu_y: 1.60,
-            nominal_load: 3500.0,
-            load_sensitivity: -0.12,
-            longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
-            lateral: (peak_slip: 0.115, shape: 1.45, curvature: 0.3),   // ~6.6 deg
-            relaxation_x: 0.15,
-            relaxation_y: 0.35,
-            camber_thrust: 0.12,
-            optimal_camber: -0.035,
-            camber_grip_loss: 20.0,
-            pneumatic_trail: 0.035,
-            rolling_resistance: 0.012,
-            thermal: (
-                optimal_temperature: 90.0,
-                cold_window: 50.0,
-                hot_window: 35.0,
-                window_grip_loss: 0.15,
-                start_temperature: 75.0,     // out of the tyre blankets
-                surface_capacity: 1500.0,
-                core_capacity: 15000.0,
-                core_conductance: 120.0,
-                air_cooling: 5.0,
-                air_cooling_per_speed: 1.0,
-                road_cooling: 30.0,
-                slide_heat_share: 0.5,
-                wear_rate: 0.02,             // worn out after ~50 MJ of sliding
-                wear_grip_loss: 0.1,
-            ),
-        ),
+        tire: "velloni_zeta_gt_front",
+        pressure: 1.38,              // cold; ~1.85 bar hot (about 26.8 psi)
         unsprung_mass: 45.0,
         wheel_inertia: 1.1,
         spring_rate: 120000.0,
@@ -59,40 +27,8 @@
     ),
 
     rear: (
-        tire: (
-            radius: 0.350,
-            vertical_stiffness: 300000.0,
-            vertical_damping: 400.0,
-            mu_x: 1.65,
-            mu_y: 1.60,
-            nominal_load: 4000.0,
-            load_sensitivity: -0.12,
-            longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
-            lateral: (peak_slip: 0.105, shape: 1.45, curvature: 0.3),   // ~6.0 deg
-            relaxation_x: 0.15,
-            relaxation_y: 0.35,
-            camber_thrust: 0.12,
-            optimal_camber: -0.030,
-            camber_grip_loss: 20.0,
-            pneumatic_trail: 0.035,
-            rolling_resistance: 0.012,
-            thermal: (
-                optimal_temperature: 90.0,
-                cold_window: 50.0,
-                hot_window: 35.0,
-                window_grip_loss: 0.15,
-                start_temperature: 75.0,     // out of the tyre blankets
-                surface_capacity: 1500.0,
-                core_capacity: 15000.0,
-                core_conductance: 120.0,
-                air_cooling: 5.0,
-                air_cooling_per_speed: 1.0,
-                road_cooling: 30.0,
-                slide_heat_share: 0.5,
-                wear_rate: 0.02,             // worn out after ~50 MJ of sliding
-                wear_grip_loss: 0.1,
-            ),
-        ),
+        tire: "velloni_zeta_gt_rear",
+        pressure: 1.38,
         unsprung_mass: 50.0,
         wheel_inertia: 1.4,
         spring_rate: 140000.0,

@@ -1,5 +1,6 @@
 //! Tyre force model: Pacejka "Magic Formula" with combined slip via normalised slip,
-//! plus a two-layer tread temperature model with wear that scales the grip.
+//! plus inflation pressure, a tread (three zones) and carcass temperature model, and
+//! wear, which together scale the grip.
 
 use serde::{Deserialize, Serialize};
 
@@ -58,11 +59,17 @@ impl Curve {
     }
 }
 
+/// One tyre: size, carcass and compound. Loaded from `assets/tires/*.ron`; a car names
+/// the tyre for each axle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TireParams {
+    /// Human readable name, e.g. make, compound and size.
+    pub name: String,
     /// Unloaded radius in metres.
     pub radius: f64,
-    /// Vertical stiffness in N/m.
+    /// Section width in metres.
+    pub width: f64,
+    /// Vertical stiffness at the optimal pressure in N/m.
     pub vertical_stiffness: f64,
     /// Vertical damping in N·s/m.
     pub vertical_damping: f64,
@@ -74,6 +81,7 @@ pub struct TireParams {
     pub nominal_load: f64,
     /// Relative change of μ per unit relative load change (negative: μ drops with load).
     pub load_sensitivity: f64,
+    /// Force curves at the optimal pressure.
     pub longitudinal: CurveParams,
     pub lateral: CurveParams,
     /// Longitudinal relaxation length in metres.
@@ -88,16 +96,38 @@ pub struct TireParams {
     pub camber_grip_loss: f64,
     /// Pneumatic trail at zero slip in metres (drives aligning torque / FFB).
     pub pneumatic_trail: f64,
-    /// Rolling resistance coefficient.
+    /// Rolling resistance coefficient at the optimal pressure.
     pub rolling_resistance: f64,
+    pub pressure: PressureParams,
     pub thermal: ThermalParams,
+}
+
+/// How the inflation pressure changes the tyre. Pressures are gauge, in bar.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PressureParams {
+    /// Hot pressure at which grip peaks.
+    pub optimal: f64,
+    /// Pressure distance from the optimum over which grip falls away.
+    pub window: f64,
+    /// Fraction of grip lost far outside the window.
+    pub grip_loss: f64,
+    /// Change of vertical stiffness per bar, N/m.
+    pub stiffness_per_bar: f64,
+    /// Relative change of the peak slips per bar (negative: a harder carcass peaks earlier).
+    pub peak_slip_per_bar: f64,
+    /// Relative change of the rolling resistance per bar.
+    pub rolling_resistance_per_bar: f64,
+    /// Load share moved from each shoulder to the centre of the tread per bar over the optimum.
+    pub crown_load_per_bar: f64,
 }
 
 /// Heating, cooling and wear of the tread.
 ///
-/// The tread surface is heated by the sliding power at the contact patch and cooled by
-/// the air and the road; the carcass is heated by rolling hysteresis and exchanges heat
-/// with the surface. Grip follows the surface temperature.
+/// The tread surface is split into inner, middle and outer zones. Each is heated by its
+/// load share of the sliding power and of the tread's part of rolling hysteresis, is
+/// cooled by the air and the road, and exchanges heat with its neighbours and the
+/// carcass. The carcass takes the rest of the rolling hysteresis; the air inside follows
+/// its temperature. Grip follows the load-weighted surface temperature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThermalParams {
     /// Surface temperature at which grip peaks, °C.
@@ -107,20 +137,29 @@ pub struct ThermalParams {
     pub hot_window: f64,
     /// Fraction of grip lost far outside the window.
     pub window_grip_loss: f64,
-    /// Temperature of surface and carcass after a reset (out of the tyre blankets), °C.
+    /// Temperature of tread and carcass after a reset (out of the tyre blankets), °C.
     pub start_temperature: f64,
-    /// Heat capacity of the tread surface layer / the carcass, J/K.
+    /// Heat capacity of the whole tread surface layer / the carcass, J/K.
     pub surface_capacity: f64,
     pub core_capacity: f64,
-    /// Conductance between surface and carcass, W/K.
+    /// Conductance between the whole tread surface and the carcass, W/K.
     pub core_conductance: f64,
-    /// Surface to air conductance at rest, and its increase per m/s of rolling speed, W/K.
+    /// Conductance between neighbouring tread zones, W/K.
+    pub zone_conductance: f64,
+    /// Whole-tread to air conductance at rest, and its increase per m/s of rolling speed, W/K.
     pub air_cooling: f64,
     pub air_cooling_per_speed: f64,
-    /// Surface to road conductance while in contact, W/K.
+    /// Contact patch to road conductance, W/K.
     pub road_cooling: f64,
     /// Share of the sliding power at the contact patch that heats the tread (the rest heats the road).
     pub slide_heat_share: f64,
+    /// Share of the rolling hysteresis generated in the tread, by zone load (the rest heats the carcass).
+    pub rolling_heat_share: f64,
+    /// Load share moved from the outer to the inner shoulder per rad of inward lean.
+    pub camber_load_shift: f64,
+    /// Outward lean of the contact patch per unit of inward lateral force / load, rad
+    /// (the carcass rolling onto its outer shoulder in a corner).
+    pub carcass_roll: f64,
     /// Tread worn away per MJ of sliding energy up to the optimal temperature (1 = worn out).
     /// Wear speeds up by one rate per `hot_window` above the optimum.
     pub wear_rate: f64,
@@ -128,15 +167,35 @@ pub struct ThermalParams {
     pub wear_grip_loss: f64,
 }
 
+/// Atmospheric pressure, bar.
+const ATMOSPHERE: f64 = 1.01325;
+/// 0 °C in K.
+const KELVIN: f64 = 273.15;
+
 /// Temperature and wear of one tyre.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TireCondition {
-    /// Tread surface temperature, °C.
-    pub surface_temperature: f64,
+    /// Surface temperature of the inner, middle and outer tread zone, °C.
+    pub tread_temperature: [f64; 3],
     /// Carcass temperature, °C.
     pub core_temperature: f64,
     /// Tread worn away, 0 = new, 1 = worn out.
     pub wear: f64,
+}
+
+impl TireCondition {
+    /// Gauge pressure in bar of a tyre set to `cold` bar at the ambient temperature: the
+    /// air inside is at the carcass temperature.
+    #[inline]
+    pub fn pressure(&self, cold: f64) -> f64 {
+        (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (AMBIENT_TEMPERATURE + KELVIN) - ATMOSPHERE
+    }
+
+    /// Surface temperature weighted by the load on each tread zone, °C.
+    #[inline]
+    pub fn surface_temperature(&self, load: &[f64; 3]) -> f64 {
+        (0..3).map(|k| load[k] * self.tread_temperature[k]).sum()
+    }
 }
 
 /// Tyre forces in the contact patch frame.
@@ -146,6 +205,12 @@ pub struct TireForce {
     pub fy: f64,
     /// Self-aligning torque about the contact normal.
     pub mz: f64,
+}
+
+/// Grip multiplier falling from 1 at `delta = 0` towards `1 - loss` far outside `window`.
+#[inline]
+fn window_grip(delta: f64, window: f64, loss: f64) -> f64 {
+    1.0 - loss * (1.0 - (-(delta / window).powi(2)).exp())
 }
 
 #[derive(Clone, Debug)]
@@ -167,35 +232,69 @@ impl TireModel {
     /// A new tyre at its start temperature.
     pub fn fresh(&self) -> TireCondition {
         let t = self.p.thermal.start_temperature;
-        TireCondition { surface_temperature: t, core_temperature: t, wear: 0.0 }
+        TireCondition { tread_temperature: [t; 3], core_temperature: t, wear: 0.0 }
     }
 
-    /// Grip multiplier for the tread temperature and wear.
     #[inline]
-    pub fn condition_grip(&self, c: &TireCondition) -> f64 {
+    pub fn vertical_stiffness(&self, pressure: f64) -> f64 {
+        self.p.vertical_stiffness + self.p.pressure.stiffness_per_bar * (pressure - self.p.pressure.optimal)
+    }
+
+    #[inline]
+    pub fn rolling_resistance(&self, pressure: f64) -> f64 {
+        self.p.rolling_resistance * (1.0 + self.p.pressure.rolling_resistance_per_bar * (pressure - self.p.pressure.optimal))
+    }
+
+    /// Share of the load on the inner, middle and outer tread zone.
+    ///
+    /// * `lean` – inclination towards the car's centreline, rad
+    /// * `inward_force` – lateral force towards the car's centreline per unit load
+    #[inline]
+    pub fn tread_load(&self, lean: f64, inward_force: f64, pressure: f64) -> [f64; 3] {
         let t = &self.p.thermal;
-        let dt = c.surface_temperature - t.optimal_temperature;
-        let window = if dt < 0.0 { t.cold_window } else { t.hot_window };
-        let temperature = 1.0 - t.window_grip_loss * (1.0 - (-(dt / window).powi(2)).exp());
-        temperature * (1.0 - t.wear_grip_loss * c.wear)
+        let shift = t.camber_load_shift * (lean - t.carcass_roll * inward_force);
+        let crown = self.p.pressure.crown_load_per_bar * (pressure - self.p.pressure.optimal);
+        let w = [1.0 + shift - crown, 1.0 + 2.0 * crown, 1.0 - shift - crown].map(|x| x.max(0.05));
+        let sum: f64 = w.iter().sum();
+        w.map(|x| x / sum)
+    }
+
+    /// Grip multiplier for tread temperature, wear and pressure.
+    #[inline]
+    pub fn condition_grip(&self, c: &TireCondition, load: &[f64; 3], pressure: f64) -> f64 {
+        let t = &self.p.thermal;
+        let dt = c.surface_temperature(load) - t.optimal_temperature;
+        let temperature = window_grip(dt, if dt < 0.0 { t.cold_window } else { t.hot_window }, t.window_grip_loss);
+        let pp = &self.p.pressure;
+        temperature * window_grip(pressure - pp.optimal, pp.window, pp.grip_loss) * (1.0 - t.wear_grip_loss * c.wear)
     }
 
     /// Advances temperatures and wear by `dt`.
     ///
+    /// * `load` – share of the load on each tread zone, see [`Self::tread_load`]
     /// * `slide_power` – power dissipated by sliding at the contact patch, W
     /// * `rolling_power` – power lost to rolling resistance, W
     /// * `speed` – rolling speed, m/s
     /// * `on_road` – whether the tyre touches the road
     #[inline]
-    pub fn update_condition(&self, c: &mut TireCondition, slide_power: f64, rolling_power: f64, speed: f64, on_road: bool, dt: f64) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_condition(&self, c: &mut TireCondition, load: &[f64; 3], slide_power: f64, rolling_power: f64, speed: f64, on_road: bool, dt: f64) {
         let t = &self.p.thermal;
-        let to_core = t.core_conductance * (c.surface_temperature - c.core_temperature);
-        let cooling = t.air_cooling + t.air_cooling_per_speed * speed + if on_road { t.road_cooling } else { 0.0 };
-        let to_ambient = cooling * (c.surface_temperature - AMBIENT_TEMPERATURE);
-        let overheat = (c.surface_temperature - t.optimal_temperature).max(0.0) / t.hot_window;
+        let overheat = (c.surface_temperature(load) - t.optimal_temperature).max(0.0) / t.hot_window;
         c.wear = (c.wear + t.wear_rate * 1e-6 * slide_power * (1.0 + overheat) * dt).min(1.0);
-        c.surface_temperature += dt * (t.slide_heat_share * slide_power - to_core - to_ambient) / t.surface_capacity;
-        c.core_temperature += dt * (rolling_power + to_core) / t.core_capacity;
+
+        let old = c.tread_temperature;
+        let cooling = (t.air_cooling + t.air_cooling_per_speed * speed + if on_road { t.road_cooling } else { 0.0 }) / 3.0;
+        let mut to_core = 0.0;
+        for k in 0..3 {
+            let core = t.core_conductance / 3.0 * (old[k] - c.core_temperature);
+            let neighbours: f64 = [k.wrapping_sub(1), k + 1].iter().filter_map(|&j| old.get(j)).map(|&tj| t.zone_conductance * (old[k] - tj)).sum();
+            let cooling = cooling * (old[k] - AMBIENT_TEMPERATURE);
+            let heat = (t.slide_heat_share * slide_power + t.rolling_heat_share * rolling_power) * load[k];
+            c.tread_temperature[k] += dt * (heat - core - neighbours - cooling) / (t.surface_capacity / 3.0);
+            to_core += core;
+        }
+        c.core_temperature += dt * ((1.0 - t.rolling_heat_share) * rolling_power + to_core) / t.core_capacity;
     }
 
     /// Steady-state forces for given transient slips.
@@ -203,9 +302,10 @@ impl TireModel {
     /// * `kappa` – longitudinal slip ratio
     /// * `alpha` – slip angle (tan α) with camber thrust already folded in
     /// * `fz` – normal load in N
-    /// * `mu_scale` – surface and camber grip multiplier
+    /// * `mu_scale` – surface, camber and condition grip multiplier
+    /// * `pressure` – inflation pressure, bar
     #[inline]
-    pub fn forces(&self, kappa: f64, alpha: f64, fz: f64, mu_scale: f64) -> TireForce {
+    pub fn forces(&self, kappa: f64, alpha: f64, fz: f64, mu_scale: f64, pressure: f64) -> TireForce {
         if fz <= 0.0 {
             return TireForce::default();
         }
@@ -214,8 +314,10 @@ impl TireModel {
 
         // Normalised combined slip: each direction is scaled by its own peak slip, then
         // the pure-slip curve is evaluated at the combined magnitude and split back.
-        let sx = kappa / self.long.peak_slip;
-        let sy = alpha / self.lat.peak_slip;
+        // Pressure stretches or squeezes both curves along the slip axis.
+        let slip_scale = 1.0 + self.p.pressure.peak_slip_per_bar * (pressure - self.p.pressure.optimal);
+        let sx = kappa / (self.long.peak_slip * slip_scale);
+        let sy = alpha / (self.lat.peak_slip * slip_scale);
         let rho = (sx * sx + sy * sy).sqrt();
         if rho < 1e-9 {
             return TireForce::default();
@@ -252,32 +354,68 @@ mod tests {
         assert!((c.eval(-0.1) + 1.0).abs() < 1e-6);
     }
 
-    #[test]
-    fn grip_peaks_at_optimal_temperature_and_drops_with_wear() {
-        let tire = CarModel::gt3().front_tire;
-        let at = |temperature: f64, wear: f64| tire.condition_grip(&TireCondition { surface_temperature: temperature, core_temperature: temperature, wear });
-        let optimal = tire.p.thermal.optimal_temperature;
-        assert!((at(optimal, 0.0) - 1.0).abs() < 1e-12);
-        assert!(at(optimal - 40.0, 0.0) < at(optimal - 10.0, 0.0));
-        assert!(at(optimal + 40.0, 0.0) < at(optimal + 10.0, 0.0));
-        assert!(at(optimal, 1.0) < at(optimal, 0.5));
+    fn front() -> TireModel {
+        CarModel::gt3().front_tire
     }
 
     #[test]
-    fn sliding_heats_and_wears_rolling_cools() {
-        let tire = CarModel::gt3().front_tire;
+    fn grip_peaks_at_optimal_temperature_and_pressure_and_drops_with_wear() {
+        let tire = front();
+        let (t, p) = (tire.p.thermal.optimal_temperature, tire.p.pressure.optimal);
+        let even = [1.0 / 3.0; 3];
+        let at = |temperature: f64, pressure: f64, wear: f64| {
+            tire.condition_grip(&TireCondition { tread_temperature: [temperature; 3], core_temperature: temperature, wear }, &even, pressure)
+        };
+        assert!((at(t, p, 0.0) - 1.0).abs() < 1e-12);
+        assert!(at(t - 40.0, p, 0.0) < at(t - 10.0, p, 0.0));
+        assert!(at(t + 40.0, p, 0.0) < at(t + 10.0, p, 0.0));
+        assert!(at(t, p - 0.3, 0.0) < at(t, p - 0.1, 0.0));
+        assert!(at(t, p + 0.3, 0.0) < at(t, p + 0.1, 0.0));
+        assert!(at(t, p, 1.0) < at(t, p, 0.5));
+    }
+
+    #[test]
+    fn pressure_follows_carcass_temperature() {
+        let mut c = front().fresh();
+        c.core_temperature = AMBIENT_TEMPERATURE;
+        assert!((c.pressure(1.4) - 1.4).abs() < 1e-12);
+        c.core_temperature = 85.0;
+        // Gas law: about 0.5 bar rise from 25 °C to 85 °C, as seen on GT3 slicks.
+        assert!((1.85..1.95).contains(&c.pressure(1.4)), "{}", c.pressure(1.4));
+    }
+
+    #[test]
+    fn tread_load_follows_camber_cornering_and_pressure() {
+        let tire = front();
+        let p = tire.p.pressure.optimal;
+        let [inner, middle, outer] = tire.tread_load(0.0, 0.0, p);
+        assert!((inner - middle).abs() < 1e-12 && (outer - middle).abs() < 1e-12);
+        let [inner, _, outer] = tire.tread_load(0.06, 0.0, p);
+        assert!(inner > outer, "negative camber loads the inner shoulder");
+        let [inner, _, outer] = tire.tread_load(0.0, 1.5, p);
+        assert!(outer > inner, "cornering rolls the outside tyre onto its outer shoulder");
+        let [inner, middle, _] = tire.tread_load(0.0, 0.0, p + 0.3);
+        assert!(middle > inner, "over-inflation loads the crown");
+    }
+
+    #[test]
+    fn sliding_heats_the_loaded_zone_and_wears_rolling_cools() {
+        let tire = front();
         let mut c = tire.fresh();
+        let load = [0.5, 0.3, 0.2];
         for _ in 0..3000 {
-            tire.update_condition(&mut c, 50_000.0, 0.0, 30.0, true, 1e-3);
+            tire.update_condition(&mut c, &load, 50_000.0, 0.0, 30.0, true, 1e-3);
         }
-        assert!(c.surface_temperature > tire.p.thermal.start_temperature + 20.0, "{c:?}");
+        let [inner, middle, outer] = c.tread_temperature;
+        assert!(inner > middle && middle > outer, "{c:?}");
+        assert!(outer > tire.p.thermal.start_temperature + 20.0, "{c:?}");
         assert!(c.core_temperature > tire.p.thermal.start_temperature);
         assert!(c.wear > 0.0);
-        let (hot, wear) = (c.surface_temperature, c.wear);
+        let (hot, wear) = (c.surface_temperature(&load), c.wear);
         for _ in 0..20_000 {
-            tire.update_condition(&mut c, 0.0, 0.0, 30.0, true, 1e-3);
+            tire.update_condition(&mut c, &load, 0.0, 0.0, 30.0, true, 1e-3);
         }
-        assert!(c.surface_temperature < hot - 20.0, "{c:?}");
+        assert!(c.surface_temperature(&load) < hot - 20.0, "{c:?}");
         assert_eq!(c.wear, wear);
     }
 }

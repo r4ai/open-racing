@@ -8,7 +8,7 @@
 //!   anti-roll bar and bump stops; an unsprung mass on the strut; a tyre with
 //!   vertical stiffness/damping against the road surface.
 //! - Tyres: transient slips via relaxation length, Magic Formula combined forces,
-//!   grip scaled by tread temperature and wear.
+//!   grip scaled by inflation pressure, tread temperature and wear.
 //! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly.
 
 use std::sync::Arc;
@@ -73,6 +73,10 @@ pub struct WheelTelemetry {
     pub slip_angle: f64,
     /// Speed at which the contact patch slides over the road, m/s.
     pub slide_speed: f64,
+    /// Inflation pressure, bar (gauge).
+    pub pressure: f64,
+    /// Share of the load on the inner, middle and outer tread zone.
+    pub tread_load: [f64; 3],
     /// Tyre forces in the contact frame, N.
     pub fx: f64,
     pub fy: f64,
@@ -96,6 +100,8 @@ impl Default for WheelTelemetry {
             slip_ratio: 0.0,
             slip_angle: 0.0,
             slide_speed: 0.0,
+            pressure: 0.0,
+            tread_load: [0.0; 3],
             fx: 0.0,
             fy: 0.0,
             mz: 0.0,
@@ -252,8 +258,9 @@ impl Car {
             let n = q.normal;
             let height = (center - q.surface_point).dot(n);
             let penetration = tp.radius - height;
+            let pressure = w.tire.pressure(axle.pressure);
             let fz = if penetration > 0.0 {
-                (tp.vertical_stiffness * penetration - tp.vertical_damping * center_vel.dot(n)).max(0.0)
+                (tire.vertical_stiffness(pressure) * penetration - tp.vertical_damping * center_vel.dot(n)).max(0.0)
             } else {
                 0.0
             };
@@ -289,9 +296,12 @@ impl Car {
 
             let optimal = -corner.side * tp.optimal_camber;
             let camber_grip = (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
-            let mu = q.grip * camber_grip * tire.condition_grip(&w.tire);
             let alpha_eff = w.alpha - tp.camber_thrust * inclination;
-            let mut f = tire.forces(w.kappa, alpha_eff, fz, mu);
+            // Lateral force towards the centreline per unit load, from the pure-slip curve.
+            let inward_force = -corner.side * tp.mu_y * tire.lat.eval(alpha_eff);
+            let tread_load = tire.tread_load(corner.side * inclination, inward_force, pressure);
+            let mu = q.grip * camber_grip * tire.condition_grip(&w.tire, &tread_load, pressure);
+            let mut f = tire.forces(w.kappa, alpha_eff, fz, mu, pressure);
 
             let blend = (1.0 - speed / LOW_SPEED).max(0.0);
             if blend > 0.0 {
@@ -302,10 +312,11 @@ impl Car {
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
             }
 
+            let rolling_resistance = tire.rolling_resistance(pressure);
             let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
-            tire.update_condition(&mut w.tire, slide_power, tp.rolling_resistance * fz * speed, speed, fz > 0.0, dt);
+            tire.update_condition(&mut w.tire, &tread_load, slide_power, rolling_resistance * fz * speed, speed, fz > 0.0, dt);
 
-            let rolling = (tp.rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
+            let rolling = (rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
             road_torque[i] = -f.fx * radius - rolling;
 
             let force = long * f.fx + lat * f.fy + n * fz;
@@ -321,6 +332,8 @@ impl Car {
                 slip_ratio: w.kappa,
                 slip_angle: w.alpha.atan(),
                 slide_speed: slip_vel.hypot(vy),
+                pressure,
+                tread_load,
                 fx: f.fx,
                 fy: f.fy,
                 mz: f.mz,

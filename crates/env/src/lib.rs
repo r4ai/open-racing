@@ -275,7 +275,7 @@ impl Actuator {
 /// Highest gear that keeps the engine above ~55% of the limiter at `speed`.
 fn gear_for_speed(car: &CarModel, speed: f64) -> i32 {
     let p = &car.params;
-    let wheel = speed / p.rear.tire.radius;
+    let wheel = speed / car.rear_tire.p.radius;
     let rpm = |g: usize| wheel * p.gearbox.ratios[g] * p.gearbox.final_drive * 60.0 / std::f64::consts::TAU;
     let target = 0.55 * p.engine.limiter_rpm;
     (0..p.gearbox.ratios.len()).rev().find(|&g| rpm(g) >= target).map_or(1, |g| g as i32 + 1)

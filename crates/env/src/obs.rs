@@ -86,7 +86,7 @@ pub fn encode(layout: &ObsLayout, car: &Car, track: &Track, hint: usize, input: 
     o.push(tel.acceleration.x / ACCEL_SCALE);
     o.push(tel.acceleration.y / ACCEL_SCALE);
     for (i, w) in st.wheels.iter().enumerate() {
-        o.push(w.spin * car.model.axle(i).tire.radius / SPEED_SCALE);
+        o.push(w.spin * car.model.tire(i).p.radius / SPEED_SCALE);
     }
     o.push(st.drivetrain.rpm() / p.engine.limiter_rpm);
     o.push(st.drivetrain.gear as f64 / p.gearbox.ratios.len() as f64);
