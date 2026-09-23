@@ -116,10 +116,11 @@ fn spawn_track(mut commands: Commands, sim: Res<Simulation>, mut meshes: ResMut<
     kerbs.ribbon(track, |k| (track.samples[k].width_left + kerb, lift), |k| (track.samples[k].width_left, lift), kerb_color);
     kerbs.ribbon(track, |k| (-track.samples[k].width_right, lift), |k| (-track.samples[k].width_right - kerb, lift), kerb_color);
 
+    // Flat, in the plane of the road, like the simulated grass surface.
     let mut runoff = Strip::new();
-    let run = 30.0;
-    runoff.ribbon(track, |k| (track.samples[k].width_left + kerb + run, -1.0), |k| (track.samples[k].width_left + kerb, 0.0), |_| grass);
-    runoff.ribbon(track, |k| (-track.samples[k].width_right - kerb, 0.0), |k| (-track.samples[k].width_right - kerb - run, -1.0), |_| grass);
+    let run = track.runoff_width;
+    runoff.ribbon(track, |k| (track.samples[k].width_left + kerb + run, 0.0), |k| (track.samples[k].width_left + kerb, 0.0), |_| grass);
+    runoff.ribbon(track, |k| (-track.samples[k].width_right - kerb, 0.0), |k| (-track.samples[k].width_right - kerb - run, 0.0), |_| grass);
 
     let material = materials.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 0.9, ..default() });
     for strip in [road, line, kerbs, runoff] {

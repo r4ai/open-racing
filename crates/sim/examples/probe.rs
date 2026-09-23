@@ -6,7 +6,7 @@ fn circle(r: f64) -> Track {
         let a = i as f64 / 32.0 * std::f64::consts::TAU;
         TrackPoint { pos: (r * a.cos(), r * a.sin(), 0.0), width_left: 30.0, width_right: 30.0, bank: 0.0 }
     }).collect();
-    Track::new(&TrackDef { name: "c".into(), points, kerb_width: 1.0, kerb_height: 0.0, spacing: 1.0 }).unwrap()
+    Track::new(&TrackDef { name: "c".into(), points, kerb_width: 1.0, kerb_height: 0.0, runoff_width: f64::INFINITY, spacing: 1.0 }).unwrap()
 }
 
 fn main() {

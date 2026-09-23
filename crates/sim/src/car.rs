@@ -25,6 +25,10 @@ use crate::{AIR_DENSITY, DT, GRAVITY, RL, RR};
 const LOW_SPEED: f64 = 3.0;
 /// Low-speed damping per newton of load, N·s/m per N.
 const LOW_SPEED_DAMPING: f64 = 3.0;
+/// Fraction of the normal speed returned when hitting the run-off barrier.
+const BARRIER_RESTITUTION: f64 = 0.2;
+/// Coulomb friction coefficient between the car and the run-off barrier.
+const BARRIER_FRICTION: f64 = 0.3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelState {
@@ -430,6 +434,32 @@ impl Car {
         let w = st.angular_velocity * dt;
         st.orientation = (st.orientation * DQuat::from_scaled_axis(w)).normalize();
         st.time += dt;
+
+        // ---- Barrier at the edge of the run-off ---------------------------------------
+        // Push the car back so no wheel is beyond it and remove the outward velocity.
+        let rot = DMat3::from_quat(st.orientation);
+        let mut push = DVec3::ZERO;
+        let mut depth = 0.0;
+        for i in 0..4 {
+            let center = st.position + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
+            let q = track.query(center, st.wheels[i].hint);
+            let excess = q.beyond_barrier(track);
+            if excess > depth {
+                depth = excess;
+                push = q.lateral * -q.d.signum();
+            }
+        }
+        if depth > 0.0 {
+            st.position += push * depth;
+            let outward = -st.velocity.dot(push);
+            if outward > 0.0 {
+                // Inelastic hit; friction against the barrier scrubs speed along it.
+                let impulse = (1.0 + BARRIER_RESTITUTION) * outward;
+                let along = st.velocity + push * outward;
+                let scrub = (BARRIER_FRICTION * impulse / along.length().max(1e-9)).min(1.0);
+                st.velocity = push * (BARRIER_RESTITUTION * outward) + along * (1.0 - scrub);
+            }
+        }
     }
 }
 

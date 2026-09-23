@@ -11,7 +11,7 @@ fn circle(radius: f64) -> Track {
             TrackPoint { pos: (radius * a.cos(), radius * a.sin(), 0.0), width_left: 30.0, width_right: 30.0, bank: 0.0 }
         })
         .collect();
-    Track::new(&TrackDef { name: "circle".into(), points, kerb_width: 1.0, kerb_height: 0.0, spacing: 1.0 }).unwrap()
+    Track::new(&TrackDef { name: "circle".into(), points, kerb_width: 1.0, kerb_height: 0.0, runoff_width: f64::INFINITY, spacing: 1.0 }).unwrap()
 }
 
 fn gt3() -> Arc<CarModel> {
@@ -142,4 +142,25 @@ fn deterministic() {
     };
     let (a, b) = (run(), run());
     assert_eq!(format!("{a:?}"), format!("{b:?}"));
+}
+
+#[test]
+fn runoff_barrier_contains_the_car() {
+    let track = Track::default_circuit();
+    // Start on the main straight, aimed 45° to the left at speed.
+    let mut car = Car::new(gt3(), &track, 100.0, 0.0, 40.0, 3);
+    let turn = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_4);
+    car.state.orientation = turn * car.state.orientation;
+    car.state.velocity = turn * car.state.velocity;
+    let mut hint = 0;
+    let mut closest = f64::NEG_INFINITY;
+    for _ in 0..10_000 {
+        car.step(&track, &Controls { throttle: 0.3, ..Default::default() });
+        let q = track.query(car.state.position, hint);
+        hint = q.index;
+        closest = closest.max(q.beyond_barrier(&track));
+        assert!(closest < 0.0, "escaped: d = {}", q.d);
+    }
+    // The CG stops about half a car width inside the barrier.
+    assert!(closest > -2.0, "never reached the barrier: {closest}");
 }

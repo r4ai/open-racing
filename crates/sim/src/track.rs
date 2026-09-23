@@ -30,6 +30,10 @@ pub struct TrackDef {
     /// Height of the kerb crown in metres.
     #[serde(default = "default_kerb_height")]
     pub kerb_height: f64,
+    /// Width of the grass run-off outside each kerb in metres. An invisible
+    /// barrier stands at its outer edge.
+    #[serde(default = "default_runoff_width")]
+    pub runoff_width: f64,
     /// Spacing of the resampled centreline table in metres.
     #[serde(default = "default_spacing")]
     pub spacing: f64,
@@ -40,6 +44,9 @@ fn default_kerb_width() -> f64 {
 }
 fn default_kerb_height() -> f64 {
     0.03
+}
+fn default_runoff_width() -> f64 {
+    30.0
 }
 fn default_spacing() -> f64 {
     1.0
@@ -100,6 +107,8 @@ pub struct TrackQuery {
     pub surface_point: DVec3,
     pub normal: DVec3,
     pub tangent: DVec3,
+    /// Unit lateral (to the left) lying in the surface.
+    pub lateral: DVec3,
     pub surface: Surface,
     pub width_left: f64,
     pub width_right: f64,
@@ -109,6 +118,13 @@ impl TrackQuery {
     /// True when the point is between the track edges (kerbs count as off track).
     pub fn on_track(&self) -> bool {
         self.d <= self.width_left && -self.d <= self.width_right
+    }
+
+    /// Signed distance from the edge of the drivable area (track + kerbs + run-off)
+    /// towards the outside; positive means beyond the barrier.
+    pub fn beyond_barrier(&self, track: &Track) -> f64 {
+        let edge = track.kerb_width + track.runoff_width;
+        if self.d >= 0.0 { self.d - self.width_left - edge } else { -self.d - self.width_right - edge }
     }
 }
 
@@ -140,6 +156,7 @@ pub struct Track {
     pub length: f64,
     pub kerb_width: f64,
     pub kerb_height: f64,
+    pub runoff_width: f64,
 }
 
 impl Track {
@@ -160,6 +177,9 @@ impl Track {
         if def.points.len() < 4 {
             return Err(TrackError::Invalid("a track needs at least 4 control points"));
         }
+        if def.runoff_width < 0.0 {
+            return Err(TrackError::Invalid("runoff width must not be negative"));
+        }
         if def.spacing <= 0.0 {
             return Err(TrackError::Invalid("spacing must be positive"));
         }
@@ -176,6 +196,7 @@ impl Track {
             samples,
             kerb_width: def.kerb_width,
             kerb_height: def.kerb_height,
+            runoff_width: def.runoff_width,
         })
     }
 
@@ -268,6 +289,7 @@ impl Track {
             surface_point,
             normal: smp.normal,
             tangent: smp.tangent,
+            lateral: smp.lateral,
             surface,
             width_left: smp.width_left,
             width_right: smp.width_right,
@@ -445,6 +467,7 @@ mod tests {
             points,
             kerb_width: 1.0,
             kerb_height: 0.0,
+            runoff_width: 30.0,
             spacing: 1.0,
         })
         .unwrap()
