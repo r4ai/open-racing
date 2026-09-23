@@ -172,7 +172,7 @@ fn handle_requests(
     }
 }
 
-fn step_simulation(
+pub fn step_simulation(
     time: Res<Time>,
     mut sim: ResMut<Simulation>,
     mut input: ResMut<DriverInput>,

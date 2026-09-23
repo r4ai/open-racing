@@ -53,6 +53,7 @@ Use `--features ndarray` or `--features flex` for a CPU backend.
 | V | switch camera (chase / cockpit / TV / top) |
 | P | replay since the last reset |
 | T | switch to the AI driver |
+| M | mute / unmute sound |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift.
 

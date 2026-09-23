@@ -36,6 +36,7 @@ pub struct AppRequests {
     pub cycle_camera: bool,
     pub restart_engine: bool,
     pub toggle_help: bool,
+    pub toggle_mute: bool,
 }
 
 /// Input systems; anything overriding requests must run after this set.
@@ -103,6 +104,7 @@ fn keyboard(
     requests.cycle_camera = keys.just_pressed(KeyCode::KeyV);
     requests.restart_engine = keys.just_pressed(KeyCode::KeyI);
     requests.toggle_help = keys.just_pressed(KeyCode::KeyH);
+    requests.toggle_mute = keys.just_pressed(KeyCode::KeyM);
 }
 
 fn gamepad(gamepads: Query<&Gamepad>, sim: Res<Simulation>, mut input: ResMut<DriverInput>) {

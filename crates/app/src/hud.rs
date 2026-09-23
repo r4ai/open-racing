@@ -32,6 +32,7 @@ Backspace        reset car to track
 V                cycle camera
 P                replay since last reset / stop replay
 T                toggle AI driver (with --ai)
+M                mute / unmute sound
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift";
 

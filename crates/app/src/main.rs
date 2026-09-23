@@ -1,6 +1,7 @@
 //! Bevy front-end. The simulation runs in its own fixed 1 kHz loop inside the
 //! `Simulation` resource; Bevy only reads the resulting state for rendering.
 
+mod audio;
 mod camera;
 mod capture;
 mod driving;
@@ -50,7 +51,7 @@ fn main() {
     .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
     .insert_resource(sim)
     .insert_resource(args.clone())
-    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin));
+    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin));
     driving::install_policy(&mut app, &args);
     app.run();
 }
