@@ -57,7 +57,12 @@ fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         MainCamera,
         Camera3d::default(),
         sky_light(&mut images),
-        Projection::Perspective(PerspectiveProjection { fov: 60f32.to_radians(), near: 0.05, far: 8000.0, ..default() }),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 60f32.to_radians(),
+            near: 0.05,
+            far: 8000.0,
+            ..default()
+        }),
         Transform::from_xyz(-10.0, 5.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
@@ -72,7 +77,9 @@ fn follow(
     if requests.cycle_camera {
         *mode = mode.next();
     }
-    let Ok((mut cam, mut projection)) = cameras.single_mut() else { return };
+    let Ok((mut cam, mut projection)) = cameras.single_mut() else {
+        return;
+    };
     let (pos, rot) = sim.body_pose();
     let forward = rot * DVec3::X;
     let flat = DVec3::new(forward.x, forward.y, 0.0).normalize_or(DVec3::X);
@@ -89,7 +96,11 @@ fn follow(
             let desired = to_bevy(pos - flat * 6.5 + DVec3::Z * 2.0);
             let k = 1.0 - (-8.0 * time.delta_secs()).exp();
             // Snap when far away (reset, mode change).
-            cam.translation = if cam.translation.distance(desired) > 30.0 { desired } else { cam.translation.lerp(desired, k) };
+            cam.translation = if cam.translation.distance(desired) > 30.0 {
+                desired
+            } else {
+                cam.translation.lerp(desired, k)
+            };
             cam.look_at(to_bevy(pos + flat * 4.0 + DVec3::Z * 0.6), Vec3::Y);
         }
         CameraMode::Cockpit => {
@@ -103,11 +114,20 @@ fn follow(
             let slot = ((s + 0.5 * TV_SPACING) / TV_SPACING).floor() * TV_SPACING;
             let smp = track.sample_at(slot);
             let side = if smp.curvature >= 0.0 { -1.0 } else { 1.0 }; // outside of the corner
-            let offset = side * ((if side > 0.0 { smp.width_left } else { smp.width_right }) + 20.0);
+            let offset = side
+                * ((if side > 0.0 {
+                    smp.width_left
+                } else {
+                    smp.width_right
+                }) + 20.0);
             cam.translation = to_bevy(smp.pos + smp.lateral * offset + DVec3::Z * 6.0);
             cam.look_at(to_bevy(pos), Vec3::Y);
             let distance = cam.translation.distance(to_bevy(pos));
-            set_fov((2.0 * (6.0 / distance.max(1.0)).atan()).to_degrees().clamp(4.0, 60.0));
+            set_fov(
+                (2.0 * (6.0 / distance.max(1.0)).atan())
+                    .to_degrees()
+                    .clamp(4.0, 60.0),
+            );
         }
         CameraMode::Top => {
             set_fov(50.0);

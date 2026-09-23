@@ -18,7 +18,10 @@ impl<'a> Reader<'a> {
 
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if n > self.remaining() {
-            return Err(Error::Format(format!("unexpected end of data at byte {}", self.pos)));
+            return Err(Error::Format(format!(
+                "unexpected end of data at byte {}",
+                self.pos
+            )));
         }
         let out = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -53,7 +56,10 @@ impl<'a> Reader<'a> {
     pub fn count(&mut self, min_item_size: usize) -> Result<usize, Error> {
         let n = self.i32()?;
         if n < 0 || n as usize * min_item_size.max(1) > self.remaining() {
-            return Err(Error::Format(format!("implausible count {n} at byte {}", self.pos - 4)));
+            return Err(Error::Format(format!(
+                "implausible count {n} at byte {}",
+                self.pos - 4
+            )));
         }
         Ok(n as usize)
     }

@@ -35,22 +35,38 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let layouts = open_racing_ac::layouts(&args.folder);
     let named: Vec<&str> = layouts.iter().flatten().map(String::as_str).collect();
     if args.layout.is_none() && !named.is_empty() {
-        return Err(format!("{} has several layouts; choose one with --layout: {}", args.folder.display(), named.join(", ")).into());
+        return Err(format!(
+            "{} has several layouts; choose one with --layout: {}",
+            args.folder.display(),
+            named.join(", ")
+        )
+        .into());
     }
     let absolute = args.folder.canonicalize()?;
-    let folder_name = absolute.file_name().and_then(|n| n.to_str()).ok_or("the folder has no usable name")?;
+    let folder_name = absolute
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("the folder has no usable name")?;
     let name = match (&args.name, &args.layout) {
         (Some(n), _) => n.clone(),
         (None, Some(l)) => format!("{folder_name}-{l}"),
         (None, None) => folder_name.to_string(),
     };
-    let out = args.out.clone().unwrap_or_else(|| open_racing_track::tracks_dir().join(&name));
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| open_racing_track::tracks_dir().join(&name));
 
     let t0 = std::time::Instant::now();
     let package = open_racing_ac::convert(&args.folder, args.layout.as_deref(), &name)?;
     if let Some(v) = &package.visual {
         let triangles: usize = v.meshes.iter().map(|m| m.indices.len() / 3).sum();
-        println!("render data: {} textures, {} materials, {} batches, {triangles} triangles", v.textures.len(), v.materials.len(), v.meshes.len());
+        println!(
+            "render data: {} textures, {} materials, {} batches, {triangles} triangles",
+            v.textures.len(),
+            v.materials.len(),
+            v.meshes.len()
+        );
     }
     let track = package.build_track()?;
     report(&track);
@@ -64,7 +80,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Checks that the centreline fits the road meshes.
 fn report(track: &Track) {
-    println!("centreline: {:.0} m, {} samples", track.length, track.samples.len());
+    println!(
+        "centreline: {:.0} m, {} samples",
+        track.length,
+        track.samples.len()
+    );
     let ground = track.ground.as_ref().expect("converted tracks have ground");
     let (mut over, mut edge_l, mut edge_r, mut n, mut dz) = (0, 0, 0, 0, 0.0f64);
     for smp in track.samples.iter().step_by(5) {
@@ -75,12 +95,25 @@ fn report(track: &Track) {
         }
         // Just inside each edge the surface should count as track, if the widths are
         // on the right sides.
-        let on_track = |off: f64| track.query(smp.pos + smp.lateral * off, 0).surface != Surface::Grass;
+        let on_track =
+            |off: f64| track.query(smp.pos + smp.lateral * off, 0).surface != Surface::Grass;
         edge_l += on_track(smp.width_left - 0.5) as usize;
         edge_r += on_track(-(smp.width_right - 0.5)) as usize;
     }
     println!("centreline over the road meshes: {over}/{n}, max height difference {dz:.2} m");
     println!("track surface just inside the left edge: {edge_l}/{n}, right edge: {edge_r}/{n}");
-    let turn: f64 = track.samples.iter().map(|s| s.curvature * track.spacing).sum();
-    println!("total turning {:.0}° ({})", turn.to_degrees(), if turn > 0.0 { "anticlockwise" } else { "clockwise" });
+    let turn: f64 = track
+        .samples
+        .iter()
+        .map(|s| s.curvature * track.spacing)
+        .sum();
+    println!(
+        "total turning {:.0}° ({})",
+        turn.to_degrees(),
+        if turn > 0.0 {
+            "anticlockwise"
+        } else {
+            "clockwise"
+        }
+    );
 }

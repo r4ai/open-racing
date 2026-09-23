@@ -68,7 +68,14 @@ pub struct FfbSettings {
 
 impl Default for FfbSettings {
     fn default() -> Self {
-        Self { enabled: true, wheel_torque: 10.0, strength: 70.0, max_torque: 8.0, damping: 20.0, invert: false }
+        Self {
+            enabled: true,
+            wheel_torque: 10.0,
+            strength: 70.0,
+            max_torque: 8.0,
+            damping: 20.0,
+            invert: false,
+        }
     }
 }
 
@@ -164,19 +171,32 @@ impl Plugin for FfbPlugin {
             .insert_resource(FfbSettings::load())
             .init_resource::<FfbStatus>()
             .init_resource::<FfbTest>()
-            .add_systems(Update, (update, log_status).chain().after(driving::step_simulation))
+            .add_systems(
+                Update,
+                (update, log_status).chain().after(driving::step_simulation),
+            )
             .add_systems(Last, release_on_exit);
     }
 }
 
 /// USB ids of the steering device, if a wheel (or pad) steers the car.
-fn steering_device(selection: InputSelection, bindings: &Bindings, pads: &Query<(Entity, &Gamepad, &Name)>) -> Option<Option<(u16, u16)>> {
+fn steering_device(
+    selection: InputSelection,
+    bindings: &Bindings,
+    pads: &Query<(Entity, &Gamepad, &Name)>,
+) -> Option<Option<(u16, u16)>> {
     let ids = |pad: &Gamepad| pad.vendor_id().zip(pad.product_id());
     match selection {
         InputSelection::Keyboard => None,
-        InputSelection::Auto => pads.iter().find(|(_, pad, name)| input::is_wheel(pad, name)).map(|(_, pad, _)| ids(pad)),
+        InputSelection::Auto => pads
+            .iter()
+            .find(|(_, pad, name)| input::is_wheel(pad, name))
+            .map(|(_, pad, _)| ids(pad)),
         InputSelection::Pad(e) => pads.get(e).ok().map(|(_, pad, _)| ids(pad)),
-        InputSelection::Custom => bindings.steer.as_ref().map(|b| b.device.vendor.zip(b.device.product)),
+        InputSelection::Custom => bindings
+            .steer
+            .as_ref()
+            .map(|b| b.device.vendor.zip(b.device.product)),
     }
 }
 
@@ -197,24 +217,38 @@ fn update(
     if ffb.closed {
         return;
     }
-    let target = if ffb_settings.enabled { steering_device(*selection, &bindings, &pads) } else { None };
+    let target = if ffb_settings.enabled {
+        steering_device(*selection, &bindings, &pads)
+    } else {
+        None
+    };
     if target != ffb.target {
         ffb.wheel = None;
         ffb.target = target;
         ffb.retry_at = 0.0;
     }
     let Some(usb) = target else {
-        status.device = if ffb_settings.enabled { "no wheel selected" } else { "off" }.into();
+        status.device = if ffb_settings.enabled {
+            "no wheel selected"
+        } else {
+            "off"
+        }
+        .into();
         status.cut = "";
         return;
     };
     let now = time.elapsed_secs_f64();
     if ffb.wheel.is_none() && now >= ffb.retry_at {
-        let hwnd = window.single().ok().and_then(|w| match w.get_window_handle() {
-            raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-            _ => None,
-        });
-        let opened = hwnd.ok_or_else(|| "no window".to_string()).and_then(|hwnd| Wheel::open(hwnd, usb));
+        let hwnd = window
+            .single()
+            .ok()
+            .and_then(|w| match w.get_window_handle() {
+                raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+                _ => None,
+            });
+        let opened = hwnd
+            .ok_or_else(|| "no window".to_string())
+            .and_then(|hwnd| Wheel::open(hwnd, usb));
         match opened {
             Ok(wheel) => {
                 status.device = wheel.name.clone();
@@ -230,7 +264,9 @@ fn update(
     if now >= ffb.next_watchdog {
         ffb.next_watchdog = now + WATCHDOG_INTERVAL;
         match ffb.wheel.as_mut().map(Wheel::keep_playing) {
-            Some(Ok(true)) => warn!("force feedback: the device had stopped the effect; restarted it"),
+            Some(Ok(true)) => {
+                warn!("force feedback: the device had stopped the effect; restarted it")
+            }
             Some(Err(e)) => {
                 status.device = e;
                 ffb.wheel = None;
@@ -251,7 +287,13 @@ fn update(
         ffb.tripped = false;
         ffb.pauses = 0;
     }
-    guard_runaway(&mut ffb, sim.ffb_torque, angle, sim.car.model.params.steering.lock, now);
+    guard_runaway(
+        &mut ffb,
+        sim.ffb_torque,
+        angle,
+        sim.car.model.params.steering.lock,
+        now,
+    );
     status.cut = if ffb.tripped {
         "stopped: wheel driven into lock repeatedly; check direction (Esc)"
     } else if ffb.paused {
@@ -284,7 +326,8 @@ fn update(
 /// instead of back to centre and holds it there. Pauses the force while the wheel is
 /// held at lock against the tyres' pull, and stops it after repeated pauses.
 fn guard_runaway(ffb: &mut Ffb, torque: f64, angle: f64, lock: f64, now: f64) {
-    let pinned = -torque * angle.signum() > RUNAWAY_TORQUE && angle.abs() >= RUNAWAY_LOCK_SHARE * lock;
+    let pinned =
+        -torque * angle.signum() > RUNAWAY_TORQUE && angle.abs() >= RUNAWAY_LOCK_SHARE * lock;
     match ffb.pinned_since {
         _ if !pinned => {
             ffb.pinned_since = None;
@@ -293,7 +336,11 @@ fn guard_runaway(ffb: &mut Ffb, torque: f64, angle: f64, lock: f64, now: f64) {
         None => ffb.pinned_since = Some(now),
         Some(since) if !ffb.paused && now - since >= RUNAWAY_TIME => {
             ffb.paused = true;
-            ffb.pauses = if now - ffb.last_pause < RUNAWAY_WINDOW { ffb.pauses + 1 } else { 1 };
+            ffb.pauses = if now - ffb.last_pause < RUNAWAY_WINDOW {
+                ffb.pauses + 1
+            } else {
+                1
+            };
             ffb.last_pause = now;
             ffb.tripped |= ffb.pauses >= RUNAWAY_REPEATS;
         }
@@ -303,7 +350,11 @@ fn guard_runaway(ffb: &mut Ffb, torque: f64, angle: f64, lock: f64, now: f64) {
 
 /// Releases the wheel as soon as the app is asked to close, before the window and
 /// the world go away.
-fn release_on_exit(mut close: MessageReader<WindowCloseRequested>, mut exit: MessageReader<AppExit>, mut ffb: NonSendMut<Ffb>) {
+fn release_on_exit(
+    mut close: MessageReader<WindowCloseRequested>,
+    mut exit: MessageReader<AppExit>,
+    mut ffb: NonSendMut<Ffb>,
+) {
     if close.read().count() + exit.read().count() > 0 {
         ffb.wheel = None;
         ffb.closed = true;
@@ -316,7 +367,14 @@ fn log_status(status: Res<FfbStatus>, mut last: Local<(String, &'static str)>) {
         last.0.clone_from(&status.device);
     }
     if status.cut != last.1 {
-        info!("force feedback: {}", if status.cut.is_empty() { "resumed" } else { status.cut });
+        info!(
+            "force feedback: {}",
+            if status.cut.is_empty() {
+                "resumed"
+            } else {
+                status.cut
+            }
+        );
         last.1 = status.cut;
     }
 }
@@ -327,12 +385,39 @@ mod tests {
 
     #[test]
     fn torque_is_reproduced_at_the_rim_up_to_the_maximum() {
-        let s = FfbSettings { wheel_torque: 12.0, strength: 100.0, max_torque: 12.0, damping: 0.0, ..default() };
+        let s = FfbSettings {
+            wheel_torque: 12.0,
+            strength: 100.0,
+            max_torque: 12.0,
+            damping: 0.0,
+            ..default()
+        };
         assert_eq!(s.force(6.0, 0.0), 0.5);
-        assert_eq!(FfbSettings { strength: 50.0, ..s.clone() }.force(-6.0, 0.0), -0.25);
-        assert_eq!(FfbSettings { max_torque: 3.0, ..s.clone() }.force(40.0, 0.0), 0.25);
+        assert_eq!(
+            FfbSettings {
+                strength: 50.0,
+                ..s.clone()
+            }
+            .force(-6.0, 0.0),
+            -0.25
+        );
+        assert_eq!(
+            FfbSettings {
+                max_torque: 3.0,
+                ..s.clone()
+            }
+            .force(40.0, 0.0),
+            0.25
+        );
         // A maximum above the base's own peak cannot exceed full force.
-        assert_eq!(FfbSettings { max_torque: 30.0, ..s.clone() }.force(40.0, 0.0), 1.0);
+        assert_eq!(
+            FfbSettings {
+                max_torque: 30.0,
+                ..s.clone()
+            }
+            .force(40.0, 0.0),
+            1.0
+        );
         assert_eq!(FfbSettings { strength: 0.0, ..s }.force(10.0, 0.0), 0.0);
     }
 
@@ -363,7 +448,10 @@ mod tests {
 
     #[test]
     fn damping_resists_the_wheel_turning() {
-        let s = FfbSettings { damping: 50.0, ..default() };
+        let s = FfbSettings {
+            damping: 50.0,
+            ..default()
+        };
         assert!(s.force(0.0, 2.0) < 0.0);
         assert!(s.force(0.0, -2.0) > 0.0);
     }

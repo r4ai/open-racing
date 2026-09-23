@@ -1,5 +1,5 @@
 use glam::DVec3;
-use open_racing_sim::{TrackQuery, Track};
+use open_racing_sim::{Track, TrackQuery};
 
 /// Tracks progress along the centreline and times laps from start-line crossings.
 #[derive(Clone, Copy, Debug, Default)]
@@ -19,7 +19,11 @@ pub struct LapTimer {
 impl LapTimer {
     pub fn new(track: &Track, position: DVec3) -> Self {
         let q = track.query(position, track.nearest_index(position));
-        Self { hint: q.index, last_s: q.s, ..Default::default() }
+        Self {
+            hint: q.index,
+            last_s: q.s,
+            ..Default::default()
+        }
     }
 
     /// Advances with the car's new position; returns the query and the progress delta.

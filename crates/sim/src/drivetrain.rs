@@ -131,13 +131,15 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
     let clutch_torque = if ratio == 0.0 {
         0.0
     } else {
-        let anti_stall = ((rpm - e.stall_rpm) / (p.clutch.anti_stall_rpm - e.stall_rpm)).clamp(0.0, 1.0);
+        let anti_stall =
+            ((rpm - e.stall_rpm) / (p.clutch.anti_stall_rpm - e.stall_rpm)).clamp(0.0, 1.0);
         let capacity = p.clutch.max_torque * (1.0 - input.clutch_pedal) * anti_stall;
         // Driveline seen from the engine: two wheels reflected through the ratio.
         let i_d = 2.0 * input.wheel_inertia / (ratio * ratio);
         let t_d = (input.wheel_torque[0] + input.wheel_torque[1]) / ratio;
         let slip = state.engine_speed - wheel_avg * ratio;
-        let lock = (slip + dt * (engine_torque / e.inertia - t_d / i_d)) / (dt * (1.0 / e.inertia + 1.0 / i_d));
+        let lock = (slip + dt * (engine_torque / e.inertia - t_d / i_d))
+            / (dt * (1.0 / e.inertia + 1.0 / i_d));
         lock.clamp(-capacity, capacity)
     };
     state.clutch_torque = clutch_torque;
@@ -150,15 +152,26 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
 
     // Differential: split input torque, then transfer up to the locking torque from
     // the faster to the slower wheel.
-    let input_torque = clutch_torque * ratio * if clutch_torque * ratio >= 0.0 { eff } else { 1.0 / eff };
+    let input_torque = clutch_torque
+        * ratio
+        * if clutch_torque * ratio >= 0.0 {
+            eff
+        } else {
+            1.0 / eff
+        };
     let half = 0.5 * input_torque;
     let d = &p.differential;
-    let ramp = if clutch_torque >= 0.0 { d.power_ramp } else { d.coast_ramp };
+    let ramp = if clutch_torque >= 0.0 {
+        d.power_ramp
+    } else {
+        d.coast_ramp
+    };
     let lock_capacity = d.preload + ramp * input_torque.abs();
     let iw = input.wheel_inertia;
     let acc_l = (half + input.wheel_torque[0]) / iw;
     let acc_r = (half + input.wheel_torque[1]) / iw;
-    let equalize = (input.wheel_speed[0] - input.wheel_speed[1] + dt * (acc_l - acc_r)) * iw / (2.0 * dt);
+    let equalize =
+        (input.wheel_speed[0] - input.wheel_speed[1] + dt * (acc_l - acc_r)) * iw / (2.0 * dt);
     let transfer = equalize.clamp(-lock_capacity, lock_capacity);
     [half - transfer, half + transfer]
 }

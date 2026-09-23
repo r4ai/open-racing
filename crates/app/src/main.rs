@@ -57,7 +57,18 @@ fn main() {
     .insert_resource(sim)
     .insert_resource(track_model)
     .insert_resource(args.clone())
-    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin, effects::EffectsPlugin, settings::SettingsPlugin, ffb::FfbPlugin));
+    .add_plugins((
+        input::InputPlugin,
+        driving::DrivingPlugin,
+        scene::ScenePlugin,
+        camera::CameraPlugin,
+        hud::HudPlugin,
+        capture::CapturePlugin,
+        audio::AudioPlugin,
+        effects::EffectsPlugin,
+        settings::SettingsPlugin,
+        ffb::FfbPlugin,
+    ));
     driving::install_policy(&mut app, &args);
     app.run();
 }

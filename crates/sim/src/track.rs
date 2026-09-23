@@ -132,7 +132,11 @@ impl TrackQuery {
     /// towards the outside; positive means beyond the barrier.
     pub fn beyond_barrier(&self, track: &Track) -> f64 {
         let edge = track.kerb_width + track.runoff_width;
-        if self.d >= 0.0 { self.d - self.width_left - edge } else { -self.d - self.width_right - edge }
+        if self.d >= 0.0 {
+            self.d - self.width_left - edge
+        } else {
+            -self.d - self.width_right - edge
+        }
     }
 }
 
@@ -185,12 +189,15 @@ impl Track {
 
     /// The bundled default circuit.
     pub fn default_circuit() -> Self {
-        Self::from_ron(include_str!("../../../assets/tracks/lakeside.ron")).expect("bundled track is valid")
+        Self::from_ron(include_str!("../../../assets/tracks/lakeside.ron"))
+            .expect("bundled track is valid")
     }
 
     pub fn new(def: &TrackDef) -> Result<Self, TrackError> {
         if def.points.len() < 4 {
-            return Err(TrackError::Invalid("a track needs at least 4 control points"));
+            return Err(TrackError::Invalid(
+                "a track needs at least 4 control points",
+            ));
         }
         if def.runoff_width < 0.0 {
             return Err(TrackError::Invalid("runoff width must not be negative"));
@@ -198,7 +205,11 @@ impl Track {
         if def.spacing <= 0.0 {
             return Err(TrackError::Invalid("spacing must be positive"));
         }
-        if def.points.iter().any(|p| p.width_left <= 0.0 || p.width_right <= 0.0) {
+        if def
+            .points
+            .iter()
+            .any(|p| p.width_left <= 0.0 || p.width_right <= 0.0)
+        {
             return Err(TrackError::Invalid("widths must be positive"));
         }
 
@@ -242,7 +253,11 @@ impl Track {
     #[inline]
     pub fn delta_s(&self, from: f64, to: f64) -> f64 {
         let d = (to - from).rem_euclid(self.length);
-        if d > 0.5 * self.length { d - self.length } else { d }
+        if d > 0.5 * self.length {
+            d - self.length
+        } else {
+            d
+        }
     }
 
     /// Interpolated centreline sample at distance `s`.
@@ -250,7 +265,11 @@ impl Track {
         let x = self.wrap_s(s) / self.spacing;
         let i = x.floor() as usize % self.samples.len();
         let u = x - x.floor();
-        lerp_sample(&self.samples[i], &self.samples[self.wrap(i as isize + 1)], u)
+        lerp_sample(
+            &self.samples[i],
+            &self.samples[self.wrap(i as isize + 1)],
+            u,
+        )
     }
 
     /// Index of the closest sample, by brute force. Use to seed a hint.
@@ -300,7 +319,11 @@ impl Track {
             }
         }
         let u = u.clamp(0.0, 1.0);
-        let smp = lerp_sample(&self.samples[i], &self.samples[self.wrap(i as isize + 1)], u);
+        let smp = lerp_sample(
+            &self.samples[i],
+            &self.samples[self.wrap(i as isize + 1)],
+            u,
+        );
 
         let rel = p - smp.pos;
         let d = rel.dot(smp.lateral);
@@ -315,7 +338,11 @@ impl Track {
                 }
                 // Surface plane through the centreline point, offset by the kerb profile.
                 let height_along_normal = rel.dot(smp.normal);
-                (p - smp.normal * (height_along_normal - kerb_rise), smp.normal, SurfaceProps::of(surface))
+                (
+                    p - smp.normal * (height_along_normal - kerb_rise),
+                    smp.normal,
+                    SurfaceProps::of(surface),
+                )
             }
         };
 
@@ -343,7 +370,10 @@ impl Track {
         } else if outside <= self.kerb_width {
             // Kerb crown: rises from the track edge, peaks in the middle.
             let x = outside / self.kerb_width;
-            (Surface::Kerb, self.kerb_height * (std::f64::consts::PI * x).sin())
+            (
+                Surface::Kerb,
+                self.kerb_height * (std::f64::consts::PI * x).sin(),
+            )
         } else {
             (Surface::Grass, 0.0)
         }
@@ -520,7 +550,11 @@ mod tests {
     #[test]
     fn circle_geometry() {
         let t = circle(100.0);
-        assert!((t.length - std::f64::consts::TAU * 100.0).abs() < 0.5, "{}", t.length);
+        assert!(
+            (t.length - std::f64::consts::TAU * 100.0).abs() < 0.5,
+            "{}",
+            t.length
+        );
         // Counter-clockwise circle turns left everywhere.
         for s in &t.samples {
             assert!((s.curvature - 0.01).abs() < 2.5e-3, "{}", s.curvature);
@@ -553,7 +587,11 @@ mod tests {
             let q = t.query(p, hint);
             hint = q.index;
             let expect = t.wrap_s(a * 100.0 * t.length / (std::f64::consts::TAU * 100.0));
-            assert!(t.delta_s(q.s, expect).abs() < 0.5, "k={k} s={} expect={expect}", q.s);
+            assert!(
+                t.delta_s(q.s, expect).abs() < 0.5,
+                "k={k} s={} expect={expect}",
+                q.s
+            );
         }
     }
 

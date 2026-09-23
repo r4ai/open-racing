@@ -9,10 +9,23 @@ fn circle(radius: f64) -> Track {
     let points = (0..32)
         .map(|i| {
             let a = i as f64 / 32.0 * std::f64::consts::TAU;
-            TrackPoint { pos: (radius * a.cos(), radius * a.sin(), 0.0), width_left: 30.0, width_right: 30.0, bank: 0.0 }
+            TrackPoint {
+                pos: (radius * a.cos(), radius * a.sin(), 0.0),
+                width_left: 30.0,
+                width_right: 30.0,
+                bank: 0.0,
+            }
         })
         .collect();
-    Track::new(&TrackDef { name: "circle".into(), points, kerb_width: 1.0, kerb_height: 0.0, runoff_width: f64::INFINITY, spacing: 1.0 }).unwrap()
+    Track::new(&TrackDef {
+        name: "circle".into(),
+        points,
+        kerb_width: 1.0,
+        kerb_height: 0.0,
+        runoff_width: f64::INFINITY,
+        spacing: 1.0,
+    })
+    .unwrap()
 }
 
 fn gt3() -> Arc<CarModel> {
@@ -21,7 +34,11 @@ fn gt3() -> Arc<CarModel> {
 
 fn shift_for(car: &Car) -> Shift {
     let dt = &car.state.drivetrain;
-    if dt.rpm() > 8900.0 && dt.gear < 6 && dt.shift_timer == 0.0 { Shift::Up } else { Shift::None }
+    if dt.rpm() > 8900.0 && dt.gear < 6 && dt.shift_timer == 0.0 {
+        Shift::Up
+    } else {
+        Shift::None
+    }
 }
 
 #[test]
@@ -30,13 +47,26 @@ fn settles_at_static_ride_height() {
     let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 0);
     let z0 = car.state.position.z;
     for _ in 0..3000 {
-        car.step(&track, &Controls { brake: 0.3, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                brake: 0.3,
+                ..Default::default()
+            },
+        );
     }
     assert!(car.speed() < 0.01, "speed {}", car.speed());
-    assert!((car.state.position.z - z0).abs() < 0.005, "z drift {}", car.state.position.z - z0);
+    assert!(
+        (car.state.position.z - z0).abs() < 0.005,
+        "z drift {}",
+        car.state.position.z - z0
+    );
     let total: f64 = car.telemetry.wheels.iter().map(|w| w.load).sum();
     let weight = car.model.params.mass * GRAVITY;
-    assert!((total - weight).abs() / weight < 0.01, "loads {total} vs {weight}");
+    assert!(
+        (total - weight).abs() / weight < 0.01,
+        "loads {total} vs {weight}"
+    );
     let front = car.telemetry.wheels[FL].load + car.telemetry.wheels[FR].load;
     assert!((front / total - car.model.params.front_weight).abs() < 0.01);
 }
@@ -48,7 +78,14 @@ fn acceleration_and_top_speed() {
     let mut t100 = None;
     for _ in 0..70_000 {
         let shift = shift_for(&car);
-        car.step(&track, &Controls { throttle: 1.0, shift, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                throttle: 1.0,
+                shift,
+                ..Default::default()
+            },
+        );
         if t100.is_none() && car.speed() >= 100.0 / 3.6 {
             t100 = Some(car.state.time);
         }
@@ -71,7 +108,14 @@ fn braking_distance_from_100() {
         .map(|b| {
             car.reset(&track, 0.0, 0.0, 100.0 / 3.6, 3);
             while car.speed() > 0.2 && car.state.time < 10.0 {
-                car.step(&track, &Controls { brake: b as f64 / 100.0, clutch: 1.0, ..Default::default() });
+                car.step(
+                    &track,
+                    &Controls {
+                        brake: b as f64 / 100.0,
+                        clutch: 1.0,
+                        ..Default::default()
+                    },
+                );
             }
             (car.state.position - start).length()
         })
@@ -99,11 +143,23 @@ fn skidpad(radius: f64) -> f64 {
             q.tangent.truncate().perp_dot(fwd.truncate()).asin()
         };
         let feedforward = (wheelbase / radius).atan();
-        let steer = (feedforward - 0.15 * q.d - 1.5 * heading_err - 0.5 * car.local_velocity().y / car.speed().max(1.0)) * ratio;
+        let steer = (feedforward
+            - 0.15 * q.d
+            - 1.5 * heading_err
+            - 0.5 * car.local_velocity().y / car.speed().max(1.0))
+            * ratio;
         let v = car.local_velocity().x;
         let throttle = (0.3 * (target - v) + 0.25).clamp(0.0, 1.0);
         let shift = shift_for(&car);
-        car.step(&track, &Controls { steer_wheel_angle: steer, throttle, shift, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                steer_wheel_angle: steer,
+                throttle,
+                shift,
+                ..Default::default()
+            },
+        );
 
         let ay = v * v / radius;
         if q.d.abs() < 1.0 && (v - target).abs() < 0.5 {
@@ -137,7 +193,14 @@ fn deterministic() {
         let mut car = Car::new(gt3(), &track, 50.0, 1.0, 20.0, 2);
         for k in 0..20_000 {
             let steer = (k as f64 * 0.001).sin() * 0.8;
-            car.step(&track, &Controls { steer_wheel_angle: steer, throttle: 0.6, ..Default::default() });
+            car.step(
+                &track,
+                &Controls {
+                    steer_wheel_angle: steer,
+                    throttle: 0.6,
+                    ..Default::default()
+                },
+            );
         }
         car.state
     };
@@ -156,7 +219,13 @@ fn runoff_barrier_contains_the_car() {
     let mut hint = 0;
     let mut closest = f64::NEG_INFINITY;
     for _ in 0..10_000 {
-        car.step(&track, &Controls { throttle: 0.3, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                throttle: 0.3,
+                ..Default::default()
+            },
+        );
         let q = track.query(car.state.position, hint);
         hint = q.index;
         closest = closest.max(q.beyond_barrier(&track));
@@ -170,10 +239,20 @@ fn runoff_barrier_contains_the_car() {
 fn walled_circle() -> Track {
     let mut ground = GroundMeshBuilder::new();
     let road = ground.add_surface(SurfaceProps::of(Surface::Asphalt));
-    let g = [DVec3::new(-200.0, -200.0, 0.0), DVec3::new(200.0, -200.0, 0.0), DVec3::new(200.0, 200.0, 0.0), DVec3::new(-200.0, 200.0, 0.0)];
+    let g = [
+        DVec3::new(-200.0, -200.0, 0.0),
+        DVec3::new(200.0, -200.0, 0.0),
+        DVec3::new(200.0, 200.0, 0.0),
+        DVec3::new(-200.0, 200.0, 0.0),
+    ];
     ground.add_ground(&g, &[], &[0, 1, 2, 0, 2, 3], road);
     // The car starts at (100, 0) heading +Y; the wall stands at y = 20.
-    let w = [DVec3::new(80.0, 20.0, 0.0), DVec3::new(120.0, 20.0, 0.0), DVec3::new(120.0, 20.0, 2.0), DVec3::new(80.0, 20.0, 2.0)];
+    let w = [
+        DVec3::new(80.0, 20.0, 0.0),
+        DVec3::new(120.0, 20.0, 0.0),
+        DVec3::new(120.0, 20.0, 2.0),
+        DVec3::new(80.0, 20.0, 2.0),
+    ];
     ground.add_wall(&w, &[0, 1, 2, 0, 2, 3]);
     circle(100.0).with_ground(ground.build())
 }
@@ -197,7 +276,13 @@ fn wall_stops_the_car() {
     let mut car = Car::new(gt3(), &track, 0.0, 0.0, 15.0, 2);
     let mut max_y = f64::NEG_INFINITY;
     for _ in 0..5000 {
-        car.step(&track, &Controls { throttle: 0.3, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                throttle: 0.3,
+                ..Default::default()
+            },
+        );
         max_y = max_y.max(car.state.position.y);
     }
     // The CG stops about half a wheelbase plus a tyre radius short of the wall.

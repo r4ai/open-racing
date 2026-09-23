@@ -29,7 +29,10 @@ pub struct Mlp<B: Backend> {
 impl<B: Backend> Mlp<B> {
     pub fn new(sizes: &[usize], device: &B::Device) -> Self {
         Self {
-            layers: sizes.windows(2).map(|w| LinearConfig::new(w[0], w[1]).init(device)).collect(),
+            layers: sizes
+                .windows(2)
+                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .collect(),
         }
     }
 
@@ -54,7 +57,13 @@ pub struct Agent<B: Backend> {
 }
 
 impl<B: Backend> Agent<B> {
-    pub fn new(obs_dim: usize, act_dim: usize, hidden: &[usize], init_log_std: f32, device: &B::Device) -> Self {
+    pub fn new(
+        obs_dim: usize,
+        act_dim: usize,
+        hidden: &[usize],
+        init_log_std: f32,
+        device: &B::Device,
+    ) -> Self {
         let sizes = |out: usize| [&[obs_dim][..], hidden, &[out]].concat();
         Self {
             actor: Mlp::new(&sizes(act_dim), device),
@@ -81,7 +90,11 @@ impl Normalizer {
     const CLIP: f64 = 10.0;
 
     pub fn new(dim: usize) -> Self {
-        Self { mean: vec![0.0; dim], var: vec![1.0; dim], count: 1e-4 }
+        Self {
+            mean: vec![0.0; dim],
+            var: vec![1.0; dim],
+            count: 1e-4,
+        }
     }
 
     /// Updates statistics with a batch of rows.
@@ -98,7 +111,8 @@ impl Normalizer {
             let total = self.count + n;
             let delta = batch_mean - self.mean[j];
             self.mean[j] += delta * n / total;
-            let m2 = self.var[j] * self.count + batch_var * n + delta * delta * self.count * n / total;
+            let m2 =
+                self.var[j] * self.count + batch_var * n + delta * delta * self.count * n / total;
             self.var[j] = m2 / total;
         }
         self.count += n;
@@ -161,13 +175,18 @@ fn recorder() -> BinFileRecorder<FullPrecisionSettings> {
     BinFileRecorder::new()
 }
 
-pub fn save_policy<B: Backend>(dir: &Path, agent: &Agent<B>, meta: &PolicyMeta) -> std::io::Result<()> {
+pub fn save_policy<B: Backend>(
+    dir: &Path,
+    agent: &Agent<B>,
+    meta: &PolicyMeta,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     agent
         .clone()
         .save_file(dir.join("policy"), &recorder())
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let text = ron::ser::to_string_pretty(meta, ron::ser::PrettyConfig::default()).map_err(std::io::Error::other)?;
+    let text = ron::ser::to_string_pretty(meta, ron::ser::PrettyConfig::default())
+        .map_err(std::io::Error::other)?;
     std::fs::write(dir.join("meta.ron"), text)
 }
 
@@ -176,10 +195,20 @@ pub fn load_meta(dir: &Path) -> std::io::Result<PolicyMeta> {
 }
 
 /// Rebuilds the network described by `meta` and loads the weights saved in `dir`.
-pub fn load_agent<B: Backend>(dir: &Path, meta: &PolicyMeta, device: &B::Device) -> std::io::Result<Agent<B>> {
-    Agent::new(meta.obs_names.len(), meta.act_low.len(), &meta.hidden, 0.0, device)
-        .load_file(dir.join("policy"), &recorder(), device)
-        .map_err(|e| std::io::Error::other(e.to_string()))
+pub fn load_agent<B: Backend>(
+    dir: &Path,
+    meta: &PolicyMeta,
+    device: &B::Device,
+) -> std::io::Result<Agent<B>> {
+    Agent::new(
+        meta.obs_names.len(),
+        meta.act_low.len(),
+        &meta.hidden,
+        0.0,
+        device,
+    )
+    .load_file(dir.join("policy"), &recorder(), device)
+    .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// A trained policy running deterministically (distribution mean) for inference.
@@ -195,7 +224,12 @@ impl BurnPolicy {
         let meta = load_meta(dir)?;
         let device = Default::default();
         let agent = load_agent(dir, &meta, &device)?;
-        Ok(Self { agent, meta, device, norm_buf: Vec::new() })
+        Ok(Self {
+            agent,
+            meta,
+            device,
+            norm_buf: Vec::new(),
+        })
     }
 
     /// Fails when the policy was trained on a different observation layout.
@@ -218,7 +252,10 @@ impl Policy for BurnPolicy {
         let n = obs.len() / dim;
         self.norm_buf.resize(obs.len(), 0.0);
         self.meta.normalizer.normalize(obs, &mut self.norm_buf);
-        let x = Tensor::<InferenceBackend, 2>::from_data(TensorData::new(self.norm_buf.clone(), [n, dim]), &self.device);
+        let x = Tensor::<InferenceBackend, 2>::from_data(
+            TensorData::new(self.norm_buf.clone(), [n, dim]),
+            &self.device,
+        );
         let mean = self.agent.actor.forward(x);
         let raw = mean.into_data().into_vec::<f32>().expect("f32 output");
         scale_action(&raw, &self.meta.act_low, &self.meta.act_high, actions);

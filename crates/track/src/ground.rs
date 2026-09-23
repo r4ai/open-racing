@@ -38,11 +38,22 @@ pub struct Ground {
 impl Ground {
     /// Appends a mesh to the patch of its kind. Normals are dropped unless there is one
     /// per position.
-    pub fn add(&mut self, kind: PatchKind, positions: &[[f32; 3]], normals: &[[f32; 3]], indices: &[u32]) {
+    pub fn add(
+        &mut self,
+        kind: PatchKind,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+    ) {
         let i = match self.patches.iter().position(|p| p.kind == kind) {
             Some(i) => i,
             None => {
-                self.patches.push(Patch { kind, positions: Vec::new(), normals: Vec::new(), indices: Vec::new() });
+                self.patches.push(Patch {
+                    kind,
+                    positions: Vec::new(),
+                    normals: Vec::new(),
+                    indices: Vec::new(),
+                });
                 self.patches.len() - 1
             }
         };
@@ -60,7 +71,9 @@ impl Ground {
     }
 
     pub fn is_drivable(&self) -> bool {
-        self.patches.iter().any(|p| matches!(p.kind, PatchKind::Ground(_)) && !p.indices.is_empty())
+        self.patches
+            .iter()
+            .any(|p| matches!(p.kind, PatchKind::Ground(_)) && !p.indices.is_empty())
     }
 
     /// Builds the physics' lookup structure.
@@ -69,10 +82,16 @@ impl Ground {
         for &s in surfaces {
             b.add_surface(s);
         }
-        let d = |v: &[[f32; 3]]| v.iter().map(|p| DVec3::from(p.map(f64::from))).collect::<Vec<_>>();
+        let d = |v: &[[f32; 3]]| {
+            v.iter()
+                .map(|p| DVec3::from(p.map(f64::from)))
+                .collect::<Vec<_>>()
+        };
         for p in &self.patches {
             match p.kind {
-                PatchKind::Ground(s) => b.add_ground(&d(&p.positions), &d(&p.normals), &p.indices, s),
+                PatchKind::Ground(s) => {
+                    b.add_ground(&d(&p.positions), &d(&p.normals), &p.indices, s)
+                }
                 PatchKind::Wall => b.add_wall(&d(&p.positions), &p.indices),
             }
         }
@@ -87,11 +106,15 @@ impl Ground {
             {
                 return Err(Error::Format(format!("ground: surface {s} is not defined")));
             }
-            if p.indices.len() % 3 != 0 || p.indices.iter().any(|&i| i as usize >= p.positions.len()) {
+            if p.indices.len() % 3 != 0
+                || p.indices.iter().any(|&i| i as usize >= p.positions.len())
+            {
                 return Err(Error::Format("ground: invalid triangle indices".into()));
             }
             if !p.normals.is_empty() && p.normals.len() != p.positions.len() {
-                return Err(Error::Format("ground: normal count does not match the vertices".into()));
+                return Err(Error::Format(
+                    "ground: normal count does not match the vertices".into(),
+                ));
             }
         }
         Ok(())
@@ -119,9 +142,17 @@ impl Ground {
         for _ in 0..n {
             let kind = match r.u32()? {
                 WALL => PatchKind::Wall,
-                s => PatchKind::Ground(u16::try_from(s).map_err(|_| Error::Format(format!("ground: surface id {s} too large")))?),
+                s => PatchKind::Ground(
+                    u16::try_from(s)
+                        .map_err(|_| Error::Format(format!("ground: surface id {s} too large")))?,
+                ),
             };
-            patches.push(Patch { kind, positions: r.vecs()?, normals: r.vecs()?, indices: r.u32s()? });
+            patches.push(Patch {
+                kind,
+                positions: r.vecs()?,
+                normals: r.vecs()?,
+                indices: r.u32s()?,
+            });
         }
         r.finish()?;
         Ok(Self { patches })
@@ -136,9 +167,19 @@ mod tests {
     fn meshes_merge_by_kind() {
         let mut g = Ground::default();
         let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        g.add(PatchKind::Ground(0), &tri, &[[0.0, 0.0, 1.0]; 3], &[0, 1, 2]);
+        g.add(
+            PatchKind::Ground(0),
+            &tri,
+            &[[0.0, 0.0, 1.0]; 3],
+            &[0, 1, 2],
+        );
         g.add(PatchKind::Wall, &tri, &[], &[0, 1, 2]);
-        g.add(PatchKind::Ground(0), &tri, &[[0.0, 0.0, 1.0]; 3], &[0, 2, 1]);
+        g.add(
+            PatchKind::Ground(0),
+            &tri,
+            &[[0.0, 0.0, 1.0]; 3],
+            &[0, 2, 1],
+        );
         assert_eq!(g.patches.len(), 2);
         assert_eq!(g.patches[0].indices, [0, 1, 2, 3, 5, 4]);
         assert_eq!(g.patches[0].normals.len(), 6);

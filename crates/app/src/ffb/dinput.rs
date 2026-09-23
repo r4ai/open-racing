@@ -30,25 +30,47 @@ impl Wheel {
         unsafe {
             let module = GetModuleHandleW(None).map_err(|e| e.to_string())?;
             let mut raw: *mut c_void = std::ptr::null_mut();
-            DirectInput8Create(module.into(), DIRECTINPUT_VERSION, &IDirectInput8W::IID, &mut raw, None).map_err(|e| e.to_string())?;
+            DirectInput8Create(
+                module.into(),
+                DIRECTINPUT_VERSION,
+                &IDirectInput8W::IID,
+                &mut raw,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
             let di = IDirectInput8W::from_raw(raw);
 
             let mut found: Vec<DIDEVICEINSTANCEW> = Vec::new();
-            di.EnumDevices(DI8DEVCLASS_GAMECTRL, Some(collect), (&raw mut found).cast(), DIEDFL_ATTACHEDONLY | DIEDFL_FORCEFEEDBACK)
-                .map_err(|e| e.to_string())?;
+            di.EnumDevices(
+                DI8DEVCLASS_GAMECTRL,
+                Some(collect),
+                (&raw mut found).cast(),
+                DIEDFL_ATTACHEDONLY | DIEDFL_FORCEFEEDBACK,
+            )
+            .map_err(|e| e.to_string())?;
             // guidProduct.data1 is MAKELONG(vendor, product).
             let instance = found
                 .iter()
-                .find(|d| usb.is_none_or(|(vendor, product)| d.guidProduct.data1 == (product as u32) << 16 | vendor as u32))
+                .find(|d| {
+                    usb.is_none_or(|(vendor, product)| {
+                        d.guidProduct.data1 == (product as u32) << 16 | vendor as u32
+                    })
+                })
                 .ok_or("no force-feedback device found for the steering input")?;
-            let name = String::from_utf16_lossy(&instance.tszProductName).trim_end_matches('\0').to_owned();
+            let name = String::from_utf16_lossy(&instance.tszProductName)
+                .trim_end_matches('\0')
+                .to_owned();
 
             let mut device = None;
-            di.CreateDevice(&instance.guidInstance, &mut device, None).map_err(|e| e.to_string())?;
+            di.CreateDevice(&instance.guidInstance, &mut device, None)
+                .map_err(|e| e.to_string())?;
             let device = device.ok_or("CreateDevice returned no device")?;
             set_x_axis_format(&device)?;
             device
-                .SetCooperativeLevel(HWND(hwnd as *mut c_void), DISCL_EXCLUSIVE | DISCL_BACKGROUND)
+                .SetCooperativeLevel(
+                    HWND(hwnd as *mut c_void),
+                    DISCL_EXCLUSIVE | DISCL_BACKGROUND,
+                )
                 .map_err(|e| format!("{name}: {e}"))?;
             // The driver's centring spring would fight the simulated aligning torque.
             let mut autocenter = DIPROPDWORD {
@@ -80,10 +102,18 @@ impl Wheel {
                 ..Default::default()
             };
             let mut effect = None;
-            device.CreateEffect(&GUID_ConstantForce, &mut params, &mut effect, None).map_err(|e| format!("{name}: {e}"))?;
+            device
+                .CreateEffect(&GUID_ConstantForce, &mut params, &mut effect, None)
+                .map_err(|e| format!("{name}: {e}"))?;
             let effect = effect.ok_or("CreateEffect returned no effect")?;
             effect.Start(1, 0).map_err(|e| format!("{name}: {e}"))?;
-            Ok(Self { _di: di, device, effect, name, magnitude: 0 })
+            Ok(Self {
+                _di: di,
+                device,
+                effect,
+                name,
+                magnitude: 0,
+            })
         }
     }
 
@@ -94,7 +124,9 @@ impl Wheel {
         if magnitude == self.magnitude {
             return Ok(());
         }
-        let mut constant = DICONSTANTFORCE { lMagnitude: magnitude };
+        let mut constant = DICONSTANTFORCE {
+            lMagnitude: magnitude,
+        };
         let mut params = DIEFFECT {
             dwSize: size_of::<DIEFFECT>() as u32,
             cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
@@ -103,10 +135,16 @@ impl Wheel {
         };
         // SAFETY: `params` and `constant` outlive the calls.
         unsafe {
-            if self.effect.SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS).is_err() {
+            if self
+                .effect
+                .SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS)
+                .is_err()
+            {
                 // Lost the device (another app took it, or it was unplugged): reacquire once.
                 self.device.Acquire().map_err(|e| e.to_string())?;
-                self.effect.SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS | DIEP_START).map_err(|e| e.to_string())?;
+                self.effect
+                    .SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS | DIEP_START)
+                    .map_err(|e| e.to_string())?;
             }
         }
         self.magnitude = magnitude;
@@ -143,7 +181,9 @@ impl Drop for Wheel {
         };
         // SAFETY: plain COM calls on live interfaces; `params` outlives them.
         unsafe {
-            let _ = self.effect.SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS);
+            let _ = self
+                .effect
+                .SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS);
             let _ = self.effect.Stop();
             let _ = self.device.SendForceFeedbackCommand(DISFFC_RESET);
             let _ = self.effect.Unload();
@@ -161,7 +201,12 @@ unsafe extern "system" fn collect(instance: *mut DIDEVICEINSTANCEW, found: *mut 
 /// A device must have a data format before it can be acquired; effects address the
 /// X axis by its offset in it.
 unsafe fn set_x_axis_format(device: &IDirectInputDevice8W) -> Result<(), String> {
-    let mut objects = [DIOBJECTDATAFORMAT { pguid: &GUID_XAxis, dwOfs: 0, dwType: DIDFT_AXIS | DIDFT_ANYINSTANCE, dwFlags: 0 }];
+    let mut objects = [DIOBJECTDATAFORMAT {
+        pguid: &GUID_XAxis,
+        dwOfs: 0,
+        dwType: DIDFT_AXIS | DIDFT_ANYINSTANCE,
+        dwFlags: 0,
+    }];
     let mut format = DIDATAFORMAT {
         dwSize: size_of::<DIDATAFORMAT>() as u32,
         dwObjSize: size_of::<DIOBJECTDATAFORMAT>() as u32,

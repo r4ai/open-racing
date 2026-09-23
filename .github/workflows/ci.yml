@@ -9,6 +9,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (libraries and CPU trainer)
+        run: cargo clippy -p open-racing-sim -p open-racing-env -p open-racing-api -p open-racing-track -p open-racing-ac -p open-racing-train-burn --all-targets --no-default-features --features open-racing-train-burn/ndarray -- -D warnings
+      - name: Clippy (app default features)
+        run: cargo clippy -p open-racing-app --all-targets -- -D warnings
+
   test:
     strategy:
       fail-fast: false

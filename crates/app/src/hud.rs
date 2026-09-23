@@ -19,7 +19,8 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn).add_systems(Update, (update, toggle_help));
+        app.add_systems(Startup, spawn)
+            .add_systems(Update, (update, toggle_help));
     }
 }
 
@@ -70,7 +71,11 @@ fn spawn(mut commands: Commands) {
 fn toggle_help(requests: Res<AppRequests>, mut help: Query<&mut Visibility, With<HelpText>>) {
     if requests.toggle_help {
         for mut v in &mut help {
-            *v = if *v == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden };
+            *v = if *v == Visibility::Hidden {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         }
     }
 }
@@ -81,7 +86,9 @@ fn bar(x: f64) -> String {
 }
 
 fn time(t: Option<f64>) -> String {
-    t.map_or("--:--.---".into(), |t| format!("{}:{:06.3}", (t / 60.0) as u32, t % 60.0))
+    t.map_or("--:--.---".into(), |t| {
+        format!("{}:{:06.3}", (t / 60.0) as u32, t % 60.0)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,13 +102,22 @@ fn update(
     ffb: Res<FfbStatus>,
     mut hud: Query<&mut Text, With<HudText>>,
 ) {
-    let Ok(mut text) = hud.single_mut() else { return };
+    let Ok(mut text) = hud.single_mut() else {
+        return;
+    };
     let car = &sim.car;
     let st = &car.state;
     let dt = &st.drivetrain;
     let c = &sim.controls;
     let mode = match sim.mode {
-        Mode::Human => format!("DRIVER ({})", if input.device.is_empty() { "keyboard" } else { input.device }),
+        Mode::Human => format!(
+            "DRIVER ({})",
+            if input.device.is_empty() {
+                "keyboard"
+            } else {
+                input.device
+            }
+        ),
         Mode::Ai => "AI".into(),
         Mode::Replay => "REPLAY".into(),
     };
@@ -113,17 +129,33 @@ fn update(
     };
 
     let mut s = String::new();
-    let _ = writeln!(s, "{mode}   camera: {}   {:.0} fps", camera.name(), 1.0 / diagnostics.delta_secs().max(1e-3));
+    let _ = writeln!(
+        s,
+        "{mode}   camera: {}   {:.0} fps",
+        camera.name(),
+        1.0 / diagnostics.delta_secs().max(1e-3)
+    );
     let _ = writeln!(s, "input: {} (Tab)", selection.label(&pads));
     let _ = writeln!(
         s,
         "{:5.0} km/h   gear {gear}   {:5.0} rpm{}",
         car.speed() * 3.6,
         dt.rpm(),
-        if dt.stalled { "   ENGINE STALLED (I)" } else { "" }
+        if dt.stalled {
+            "   ENGINE STALLED (I)"
+        } else {
+            ""
+        }
     );
     let lap = &sim.lap;
-    let _ = writeln!(s, "lap {}   now {}   last {}   best {}", lap.laps + 1, time(lap.current_lap), time(lap.last_lap), time(lap.best_lap));
+    let _ = writeln!(
+        s,
+        "lap {}   now {}   last {}   best {}",
+        lap.laps + 1,
+        time(lap.current_lap),
+        time(lap.last_lap),
+        time(lap.best_lap)
+    );
     let _ = writeln!(
         s,
         "throttle {}  brake {}  steer {:+5.0} deg",
@@ -131,8 +163,15 @@ fn update(
         bar(c.brake),
         c.steer_wheel_angle.to_degrees()
     );
-    let _ = writeln!(s, "tyre   load N   slip deg   slip %    in  mid  out  core C    bar   wear %   grip %");
-    for (i, (name, w)) in ["FL", "FR", "RL", "RR"].iter().zip(&car.telemetry.wheels).enumerate() {
+    let _ = writeln!(
+        s,
+        "tyre   load N   slip deg   slip %    in  mid  out  core C    bar   wear %   grip %"
+    );
+    for (i, (name, w)) in ["FL", "FR", "RL", "RR"]
+        .iter()
+        .zip(&car.telemetry.wheels)
+        .enumerate()
+    {
         let t = &st.wheels[i].tire;
         let [inner, middle, outer] = t.tread_temperature;
         let _ = writeln!(
@@ -144,7 +183,10 @@ fn update(
             t.core_temperature,
             w.pressure,
             t.wear * 100.0,
-            car.model.tire(i).condition_grip(t, &w.tread_load, w.pressure) * 100.0
+            car.model
+                .tire(i)
+                .condition_grip(t, &w.tread_load, w.pressure)
+                * 100.0
         );
     }
     let a = car.telemetry.acceleration;
@@ -157,8 +199,12 @@ fn update(
         car.telemetry.downforce[0] + car.telemetry.downforce[1]
     );
     if !ffb.cut.is_empty() {
-        let _ = write!(s, "
-FFB {}", ffb.cut);
+        let _ = write!(
+            s,
+            "
+FFB {}",
+            ffb.cut
+        );
     }
     text.0 = s;
 }

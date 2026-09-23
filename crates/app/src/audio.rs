@@ -101,7 +101,12 @@ struct Hit {
 
 impl Hit {
     fn new(hz: f32, seconds: f32) -> Self {
-        Self { env: 0.0, phase: 0.0, decay: (-1.0 / (SR * seconds)).exp(), hz }
+        Self {
+            env: 0.0,
+            phase: 0.0,
+            decay: (-1.0 / (SR * seconds)).exp(),
+            hz,
+        }
     }
 
     fn trigger(&mut self, amplitude: f32) {
@@ -213,7 +218,8 @@ impl CarSynthDecoder {
         k.master += (t.master - k.master) * slow;
 
         let firing = self.k.rpm / 15.0;
-        self.engine_lp.set(firing * (3.0 + 9.0 * self.k.load) + 200.0, 0.8);
+        self.engine_lp
+            .set(firing * (3.0 + 9.0 * self.k.load) + 200.0, 0.8);
         self.intake.set(firing * 2.0 + 150.0, 1.5);
 
         self.vibrato_phase = (self.vibrato_phase + 6.5 * dt).fract();
@@ -255,13 +261,18 @@ impl CarSynthDecoder {
 
         let (road, ..) = self.road.process(noise);
         let (_, wind, _) = self.wind.process(noise);
-        let rolling = road * (k.speed / 70.0).min(1.0) * 0.5 + wind * (k.speed / 90.0).powi(2).min(1.0) * 0.35;
+        let rolling = road * (k.speed / 70.0).min(1.0) * 0.5
+            + wind * (k.speed / 90.0).powi(2).min(1.0) * 0.35;
 
         self.kerb_phase = (self.kerb_phase + k.speed / KERB_PITCH / SR).fract();
         let ridge = if self.kerb_phase < 0.5 { 1.0 } else { -1.0 };
         let (kerb, ..) = self.kerb_lp.process(ridge * 0.8 + noise * 0.4);
 
-        let crackle = if self.noise() > 0.97 - 0.05 * (k.speed / 30.0).min(1.0) { noise * 2.0 } else { 0.0 };
+        let crackle = if self.noise() > 0.97 - 0.05 * (k.speed / 30.0).min(1.0) {
+            noise * 2.0
+        } else {
+            0.0
+        };
         let (.., gravel) = self.grass_hp.process(crackle + noise * 0.15);
         let grass = (gravel + road * 2.0) * k.grass * 0.35;
 
@@ -279,7 +290,10 @@ impl Iterator for CarSynthDecoder {
         }
         self.until_block -= 1;
         let noise = self.noise();
-        let mix = self.engine(noise) + self.tyres(noise) + self.clunk.next(noise, 0.4) + self.thump.next(noise, 0.2);
+        let mix = self.engine(noise)
+            + self.tyres(noise)
+            + self.clunk.next(noise, 0.4)
+            + self.thump.next(noise, 0.2);
         Some(mix.tanh() * self.k.master * 0.8)
     }
 }
@@ -323,7 +337,9 @@ impl Plugin for AudioPlugin {
 
 fn spawn(mut commands: Commands, mut synths: ResMut<Assets<CarSynth>>, sim: Res<Simulation>) {
     let knobs = Arc::new(Mutex::new(Knobs::default()));
-    commands.spawn(AudioPlayer(synths.add(CarSynth { knobs: knobs.clone() })));
+    commands.spawn(AudioPlayer(synths.add(CarSynth {
+        knobs: knobs.clone(),
+    })));
     commands.insert_resource(CarSound {
         knobs,
         muted: false,
@@ -369,7 +385,11 @@ fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<Ca
     *knobs = Knobs {
         rpm: rpm as f32,
         load: sim.controls.throttle as f32,
-        limiter: if rpm >= params.engine.limiter_rpm - 100.0 { 1.0 } else { 0.0 },
+        limiter: if rpm >= params.engine.limiter_rpm - 100.0 {
+            1.0
+        } else {
+            0.0
+        },
         running: if drivetrain.stalled { 0.0 } else { 1.0 },
         skid: (skid * moving).min(1.0) as f32,
         speed: speed as f32,
@@ -387,7 +407,10 @@ mod tests {
 
     /// Renders one second with the given knobs, returning (rms, peak).
     fn render(knobs: Knobs) -> (f32, f32) {
-        let shared = Arc::new(Mutex::new(Knobs { master: 1.0, ..knobs }));
+        let shared = Arc::new(Mutex::new(Knobs {
+            master: 1.0,
+            ..knobs
+        }));
         let mut synth = CarSynthDecoder::new(shared);
         let samples: Vec<f32> = synth.by_ref().take(SAMPLE_RATE as usize).collect();
         let tail = &samples[SAMPLE_RATE as usize / 2..];
@@ -397,12 +420,42 @@ mod tests {
 
     #[test]
     fn levels_are_bounded_and_respond_to_state() {
-        let idle = Knobs { rpm: 1500.0, running: 1.0, ..Knobs::default() };
-        let full = Knobs { rpm: 8000.0, load: 1.0, running: 1.0, speed: 60.0, ..Knobs::default() };
-        let sliding = Knobs { skid: 1.0, speed: 30.0, ..Knobs::default() };
+        let idle = Knobs {
+            rpm: 1500.0,
+            running: 1.0,
+            ..Knobs::default()
+        };
+        let full = Knobs {
+            rpm: 8000.0,
+            load: 1.0,
+            running: 1.0,
+            speed: 60.0,
+            ..Knobs::default()
+        };
+        let sliding = Knobs {
+            skid: 1.0,
+            speed: 30.0,
+            ..Knobs::default()
+        };
         let stalled = Knobs::default();
-        let all = Knobs { rpm: 9250.0, load: 1.0, limiter: 1.0, running: 1.0, skid: 1.0, speed: 80.0, kerb: 1.0, grass: 1.0, ..Knobs::default() };
-        for (name, k) in [("idle", idle), ("full", full), ("sliding", sliding), ("stalled", stalled), ("all", all)] {
+        let all = Knobs {
+            rpm: 9250.0,
+            load: 1.0,
+            limiter: 1.0,
+            running: 1.0,
+            skid: 1.0,
+            speed: 80.0,
+            kerb: 1.0,
+            grass: 1.0,
+            ..Knobs::default()
+        };
+        for (name, k) in [
+            ("idle", idle),
+            ("full", full),
+            ("sliding", sliding),
+            ("stalled", stalled),
+            ("all", all),
+        ] {
             let (rms, peak) = render(k);
             println!("{name:8} rms {rms:.3} peak {peak:.3}");
             assert!(rms.is_finite() && peak <= 0.8 + 1e-6, "{name}");

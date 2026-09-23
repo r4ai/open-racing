@@ -70,10 +70,34 @@ enum Command {
 
 fn main() {
     match Cli::parse().command {
-        Command::Train { track, car, envs, iterations, rollout, lr, gamma, entropy, crash_penalty, seed, privileged, manual_shift, out, init } => {
-            let config = EnvConfig { privileged_obs: privileged, auto_shift: !manual_shift, seed, ..EnvConfig::default() };
-            let mut spec = EnvSpec::from_names(&track, &car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
-            spec.reward = Arc::new(DefaultReward { termination_penalty: crash_penalty, ..DefaultReward::default() });
+        Command::Train {
+            track,
+            car,
+            envs,
+            iterations,
+            rollout,
+            lr,
+            gamma,
+            entropy,
+            crash_penalty,
+            seed,
+            privileged,
+            manual_shift,
+            out,
+            init,
+        } => {
+            let config = EnvConfig {
+                privileged_obs: privileged,
+                auto_shift: !manual_shift,
+                seed,
+                ..EnvConfig::default()
+            };
+            let mut spec =
+                EnvSpec::from_names(&track, &car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
+            spec.reward = Arc::new(DefaultReward {
+                termination_penalty: crash_penalty,
+                ..DefaultReward::default()
+            });
             let mut env = spec.make_vec_env(envs);
             let space = env.action_space().clone();
             let meta = PolicyMeta {
@@ -91,7 +115,17 @@ fn main() {
                 track,
                 car,
             };
-            let cfg = PpoConfig { iterations, rollout_len: rollout, learning_rate: lr, gamma, entropy_coef: entropy, seed, out_dir: out, init, ..Default::default() };
+            let cfg = PpoConfig {
+                iterations,
+                rollout_len: rollout,
+                learning_rate: lr,
+                gamma,
+                entropy_coef: entropy,
+                seed,
+                out_dir: out,
+                init,
+                ..Default::default()
+            };
             println!(
                 "training on {} envs, obs dim {}, {} physics steps per action",
                 envs,
@@ -100,8 +134,14 @@ fn main() {
             );
             ppo::train::<TrainBackend>(&mut env, &cfg, TrainContext { meta }, &Default::default());
         }
-        Command::Eval { model, seconds, envs, trace } => {
-            let mut policy = BurnPolicy::load(&model).unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
+        Command::Eval {
+            model,
+            seconds,
+            envs,
+            trace,
+        } => {
+            let mut policy = BurnPolicy::load(&model)
+                .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
             flying_lap(&mut policy, seconds, trace.as_deref());
             if envs > 0 {
                 robustness(&mut policy, seconds, envs);
@@ -111,19 +151,33 @@ fn main() {
 }
 
 fn eval_env(policy: &BurnPolicy, config: EnvConfig, envs: usize) -> (EnvSpec, RacingVecEnv) {
-    let spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config).unwrap_or_else(|e| panic!("{e}"));
+    let spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config)
+        .unwrap_or_else(|e| panic!("{e}"));
     let env = spec.make_vec_env(envs);
-    policy.check_compatible(env.observation_space()).unwrap_or_else(|e| panic!("{e}"));
+    policy
+        .check_compatible(env.observation_space())
+        .unwrap_or_else(|e| panic!("{e}"));
     (spec, env)
 }
 
 /// One car from a standing start on the start line, as in a race.
 fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
-    let config = EnvConfig { random_start: false, start_speed: (0.0, 0.0), start_offset: (0.0, 0.0), ..policy.meta.env_config() };
+    let config = EnvConfig {
+        random_start: false,
+        start_speed: (0.0, 0.0),
+        start_offset: (0.0, 0.0),
+        ..policy.meta.env_config()
+    };
     let (spec, mut env) = eval_env(policy, config.clone(), 1);
     let mut trace = trace.map(|path| {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
-        writeln!(file, "time,s,offset,speed,steer,throttle,brake,gear,curvature").unwrap();
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        );
+        writeln!(
+            file,
+            "time,s,offset,speed,steer,throttle,brake,gear,curvature"
+        )
+        .unwrap();
         file
     });
     let mut obs = env.reset(0).to_vec();
@@ -143,7 +197,10 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         stats = env.episode_stats().next().copied().unwrap_or_default();
         if let Some(file) = &mut trace {
             let car = env.cars().next().expect("one car");
-            let q = spec.track.query(car.state.position, spec.track.nearest_index(car.state.position));
+            let q = spec.track.query(
+                car.state.position,
+                spec.track.nearest_index(car.state.position),
+            );
             writeln!(
                 file,
                 "{:.2},{:.1},{:.2},{:.2},{:.3},{:.3},{:.3},{},{:.5}",
@@ -165,7 +222,9 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         stats.time,
         stats.progress,
         stats.laps,
-        stats.best_lap_time.map_or("-".into(), |l| format!("{l:.3}s"))
+        stats
+            .best_lap_time
+            .map_or("-".into(), |l| format!("{l:.3}s"))
     );
 }
 
@@ -194,13 +253,17 @@ fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize) {
         for (_, stats) in env.finished_episodes() {
             distance += stats.progress;
             laps += stats.laps;
-            best_lap = stats.best_lap_time.map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
+            best_lap = stats
+                .best_lap_time
+                .map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
         }
     }
     for stats in env.episode_stats() {
         distance += stats.progress;
         laps += stats.laps;
-        best_lap = stats.best_lap_time.map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
+        best_lap = stats
+            .best_lap_time
+            .map_or(best_lap, |l| Some(best_lap.map_or(l, |b: f64| b.min(l))));
     }
     println!(
         "random starts: {envs} cars × {seconds:.0} s, {:.0} km, {laps} laps, best lap {}, {crashes} crashes ({:.2} per lap)",
@@ -208,9 +271,17 @@ fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize) {
         best_lap.map_or("-".into(), |l| format!("{l:.3}s")),
         crashes as f64 * track.length / distance.max(1.0),
     );
-    let mut hot: Vec<_> = crashes_at.iter().enumerate().filter(|(_, n)| **n > 0).collect();
+    let mut hot: Vec<_> = crashes_at
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .collect();
     hot.sort_by(|a, b| b.1.cmp(a.1));
     for (bin, n) in hot.iter().take(5) {
-        println!("  crashes at {:>4.0}–{:<4.0} m: {n}", *bin as f64 * BIN, (*bin + 1) as f64 * BIN);
+        println!(
+            "  crashes at {:>4.0}–{:<4.0} m: {n}",
+            *bin as f64 * BIN,
+            (*bin + 1) as f64 * BIN
+        );
     }
 }

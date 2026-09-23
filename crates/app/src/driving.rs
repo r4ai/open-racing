@@ -33,7 +33,11 @@ pub struct Recording {
 
 impl Recording {
     fn new(start: CarState) -> Self {
-        Self { start, controls: Vec::new(), cursor: 0 }
+        Self {
+            start,
+            controls: Vec::new(),
+            cursor: 0,
+        }
     }
 }
 
@@ -87,7 +91,10 @@ impl Simulation {
     /// Body pose interpolated between the last two physics states.
     pub fn body_pose(&self) -> (DVec3, DQuat) {
         let (a, b) = (&self.previous, &self.car.state);
-        (a.position.lerp(b.position, self.alpha), a.orientation.slerp(b.orientation, self.alpha))
+        (
+            a.position.lerp(b.position, self.alpha),
+            a.orientation.slerp(b.orientation, self.alpha),
+        )
     }
 
     /// Puts the car back on the centreline at the nearest point, at rest.
@@ -118,7 +125,10 @@ pub struct DrivingPlugin;
 
 impl Plugin for DrivingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (handle_requests, step_simulation.run_if(settings_closed)).chain());
+        app.add_systems(
+            Update,
+            (handle_requests, step_simulation.run_if(settings_closed)).chain(),
+        );
     }
 }
 
@@ -135,17 +145,26 @@ pub fn install_policy(app: &mut App, args: &Args) {
             }
         };
         let sim = app.world().resource::<Simulation>();
-        let spec = EnvSpec { config: policy.meta.env_config(), ..sim.spec.clone() };
+        let spec = EnvSpec {
+            config: policy.meta.env_config(),
+            ..sim.spec.clone()
+        };
         if let Err(e) = policy.check_compatible(&spec.observation_space()) {
             eprintln!("{e}");
             return;
         }
         let driver = spec.agent_driver();
-        app.insert_non_send(AiDriver { policy: Box::new(policy), driver });
+        app.insert_non_send(AiDriver {
+            policy: Box::new(policy),
+            driver,
+        });
         app.world_mut().resource_mut::<Simulation>().mode = Mode::Ai;
     }
     #[cfg(not(feature = "burn-policy"))]
-    eprintln!("built without the `burn-policy` feature; ignoring --ai {}", dir.display());
+    eprintln!(
+        "built without the `burn-policy` feature; ignoring --ai {}",
+        dir.display()
+    );
 }
 
 fn handle_requests(
@@ -176,7 +195,11 @@ fn handle_requests(
     if requests.toggle_ai
         && let Some(mut ai) = ai
     {
-        sim.mode = if sim.mode == Mode::Ai { Mode::Human } else { Mode::Ai };
+        sim.mode = if sim.mode == Mode::Ai {
+            Mode::Human
+        } else {
+            Mode::Ai
+        };
         let (car, track) = (&sim.car, &sim.track);
         ai.driver.reset(car, track);
     }

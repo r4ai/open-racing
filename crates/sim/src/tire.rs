@@ -188,7 +188,8 @@ impl TireCondition {
     /// air inside is at the carcass temperature.
     #[inline]
     pub fn pressure(&self, cold: f64) -> f64 {
-        (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (AMBIENT_TEMPERATURE + KELVIN) - ATMOSPHERE
+        (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (AMBIENT_TEMPERATURE + KELVIN)
+            - ATMOSPHERE
     }
 
     /// Surface temperature weighted by the load on each tread zone, °C.
@@ -232,17 +233,24 @@ impl TireModel {
     /// A new tyre at its start temperature.
     pub fn fresh(&self) -> TireCondition {
         let t = self.p.thermal.start_temperature;
-        TireCondition { tread_temperature: [t; 3], core_temperature: t, wear: 0.0 }
+        TireCondition {
+            tread_temperature: [t; 3],
+            core_temperature: t,
+            wear: 0.0,
+        }
     }
 
     #[inline]
     pub fn vertical_stiffness(&self, pressure: f64) -> f64 {
-        self.p.vertical_stiffness + self.p.pressure.stiffness_per_bar * (pressure - self.p.pressure.optimal)
+        self.p.vertical_stiffness
+            + self.p.pressure.stiffness_per_bar * (pressure - self.p.pressure.optimal)
     }
 
     #[inline]
     pub fn rolling_resistance(&self, pressure: f64) -> f64 {
-        self.p.rolling_resistance * (1.0 + self.p.pressure.rolling_resistance_per_bar * (pressure - self.p.pressure.optimal))
+        self.p.rolling_resistance
+            * (1.0
+                + self.p.pressure.rolling_resistance_per_bar * (pressure - self.p.pressure.optimal))
     }
 
     /// Share of the load on the inner, middle and outer tread zone.
@@ -264,9 +272,19 @@ impl TireModel {
     pub fn condition_grip(&self, c: &TireCondition, load: &[f64; 3], pressure: f64) -> f64 {
         let t = &self.p.thermal;
         let dt = c.surface_temperature(load) - t.optimal_temperature;
-        let temperature = window_grip(dt, if dt < 0.0 { t.cold_window } else { t.hot_window }, t.window_grip_loss);
+        let temperature = window_grip(
+            dt,
+            if dt < 0.0 {
+                t.cold_window
+            } else {
+                t.hot_window
+            },
+            t.window_grip_loss,
+        );
         let pp = &self.p.pressure;
-        temperature * window_grip(pressure - pp.optimal, pp.window, pp.grip_loss) * (1.0 - t.wear_grip_loss * c.wear)
+        temperature
+            * window_grip(pressure - pp.optimal, pp.window, pp.grip_loss)
+            * (1.0 - t.wear_grip_loss * c.wear)
     }
 
     /// Advances temperatures and wear by `dt`.
@@ -278,23 +296,43 @@ impl TireModel {
     /// * `on_road` – whether the tyre touches the road
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    pub fn update_condition(&self, c: &mut TireCondition, load: &[f64; 3], slide_power: f64, rolling_power: f64, speed: f64, on_road: bool, dt: f64) {
+    pub fn update_condition(
+        &self,
+        c: &mut TireCondition,
+        load: &[f64; 3],
+        slide_power: f64,
+        rolling_power: f64,
+        speed: f64,
+        on_road: bool,
+        dt: f64,
+    ) {
         let t = &self.p.thermal;
-        let overheat = (c.surface_temperature(load) - t.optimal_temperature).max(0.0) / t.hot_window;
+        let overheat =
+            (c.surface_temperature(load) - t.optimal_temperature).max(0.0) / t.hot_window;
         c.wear = (c.wear + t.wear_rate * 1e-6 * slide_power * (1.0 + overheat) * dt).min(1.0);
 
         let old = c.tread_temperature;
-        let cooling = (t.air_cooling + t.air_cooling_per_speed * speed + if on_road { t.road_cooling } else { 0.0 }) / 3.0;
+        let cooling = (t.air_cooling
+            + t.air_cooling_per_speed * speed
+            + if on_road { t.road_cooling } else { 0.0 })
+            / 3.0;
         let mut to_core = 0.0;
         for k in 0..3 {
             let core = t.core_conductance / 3.0 * (old[k] - c.core_temperature);
-            let neighbours: f64 = [k.wrapping_sub(1), k + 1].iter().filter_map(|&j| old.get(j)).map(|&tj| t.zone_conductance * (old[k] - tj)).sum();
+            let neighbours: f64 = [k.wrapping_sub(1), k + 1]
+                .iter()
+                .filter_map(|&j| old.get(j))
+                .map(|&tj| t.zone_conductance * (old[k] - tj))
+                .sum();
             let cooling = cooling * (old[k] - AMBIENT_TEMPERATURE);
-            let heat = (t.slide_heat_share * slide_power + t.rolling_heat_share * rolling_power) * load[k];
-            c.tread_temperature[k] += dt * (heat - core - neighbours - cooling) / (t.surface_capacity / 3.0);
+            let heat =
+                (t.slide_heat_share * slide_power + t.rolling_heat_share * rolling_power) * load[k];
+            c.tread_temperature[k] +=
+                dt * (heat - core - neighbours - cooling) / (t.surface_capacity / 3.0);
             to_core += core;
         }
-        c.core_temperature += dt * ((1.0 - t.rolling_heat_share) * rolling_power + to_core) / t.core_capacity;
+        c.core_temperature +=
+            dt * ((1.0 - t.rolling_heat_share) * rolling_power + to_core) / t.core_capacity;
     }
 
     /// Steady-state forces for given transient slips.
@@ -305,7 +343,14 @@ impl TireModel {
     /// * `mu_scale` – surface, camber and condition grip multiplier
     /// * `pressure` – inflation pressure, bar
     #[inline]
-    pub fn forces(&self, kappa: f64, alpha: f64, fz: f64, mu_scale: f64, pressure: f64) -> TireForce {
+    pub fn forces(
+        &self,
+        kappa: f64,
+        alpha: f64,
+        fz: f64,
+        mu_scale: f64,
+        pressure: f64,
+    ) -> TireForce {
         if fz <= 0.0 {
             return TireForce::default();
         }
@@ -315,7 +360,8 @@ impl TireModel {
         // Normalised combined slip: each direction is scaled by its own peak slip, then
         // the pure-slip curve is evaluated at the combined magnitude and split back.
         // Pressure stretches or squeezes both curves along the slip axis.
-        let slip_scale = 1.0 + self.p.pressure.peak_slip_per_bar * (pressure - self.p.pressure.optimal);
+        let slip_scale =
+            1.0 + self.p.pressure.peak_slip_per_bar * (pressure - self.p.pressure.optimal);
         let sx = kappa / (self.long.peak_slip * slip_scale);
         let sy = alpha / (self.lat.peak_slip * slip_scale);
         let rho = (sx * sx + sy * sy).sqrt();
@@ -364,7 +410,15 @@ mod tests {
         let (t, p) = (tire.p.thermal.optimal_temperature, tire.p.pressure.optimal);
         let even = [1.0 / 3.0; 3];
         let at = |temperature: f64, pressure: f64, wear: f64| {
-            tire.condition_grip(&TireCondition { tread_temperature: [temperature; 3], core_temperature: temperature, wear }, &even, pressure)
+            tire.condition_grip(
+                &TireCondition {
+                    tread_temperature: [temperature; 3],
+                    core_temperature: temperature,
+                    wear,
+                },
+                &even,
+                pressure,
+            )
         };
         assert!((at(t, p, 0.0) - 1.0).abs() < 1e-12);
         assert!(at(t - 40.0, p, 0.0) < at(t - 10.0, p, 0.0));
@@ -381,7 +435,11 @@ mod tests {
         assert!((c.pressure(1.4) - 1.4).abs() < 1e-12);
         c.core_temperature = 85.0;
         // Gas law: about 0.5 bar rise from 25 °C to 85 °C, as seen on GT3 slicks.
-        assert!((1.85..1.95).contains(&c.pressure(1.4)), "{}", c.pressure(1.4));
+        assert!(
+            (1.85..1.95).contains(&c.pressure(1.4)),
+            "{}",
+            c.pressure(1.4)
+        );
     }
 
     #[test]
@@ -393,7 +451,10 @@ mod tests {
         let [inner, _, outer] = tire.tread_load(0.06, 0.0, p);
         assert!(inner > outer, "negative camber loads the inner shoulder");
         let [inner, _, outer] = tire.tread_load(0.0, 1.5, p);
-        assert!(outer > inner, "cornering rolls the outside tyre onto its outer shoulder");
+        assert!(
+            outer > inner,
+            "cornering rolls the outside tyre onto its outer shoulder"
+        );
         let [inner, middle, _] = tire.tread_load(0.0, 0.0, p + 0.3);
         assert!(middle > inner, "over-inflation loads the crown");
     }

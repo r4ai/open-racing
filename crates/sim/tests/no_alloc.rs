@@ -30,7 +30,15 @@ fn step_does_not_allocate() {
     let before = ALLOCS.load(Ordering::Relaxed);
     for k in 0..10_000 {
         let shift = if k == 5000 { Shift::Up } else { Shift::None };
-        car.step(&track, &Controls { throttle: 0.7, steer_wheel_angle: 0.3, shift, ..Default::default() });
+        car.step(
+            &track,
+            &Controls {
+                throttle: 0.7,
+                steer_wheel_angle: 0.3,
+                shift,
+                ..Default::default()
+            },
+        );
     }
     assert_eq!(ALLOCS.load(Ordering::Relaxed) - before, 0);
 }
