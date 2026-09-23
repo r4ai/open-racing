@@ -14,6 +14,8 @@ burn-policy = ["dep:open-racing-train-burn"]
 open-racing-sim.workspace = true
 open-racing-api.workspace = true
 open-racing-train-burn = { path = "../train-burn", optional = true }
-bevy = "0.19"
+bevy = { version = "0.19", features = ["serialize"] }
+serde.workspace = true
+ron.workspace = true
 glam.workspace = true
 clap.workspace = true

@@ -2,6 +2,7 @@
 //! `Simulation` resource; Bevy only reads the resulting state for rendering.
 
 mod audio;
+mod bindings;
 mod camera;
 mod capture;
 mod driving;
@@ -9,6 +10,7 @@ mod effects;
 mod hud;
 mod input;
 mod scene;
+mod settings;
 
 use std::path::PathBuf;
 
@@ -52,7 +54,7 @@ fn main() {
     .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
     .insert_resource(sim)
     .insert_resource(args.clone())
-    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin, effects::EffectsPlugin));
+    .add_plugins((input::InputPlugin, driving::DrivingPlugin, scene::ScenePlugin, camera::CameraPlugin, hud::HudPlugin, capture::CapturePlugin, audio::AudioPlugin, effects::EffectsPlugin, settings::SettingsPlugin));
     driving::install_policy(&mut app, &args);
     app.run();
 }

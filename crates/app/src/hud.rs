@@ -33,10 +33,11 @@ V                cycle camera
 P                replay since last reset / stop replay
 T                toggle AI driver (with --ai)
 M                mute / unmute sound
-Tab              choose input device (auto / keyboard / each pad or wheel)
+Tab              choose input device (auto / keyboard / each pad or wheel / custom)
+Esc              input settings: assign steering, pedals and shift buttons
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
-Wheel: steers 1:1 (900 deg), pedals and paddles as on a gamepad";
+Wheel and pedals: assign them in the Esc settings (input \"custom\")";
 
 fn spawn(mut commands: Commands) {
     let panel = |top: bool| Node {

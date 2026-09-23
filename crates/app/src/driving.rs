@@ -10,6 +10,7 @@ use open_racing_sim::{AutoShift, Car, CarState, Controls, DT, Shift, Track};
 
 use crate::Args;
 use crate::input::{AppRequests, DriverInput};
+use crate::settings::settings_closed;
 
 /// Physics steps allowed per frame; beyond this the sim runs slower than real time
 /// instead of spiralling.
@@ -108,7 +109,7 @@ pub struct DrivingPlugin;
 
 impl Plugin for DrivingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (handle_requests, step_simulation).chain());
+        app.add_systems(Update, (handle_requests, step_simulation.run_if(settings_closed)).chain());
     }
 }
 

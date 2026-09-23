@@ -6,13 +6,16 @@
 //! `Telemetry::steering_torque` for the FFB motor.
 //!
 //! With several devices connected, `InputSelection` picks which one drives: in
-//! `Auto` any device that moves takes over, otherwise only the chosen one is read.
-//! App requests (reset, camera, ...) always come from the keyboard.
+//! `Auto` any device that moves takes over, `Custom` uses the bindings from the
+//! settings screen, otherwise only the chosen device is read. App requests (reset,
+//! camera, ...) always come from the keyboard.
 
 use bevy::prelude::*;
 use open_racing_sim::{Controls, Shift};
 
+use crate::bindings::{self, Action, Bindings, DeviceId, Reported};
 use crate::driving::Simulation;
+use crate::settings::{SettingsOpen, settings_closed};
 
 /// Keyboard steering: maximum steering wheel angle and how fast it is reached.
 /// A keyboard is binary, so it needs *some* ramp; the physics is untouched.
@@ -63,6 +66,8 @@ pub enum InputSelection {
     Keyboard,
     /// A gamepad or steering wheel; falls back to `Auto` when it disconnects.
     Pad(Entity),
+    /// The bindings assigned on the settings screen, possibly across devices.
+    Custom,
 }
 
 impl InputSelection {
@@ -70,11 +75,10 @@ impl InputSelection {
         match self {
             Self::Auto => "auto".into(),
             Self::Keyboard => "keyboard".into(),
-            Self::Pad(e) => pads.get(e).map_or("auto".into(), |(_, pad, name)| {
-                // Generic HID names repeat (and may not render), so add the USB ids.
-                let id = |v: Option<u16>| v.map_or("?".into(), |v| format!("{v:04x}"));
-                format!("{name} [{}:{}] ({})", id(pad.vendor_id()), id(pad.product_id()), pad_kind(pad, name))
-            }),
+            Self::Pad(e) => {
+                pads.get(e).map_or("auto".into(), |(_, pad, name)| format!("{} ({})", DeviceId::of(pad, name).label(), pad_kind(pad, name)))
+            }
+            Self::Custom => "custom (Esc to assign)".into(),
         }
     }
 }
@@ -96,10 +100,22 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
+        let bindings = Bindings::load();
+        let selection = if bindings.any() { InputSelection::Custom } else { InputSelection::Auto };
         app.init_resource::<DriverInput>()
             .init_resource::<AppRequests>()
-            .init_resource::<InputSelection>()
-            .add_systems(PreUpdate, (select, keyboard, gamepad).chain().in_set(InputSystemsSet).after(bevy::input::InputSystems));
+            .insert_resource(selection)
+            .insert_resource(bindings)
+            .init_resource::<Reported>()
+            .add_systems(PreUpdate, bindings::raw_filters.before(bevy::input::InputSystems))
+            .add_systems(PreUpdate, bindings::track_reported.after(bevy::input::InputSystems).before(InputSystemsSet))
+            .add_systems(
+                PreUpdate,
+                (select.run_if(settings_closed), keyboard, (gamepad, custom).run_if(settings_closed))
+                    .chain()
+                    .in_set(InputSystemsSet)
+                    .after(bevy::input::InputSystems),
+            );
     }
 }
 
@@ -111,8 +127,13 @@ fn ramp(current: f64, pressed: bool, dt: f64) -> f64 {
     }
 }
 
-/// Cycles Auto → Keyboard → each connected pad → Auto.
-fn select(keys: Res<ButtonInput<KeyCode>>, pads: Query<(Entity, &Gamepad, &Name)>, mut selection: ResMut<InputSelection>) {
+/// Cycles Auto → Keyboard → each connected pad → Custom (once assigned) → Auto.
+fn select(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<(Entity, &Gamepad, &Name)>,
+    bindings: Res<Bindings>,
+    mut selection: ResMut<InputSelection>,
+) {
     if let InputSelection::Pad(e) = *selection
         && !pads.contains(e)
     {
@@ -123,15 +144,13 @@ fn select(keys: Res<ButtonInput<KeyCode>>, pads: Query<(Entity, &Gamepad, &Name)
     }
     let mut order: Vec<Entity> = pads.iter().map(|(e, ..)| e).collect();
     order.sort();
-    let next = match *selection {
-        InputSelection::Auto => {
-            *selection = InputSelection::Keyboard;
-            return;
-        }
-        InputSelection::Keyboard => order.first(),
-        InputSelection::Pad(cur) => order.iter().skip_while(|&&e| e != cur).nth(1),
-    };
-    *selection = next.map_or(InputSelection::Auto, |&e| InputSelection::Pad(e));
+    let mut options = vec![InputSelection::Auto, InputSelection::Keyboard];
+    options.extend(order.into_iter().map(InputSelection::Pad));
+    if bindings.any() {
+        options.push(InputSelection::Custom);
+    }
+    let current = options.iter().position(|&o| o == *selection).unwrap_or(0);
+    *selection = options[(current + 1) % options.len()];
 }
 
 fn keyboard(
@@ -139,9 +158,15 @@ fn keyboard(
     time: Res<Time>,
     sim: Res<Simulation>,
     selection: Res<InputSelection>,
+    settings: Res<SettingsOpen>,
     mut input: ResMut<DriverInput>,
     mut requests: ResMut<AppRequests>,
 ) {
+    // The settings screen uses the keyboard for itself.
+    if settings.0 {
+        *requests = AppRequests::default();
+        return;
+    }
     requests.reset_car = keys.just_pressed(KeyCode::Backspace);
     requests.toggle_ai = keys.just_pressed(KeyCode::KeyT);
     requests.toggle_replay = keys.just_pressed(KeyCode::KeyP);
@@ -149,7 +174,7 @@ fn keyboard(
     requests.restart_engine = keys.just_pressed(KeyCode::KeyI);
     requests.toggle_help = keys.just_pressed(KeyCode::KeyH);
     requests.toggle_mute = keys.just_pressed(KeyCode::KeyM);
-    if matches!(*selection, InputSelection::Pad(_)) {
+    if !matches!(*selection, InputSelection::Auto | InputSelection::Keyboard) {
         return;
     }
 
@@ -213,7 +238,7 @@ impl PadReading {
 fn gamepad(pads: Query<(Entity, &Gamepad, &Name)>, sim: Res<Simulation>, selection: Res<InputSelection>, mut input: ResMut<DriverInput>) {
     // In Auto an idle pad must not overwrite the keyboard; a chosen pad always drives.
     let (pad, name, r) = match *selection {
-        InputSelection::Keyboard => return,
+        InputSelection::Keyboard | InputSelection::Custom => return,
         InputSelection::Auto => {
             let Some(found) = pads.iter().map(|(_, pad, name)| (pad, name, PadReading::new(pad))).find(|(.., r)| r.active()) else { return };
             found
@@ -237,4 +262,31 @@ fn gamepad(pads: Query<(Entity, &Gamepad, &Name)>, sim: Res<Simulation>, selecti
         c.shift = Shift::Down;
     }
     input.device = pad_kind(pad, name);
+}
+
+fn custom(
+    pads: Query<(Entity, &Gamepad, &Name)>,
+    bindings: Res<Bindings>,
+    reported: Res<Reported>,
+    sim: Res<Simulation>,
+    selection: Res<InputSelection>,
+    mut input: ResMut<DriverInput>,
+) {
+    if *selection != InputSelection::Custom {
+        return;
+    }
+    let lock = sim.car.model.params.steering.lock;
+    let value = |action| bindings.value(action, &pads, &reported) as f64;
+    let c = &mut input.controls;
+    // Right is a negative steering wheel angle.
+    c.steer_wheel_angle = (-value(Action::Steer) * bindings.steer_rotation.to_radians() / 2.0).clamp(-lock, lock);
+    c.throttle = value(Action::Throttle);
+    c.brake = value(Action::Brake);
+    c.clutch = value(Action::Clutch);
+    if bindings.just_pressed(Action::ShiftUp, &pads) {
+        c.shift = Shift::Up;
+    } else if bindings.just_pressed(Action::ShiftDown, &pads) {
+        c.shift = Shift::Down;
+    }
+    input.device = "custom";
 }
