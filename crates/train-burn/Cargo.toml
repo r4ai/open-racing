@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["wgpu"]
-wgpu = ["burn/wgpu"]
+wgpu = ["burn/wgpu", "burn/fusion", "burn/autotune"]
 ndarray = ["burn/ndarray"]
 flex = ["burn/flex"]
 

@@ -215,18 +215,19 @@ pub fn train<B: AutodiffBackend>(
             meta.normalizer.update(&raw_obs);
             meta.normalizer.normalize(&raw_obs, &mut norm_obs);
             let (mean, value) = policy.forward(to_tensor(norm_obs.clone(), [n, obs_dim], device));
-            let mean = to_vec(mean);
-            let value = to_vec(value);
+            // One read-back per step: each row is the action mean followed by the value.
+            let out = to_vec(Tensor::cat(vec![mean, value], 1));
 
             let row = t * n;
             buf.obs[row * obs_dim..(row + n) * obs_dim].copy_from_slice(&norm_obs);
-            buf.values[row..row + n].copy_from_slice(&value);
             let actions = &mut buf.actions[row * act_dim..(row + n) * act_dim];
             for e in 0..n {
+                let out = &out[e * (act_dim + 1)..(e + 1) * (act_dim + 1)];
+                buf.values[row + e] = out[act_dim];
                 let mut logp = 0.0;
                 for a in 0..act_dim {
                     let noise = rng.normal();
-                    actions[e * act_dim + a] = mean[e * act_dim + a] + std[a] * noise;
+                    actions[e * act_dim + a] = out[a] + std[a] * noise;
                     logp += -0.5 * noise * noise - std[a].ln() - 0.5 * LOG_2PI;
                 }
                 buf.logp[row + e] = logp;
@@ -297,39 +298,39 @@ pub fn train<B: AutodiffBackend>(
         }
 
         // ---- Optimise ------------------------------------------------------------------
+        // The rollout goes to the device once; minibatches are gathered there, and the
+        // loss statistics are read back once per iteration, so the device never waits
+        // for the host between updates.
         let size = cfg.rollout_len * n;
         let mb = cfg.minibatch.min(size);
+        let all_obs = to_tensor::<B>(buf.obs.clone(), [size, obs_dim], device);
+        let all_act = to_tensor::<B>(buf.actions.clone(), [size, act_dim], device);
+        let all_logp = to_tensor::<B>(buf.logp.clone(), [size, 1], device);
+        let all_adv = to_tensor::<B>(buf.advantages.clone(), [size, 1], device);
+        let all_ret = to_tensor::<B>(buf.returns.clone(), [size, 1], device);
         let mut indices: Vec<usize> = (0..size).collect();
-        let (mut pl_sum, mut vl_sum, mut kl_sum, mut updates) = (0.0f32, 0.0f32, 0.0f32, 0usize);
+        let mut stats = Tensor::<B::InnerBackend, 1>::zeros([3], device);
+        let mut updates = 0usize;
         for _ in 0..cfg.epochs {
             rng.shuffle(&mut indices);
             for chunk in indices.chunks(mb) {
                 let m = chunk.len();
-                let mut obs = Vec::with_capacity(m * obs_dim);
-                let mut act = Vec::with_capacity(m * act_dim);
-                let (mut old_logp, mut adv, mut ret) = (
-                    Vec::with_capacity(m),
-                    Vec::with_capacity(m),
-                    Vec::with_capacity(m),
+                let idx = Tensor::<B, 1, Int>::from_data(
+                    TensorData::new(chunk.iter().map(|&i| i as i64).collect(), [m]),
+                    device,
                 );
-                for &i in chunk {
-                    obs.extend_from_slice(&buf.obs[i * obs_dim..(i + 1) * obs_dim]);
-                    act.extend_from_slice(&buf.actions[i * act_dim..(i + 1) * act_dim]);
-                    old_logp.push(buf.logp[i]);
-                    adv.push(buf.advantages[i]);
-                    ret.push(buf.returns[i]);
-                }
-                let adv_mean = adv.iter().sum::<f32>() / m as f32;
-                let adv_std = (adv.iter().map(|a| (a - adv_mean).powi(2)).sum::<f32>() / m as f32)
+                let obs = all_obs.clone().select(0, idx.clone());
+                let act = all_act.clone().select(0, idx.clone());
+                let old_logp = all_logp.clone().select(0, idx.clone());
+                let ret = all_ret.clone().select(0, idx.clone());
+                let adv = all_adv.clone().select(0, idx);
+                let adv_mean = adv.clone().mean();
+                let adv_std = (adv.clone() - adv_mean.clone().unsqueeze())
+                    .powf_scalar(2.0)
+                    .mean()
                     .sqrt()
-                    + 1e-8;
-                adv.iter_mut().for_each(|a| *a = (*a - adv_mean) / adv_std);
-
-                let obs = to_tensor::<B>(obs, [m, obs_dim], device);
-                let act = to_tensor::<B>(act, [m, act_dim], device);
-                let old_logp = to_tensor::<B>(old_logp, [m, 1], device);
-                let adv = to_tensor::<B>(adv, [m, 1], device);
-                let ret = to_tensor::<B>(ret, [m, 1], device);
+                    .add_scalar(1e-8);
+                let adv = (adv - adv_mean.unsqueeze()) / adv_std.unsqueeze();
 
                 let (mean, value) = agent.forward(obs);
                 let log_std = capped_log_std(&agent, cfg)
@@ -348,9 +349,15 @@ pub fn train<B: AutodiffBackend>(
                 let loss = policy_loss.clone() + value_loss.clone().mul_scalar(cfg.value_coef)
                     - entropy.mul_scalar(cfg.entropy_coef);
 
-                pl_sum += policy_loss.into_scalar().elem::<f32>();
-                vl_sum += value_loss.into_scalar().elem::<f32>();
-                kl_sum += (-log_ratio).mean().into_scalar().elem::<f32>();
+                stats = stats
+                    + Tensor::cat(
+                        vec![
+                            policy_loss.clone().inner(),
+                            value_loss.clone().inner(),
+                            (-log_ratio).mean().inner(),
+                        ],
+                        0,
+                    );
                 updates += 1;
 
                 let grads = GradientsParams::from_grads(loss.backward(), &agent);
@@ -361,6 +368,7 @@ pub fn train<B: AutodiffBackend>(
         // ---- Report --------------------------------------------------------------------
         let sps = (cfg.rollout_len * n) as f64 / started.elapsed().as_secs_f64();
         let u = updates.max(1) as f32;
+        let [pl_sum, vl_sum, kl_sum]: [f32; 3] = to_vec(stats).try_into().expect("three stats");
         let ep = episodes.count.max(1) as f64;
         if let Some(lap) = episodes.best_lap {
             best_lap_overall = Some(best_lap_overall.map_or(lap, |b| b.min(lap)));
