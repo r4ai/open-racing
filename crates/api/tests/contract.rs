@@ -57,6 +57,24 @@ fn privileged_obs_extends_space() {
 }
 
 #[test]
+fn manual_shift_adds_a_gear_action() {
+    let spec = spec(EnvConfig { auto_shift: false, random_start: false, start_speed: (0.0, 0.0), ..Default::default() });
+    let mut env = spec.make_vec_env(1);
+    assert_eq!(env.action_space().names, ["steer", "throttle", "brake", "shift"]);
+    env.reset(0);
+    let mut run = |shifts: &[f32]| {
+        for &shift in shifts {
+            env.step(&[0.0, 0.0, 1.0, shift]);
+        }
+        env.cars().next().unwrap().state.drivetrain.gear
+    };
+    let once = |shift: f32| [[shift].as_slice(), &[0.0; 9]].concat();
+    assert_eq!(run(&once(1.0)), 2, "one request shifts exactly one gear");
+    assert_eq!(run(&[1.0; 50]), 6, "a held request keeps shifting up to the top gear");
+    assert_eq!(run(&[-1.0; 50]), 1, "never shifts below first gear");
+}
+
+#[test]
 fn reckless_driving_terminates_and_autoresets() {
     let spec = spec(EnvConfig::default());
     let mut env = spec.make_vec_env(4);

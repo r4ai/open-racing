@@ -44,6 +44,9 @@ enum Command {
         /// Include ground-truth tyre state in the observation.
         #[arg(long)]
         privileged: bool,
+        /// Let the policy shift gears itself instead of the automatic gear selector.
+        #[arg(long)]
+        manual_shift: bool,
         #[arg(long, default_value = "runs/ppo")]
         out: PathBuf,
         /// Continue from a trained policy (weights and observation normaliser).
@@ -67,8 +70,8 @@ enum Command {
 
 fn main() {
     match Cli::parse().command {
-        Command::Train { track, car, envs, iterations, rollout, lr, gamma, entropy, crash_penalty, seed, privileged, out, init } => {
-            let config = EnvConfig { privileged_obs: privileged, seed, ..EnvConfig::default() };
+        Command::Train { track, car, envs, iterations, rollout, lr, gamma, entropy, crash_penalty, seed, privileged, manual_shift, out, init } => {
+            let config = EnvConfig { privileged_obs: privileged, auto_shift: !manual_shift, seed, ..EnvConfig::default() };
             let mut spec = EnvSpec::from_names(&track, &car, config.clone()).unwrap_or_else(|e| panic!("{e}"));
             spec.reward = Arc::new(DefaultReward { termination_penalty: crash_penalty, ..DefaultReward::default() });
             let mut env = spec.make_vec_env(envs);
@@ -124,7 +127,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         file
     });
     let mut obs = env.reset(0).to_vec();
-    let mut actions = vec![0.0; 3];
+    let mut actions = vec![0.0; config.action_dim()];
     let mut stats = Default::default();
     let mut ending = "";
     for _ in 0..(seconds * config.control_hz) as usize {
@@ -174,7 +177,7 @@ fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize) {
     let (spec, mut env) = eval_env(policy, config.clone(), envs);
     let track = &*spec.track;
     let mut obs = env.reset(1).to_vec();
-    let mut actions = vec![0.0; envs * 3];
+    let mut actions = vec![0.0; envs * config.action_dim()];
     let mut crashes_at = vec![0usize; (track.length / BIN).ceil() as usize];
     let (mut crashes, mut distance, mut laps, mut best_lap) = (0usize, 0.0, 0u32, None::<f64>);
     for _ in 0..(seconds * config.control_hz) as usize {

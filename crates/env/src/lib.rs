@@ -20,11 +20,13 @@ pub use obs::{AppliedInput, ObsLayout, ObsSpec};
 pub use reward::{DefaultReward, DefaultTermination, Done, RewardFn, StepInfo, TerminationFn};
 pub use rng::Rng;
 
-/// Action dimensions: steering (−1..1 of full lock), throttle (0..1), brake (0..1).
-pub const ACTION_NAMES: [&str; 3] = ["steer", "throttle", "brake"];
-pub const ACTION_LOW: [f32; 3] = [-1.0, 0.0, 0.0];
-pub const ACTION_HIGH: [f32; 3] = [1.0, 1.0, 1.0];
-pub const ACTION_DIM: usize = 3;
+/// Action dimensions: steering (−1..1 of full lock), throttle (0..1), brake (0..1) and,
+/// without `auto_shift`, a gear request (> 0.5 up, < −0.5 down).
+pub const ACTION_NAMES: [&str; MAX_ACTION_DIM] = ["steer", "throttle", "brake", "shift"];
+pub const ACTION_LOW: [f32; MAX_ACTION_DIM] = [-1.0, 0.0, 0.0, -1.0];
+pub const ACTION_HIGH: [f32; MAX_ACTION_DIM] = [1.0, 1.0, 1.0, 1.0];
+pub const MAX_ACTION_DIM: usize = 4;
+const SHIFT_THRESHOLD: f32 = 0.5;
 
 #[derive(Clone, Debug)]
 pub struct EnvConfig {
@@ -67,6 +69,11 @@ impl Default for EnvConfig {
 impl EnvConfig {
     pub fn substeps(&self) -> usize {
         ((1.0 / DT) / self.control_hz).round().max(1.0) as usize
+    }
+
+    /// Number of action dimensions: the gear request only exists without `auto_shift`.
+    pub fn action_dim(&self) -> usize {
+        if self.auto_shift { MAX_ACTION_DIM - 1 } else { MAX_ACTION_DIM }
     }
 
     pub fn obs_layout(&self) -> ObsLayout {
@@ -166,6 +173,7 @@ impl Env {
         let track = &*shared.track;
         let prev_steer = self.input.steer;
         let substeps = cfg.substeps();
+        self.actuator.decide(cfg, action);
         for _ in 0..substeps {
             let controls = self.actuator.controls(cfg, &self.car, action);
             self.car.step(track, &controls);
@@ -217,9 +225,21 @@ impl Env {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Actuator {
     steer: f64,
+    /// Gear request of the current decision, not yet sent to the gearbox.
+    shift: Shift,
 }
 
 impl Actuator {
+    /// Call once per agent decision, before its physics steps: the gear request of
+    /// `action` is sent on the next physics step only, like one press of a paddle.
+    pub fn decide(&mut self, cfg: &EnvConfig, action: &[f32]) {
+        self.shift = match action.get(MAX_ACTION_DIM - 1) {
+            Some(&a) if !cfg.auto_shift && a > SHIFT_THRESHOLD => Shift::Up,
+            Some(&a) if !cfg.auto_shift && a < -SHIFT_THRESHOLD => Shift::Down,
+            _ => Shift::None,
+        };
+    }
+
     pub fn controls(&mut self, cfg: &EnvConfig, car: &Car, action: &[f32]) -> Controls {
         let lock = car.model.params.steering.lock;
         let target = f64::from(action[0]).clamp(-1.0, 1.0) * lock;
@@ -230,7 +250,15 @@ impl Actuator {
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
             brake: f64::from(action[2]).clamp(0.0, 1.0),
             clutch: 0.0,
-            shift: if cfg.auto_shift { AutoShift.shift(car) } else { Shift::None },
+            shift: if cfg.auto_shift { AutoShift.shift(car) } else { self.take_shift(car) },
+        }
+    }
+
+    /// The pending gear request; never shifts below first gear (into neutral or reverse).
+    fn take_shift(&mut self, car: &Car) -> Shift {
+        match std::mem::take(&mut self.shift) {
+            Shift::Down if car.state.drivetrain.gear <= 1 => Shift::None,
+            shift => shift,
         }
     }
 
@@ -338,15 +366,16 @@ impl BatchEnv {
             .for_each(|(env, out)| env.observe(shared, out));
     }
 
-    /// Steps every env with its row of `actions` (`num_envs × ACTION_DIM`).
+    /// Steps every env with its row of `actions` (`num_envs × config.action_dim()`).
     /// Finished episodes are reset automatically.
     pub fn step(&mut self, actions: &[f32]) -> BatchStep<'_> {
-        assert_eq!(actions.len(), self.envs.len() * ACTION_DIM, "actions must be num_envs × {ACTION_DIM}");
         let shared = &self.shared;
+        let action_dim = shared.config.action_dim();
+        assert_eq!(actions.len(), self.envs.len() * action_dim, "actions must be num_envs × {action_dim}");
         let d = self.obs_dim;
         (
             self.envs.par_iter_mut(),
-            actions.par_chunks(ACTION_DIM),
+            actions.par_chunks(action_dim),
             self.obs.par_chunks_mut(d),
             self.final_obs.par_chunks_mut(d),
             self.rewards.par_iter_mut(),

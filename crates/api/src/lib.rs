@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use open_racing_env::{ACTION_DIM, ACTION_HIGH, ACTION_LOW, ACTION_NAMES, Actuator, AppliedInput, BatchEnv, EnvShared};
+use open_racing_env::{ACTION_HIGH, ACTION_LOW, ACTION_NAMES, Actuator, AppliedInput, BatchEnv, EnvShared, MAX_ACTION_DIM};
 
 pub use open_racing_env::{
     DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, RewardFn, StepInfo, TerminationFn,
@@ -184,10 +184,11 @@ impl EnvSpec {
     }
 
     pub fn action_space(&self) -> BoxSpace {
+        let dim = self.config.action_dim();
         BoxSpace {
-            names: ACTION_NAMES.map(String::from).to_vec(),
-            low: ACTION_LOW.to_vec(),
-            high: ACTION_HIGH.to_vec(),
+            names: ACTION_NAMES[..dim].iter().map(|n| n.to_string()).collect(),
+            low: ACTION_LOW[..dim].to_vec(),
+            high: ACTION_HIGH[..dim].to_vec(),
         }
     }
 
@@ -205,7 +206,7 @@ impl EnvSpec {
         AgentDriver {
             config: self.config.clone(),
             obs: vec![0.0; self.observation_space().dim()],
-            action: [0.0; ACTION_DIM],
+            action: [0.0; MAX_ACTION_DIM],
             actuator: Actuator::default(),
             input: AppliedInput::default(),
             hint: 0,
@@ -271,7 +272,7 @@ impl VecEnv for RacingVecEnv {
 pub struct AgentDriver {
     config: EnvConfig,
     obs: Vec<f32>,
-    action: [f32; ACTION_DIM],
+    action: [f32; MAX_ACTION_DIM],
     actuator: Actuator,
     input: AppliedInput,
     hint: usize,
@@ -284,12 +285,15 @@ impl AgentDriver {
         if self.countdown == 0 {
             self.hint = track.query(car.state.position, self.hint).index;
             open_racing_env::obs::encode(&self.config.obs_layout(), car, track, self.hint, &self.input, &mut self.obs);
-            policy.act(&self.obs, &mut self.action);
+            let action = &mut self.action[..self.config.action_dim()];
+            policy.act(&self.obs, action);
+            self.actuator.decide(&self.config, action);
             self.countdown = self.config.substeps();
         }
         self.countdown -= 1;
-        let c = self.actuator.controls(&self.config, car, &self.action);
-        self.input = self.actuator.applied(car, &self.action);
+        let action = &self.action[..self.config.action_dim()];
+        let c = self.actuator.controls(&self.config, car, action);
+        self.input = self.actuator.applied(car, action);
         c
     }
 
