@@ -67,6 +67,23 @@ fn privileged_obs_extends_space() {
 }
 
 #[test]
+fn tyre_and_edge_obs_extend_space() {
+    let config = EnvConfig::default();
+    let base = spec(config.clone()).observation_space().dim();
+    let dim = |config: EnvConfig| spec(config).observation_space().dim();
+    let tyres = dim(EnvConfig {
+        tyre_obs: true,
+        ..config.clone()
+    });
+    let edges = dim(EnvConfig {
+        edge_obs: true,
+        ..config.clone()
+    });
+    assert_eq!(tyres, base + 8);
+    assert_eq!(edges, base + 2 * config.lookahead_points);
+}
+
+#[test]
 fn manual_shift_adds_a_gear_action() {
     let spec = spec(EnvConfig {
         auto_shift: false,
@@ -113,6 +130,34 @@ fn manual_downshift_never_over_revs() {
     let dt = &car.state.drivetrain;
     assert!(dt.gear > 1, "no gear below the limiter at speed");
     assert!(dt.rpm() <= car.model.params.engine.limiter_rpm * 1.02);
+}
+
+#[test]
+fn abs_brakes_harder_than_a_locked_pedal() {
+    // Full pedal from 40 m/s down to 10 m/s: distance, and whether the fronts stayed locked.
+    let stop = |abs: bool| {
+        let spec = spec(EnvConfig {
+            abs,
+            random_start: false,
+            start_speed: (40.0, 40.0),
+            ..Default::default()
+        });
+        let mut env = spec.make_vec_env(1);
+        env.reset(0);
+        let (mut distance, mut locked) = (0.0, 0);
+        while env.cars().next().unwrap().speed() > 10.0 {
+            let r = env.step(&[0.0, 0.0, 1.0]);
+            assert_eq!(r.terminated[0], 0);
+            let car = env.cars().next().unwrap();
+            distance += car.speed() / EnvConfig::default().control_hz;
+            locked += (car.state.wheels[0].spin == 0.0) as usize;
+        }
+        (distance, locked)
+    };
+    let (with, with_locked) = stop(true);
+    let (without, without_locked) = stop(false);
+    assert!(with < without, "ABS {with:.1} m vs locked {without:.1} m");
+    assert!(with_locked < without_locked);
 }
 
 #[test]

@@ -140,6 +140,15 @@ pub struct PolicyMeta {
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
     pub privileged_obs: bool,
+    /// Tread temperatures and pressures in the observation (absent in older policies).
+    #[serde(default)]
+    pub tyre_obs: bool,
+    /// Track widths at the lookahead points in the observation (absent in older policies).
+    #[serde(default)]
+    pub edge_obs: bool,
+    /// Anti-lock brakes (absent in older policies).
+    #[serde(default)]
+    pub abs: bool,
     pub max_steer_rate: f64,
     pub auto_shift: bool,
     pub track: String,
@@ -154,6 +163,9 @@ impl PolicyMeta {
             lookahead_points: self.lookahead_points,
             lookahead_spacing: self.lookahead_spacing,
             privileged_obs: self.privileged_obs,
+            tyre_obs: self.tyre_obs,
+            edge_obs: self.edge_obs,
+            abs: self.abs,
             max_steer_rate: self.max_steer_rate,
             auto_shift: self.auto_shift,
             ..EnvConfig::default()

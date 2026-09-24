@@ -34,6 +34,9 @@ pub struct PpoConfig {
     pub max_grad_norm: f32,
     pub hidden: Vec<usize>,
     pub init_log_std: f32,
+    /// Where the cap on the exploration noise ends after the last iteration, falling
+    /// linearly in log space from `init_log_std`; `None` keeps it at `init_log_std`.
+    pub final_log_std: Option<f32>,
     pub seed: u64,
     pub out_dir: PathBuf,
     pub save_every: usize,
@@ -57,6 +60,7 @@ impl Default for PpoConfig {
             max_grad_norm: 0.5,
             hidden: vec![256, 256],
             init_log_std: -0.5,
+            final_log_std: None,
             seed: 0,
             out_dir: PathBuf::from("runs/ppo"),
             save_every: 10,
@@ -139,12 +143,21 @@ struct EpisodeSummary {
     best_lap: Option<f64>,
 }
 
-/// The exploration noise, capped at its initial level. Actions are clipped to the action
-/// box, so noise beyond it costs nothing and an entropy bonus would inflate it without
-/// bound (the policy then learns to dither between the limits); the cap lets the bonus
-/// keep exploration from collapsing without letting it grow.
-fn capped_log_std<B: Backend>(agent: &Agent<B>, cfg: &PpoConfig) -> Tensor<B, 1> {
-    agent.log_std.val().clamp_max(cfg.init_log_std)
+/// The exploration noise, capped at `cap`. Actions are clipped to the action box, so
+/// noise beyond it costs nothing and an entropy bonus would inflate it without bound (the
+/// policy then learns to dither between the limits); the cap lets the bonus keep
+/// exploration from collapsing without letting it grow.
+fn capped_log_std<B: Backend>(agent: &Agent<B>, cap: f32) -> Tensor<B, 1> {
+    agent.log_std.val().clamp_max(cap)
+}
+
+/// Cap on the log exploration noise in `iteration` (1-based). Lowering it over training
+/// brings the noisy policy that collected the data close to the deterministic one that
+/// is run afterwards: with clipped actions the two differ more the larger the noise.
+fn log_std_cap(cfg: &PpoConfig, iteration: usize) -> f32 {
+    let done = (iteration - 1) as f32 / cfg.iterations.max(1) as f32;
+    let end = cfg.final_log_std.unwrap_or(cfg.init_log_std);
+    cfg.init_log_std + (end - cfg.init_log_std) * done
 }
 
 pub struct TrainContext {
@@ -207,7 +220,8 @@ pub fn train<B: AutodiffBackend>(
         let learning_rate =
             cfg.learning_rate * (1.0 - (iteration - 1) as f64 / cfg.iterations as f64);
         let policy = agent.valid();
-        let std: Vec<f32> = to_vec(capped_log_std(&policy, cfg).exp());
+        let cap = log_std_cap(cfg, iteration);
+        let std: Vec<f32> = to_vec(capped_log_std(&policy, cap).exp());
         let mut episodes = EpisodeSummary::default();
 
         // ---- Collect rollout -------------------------------------------------------
@@ -333,7 +347,7 @@ pub fn train<B: AutodiffBackend>(
                 let adv = (adv - adv_mean.unsqueeze()) / adv_std.unsqueeze();
 
                 let (mean, value) = agent.forward(obs);
-                let log_std = capped_log_std(&agent, cfg)
+                let log_std = capped_log_std(&agent, cap)
                     .unsqueeze_dim::<2>(0)
                     .expand([m, act_dim]);
                 let z = (act - mean) / log_std.clone().exp();
@@ -345,7 +359,7 @@ pub fn train<B: AutodiffBackend>(
                 let surr2 = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * adv;
                 let policy_loss = -surr1.min_pair(surr2).mean();
                 let value_loss = (value - ret).powf_scalar(2.0).mean().mul_scalar(0.5);
-                let entropy = (capped_log_std(&agent, cfg) + 0.5 * (1.0 + LOG_2PI)).sum();
+                let entropy = (capped_log_std(&agent, cap) + 0.5 * (1.0 + LOG_2PI)).sum();
                 let loss = policy_loss.clone() + value_loss.clone().mul_scalar(cfg.value_coef)
                     - entropy.mul_scalar(cfg.entropy_coef);
 

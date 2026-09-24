@@ -12,6 +12,9 @@ pub struct StepInfo {
     pub offset: f64,
     /// Number of wheels on grass.
     pub wheels_off: usize,
+    /// Grip the tyres have lost to tread temperature, pressure and wear, summed over the
+    /// four tyres (0 = all at their best).
+    pub grip_loss: f64,
     /// Hardest hit into a wall or barrier during the step, m/s into the wall.
     pub barrier_impact: f64,
     /// cos of the angle between the car's heading and the track direction.
@@ -55,6 +58,10 @@ pub struct DefaultReward {
     pub off_track_weight: f64,
     /// Penalty per unit of steering input change (smoothness).
     pub steer_change_weight: f64,
+    /// Penalty per step per unit of tyre grip lost (see [`StepInfo::grip_loss`]): an
+    /// immediate price for overheating the tyres, whose cost in lap time comes too late
+    /// for the discount horizon.
+    pub grip_loss_weight: f64,
     /// Penalty on termination.
     pub termination_penalty: f64,
 }
@@ -65,6 +72,7 @@ impl Default for DefaultReward {
             progress_weight: 0.1,
             off_track_weight: 0.02,
             steer_change_weight: 0.0,
+            grip_loss_weight: 0.0,
             termination_penalty: 10.0,
         }
     }
@@ -74,7 +82,8 @@ impl RewardFn for DefaultReward {
     fn reward(&self, info: &StepInfo, done: Option<Done>) -> f64 {
         let mut r = self.progress_weight * info.progress
             - self.off_track_weight * info.wheels_off as f64
-            - self.steer_change_weight * info.steer_change.abs();
+            - self.steer_change_weight * info.steer_change.abs()
+            - self.grip_loss_weight * info.grip_loss;
         if done == Some(Done::Terminated) {
             r -= self.termination_penalty;
         }

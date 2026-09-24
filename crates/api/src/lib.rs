@@ -17,7 +17,7 @@ pub use open_racing_env::{
     DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, RewardFn, StepInfo,
     TerminationFn,
 };
-pub use open_racing_sim::{Car, CarModel, Controls, Track};
+pub use open_racing_sim::{Car, CarModel, Controls, Surface, Track};
 
 /// A box-shaped space with named dimensions.
 #[derive(Clone, Debug, PartialEq)]

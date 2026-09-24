@@ -12,7 +12,7 @@ mod rng;
 use std::sync::Arc;
 
 use glam::DVec3;
-use open_racing_sim::{AutoShift, Car, CarModel, Controls, DT, Shift, Surface, Track};
+use open_racing_sim::{AutoShift, Car, CarModel, Controls, DT, GRAVITY, Shift, Surface, Track};
 use rayon::prelude::*;
 
 pub use lap::LapTimer;
@@ -36,16 +36,26 @@ pub struct EnvConfig {
     pub random_start: bool,
     /// Initial speed range in m/s.
     pub start_speed: (f64, f64),
+    /// Cap the initial speed at what the corners within [`SAFE_START_DISTANCE`] allow at
+    /// [`SAFE_START_LATERAL_G`], so no episode starts in a crash it cannot avoid.
+    pub safe_start: bool,
     /// Initial lateral offset range in m.
     pub start_offset: (f64, f64),
     /// Let an automatic gear selector drive the sequential gearbox.
     pub auto_shift: bool,
+    /// Anti-lock brakes, as GT3 cars have: the brake pressure backs off while a wheel
+    /// locks. Without it the pedal locks the wheels well short of full travel.
+    pub abs: bool,
     /// Maximum steering wheel speed in rad/s (a human arm / wheel base limit).
     pub max_steer_rate: f64,
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
     /// Append ground-truth tyre state to the observation.
     pub privileged_obs: bool,
+    /// Append tread temperatures and pressures, as sims report them in telemetry.
+    pub tyre_obs: bool,
+    /// Append the track widths left and right of each lookahead point.
+    pub edge_obs: bool,
     pub seed: u64,
 }
 
@@ -56,11 +66,15 @@ impl Default for EnvConfig {
             random_start: true,
             start_speed: (0.0, 40.0),
             start_offset: (-2.0, 2.0),
+            safe_start: false,
             auto_shift: true,
+            abs: false,
             max_steer_rate: 15.0,
             lookahead_points: 20,
             lookahead_spacing: 10.0,
             privileged_obs: false,
+            tyre_obs: false,
+            edge_obs: false,
             seed: 0,
         }
     }
@@ -85,6 +99,8 @@ impl EnvConfig {
             lookahead_points: self.lookahead_points,
             lookahead_spacing: self.lookahead_spacing,
             privileged: self.privileged_obs,
+            tyres: self.tyre_obs,
+            edges: self.edge_obs,
         }
     }
 }
@@ -160,7 +176,12 @@ impl Env {
             0.0
         };
         let d = self.rng.uniform(cfg.start_offset.0, cfg.start_offset.1);
-        let speed = self.rng.uniform(cfg.start_speed.0, cfg.start_speed.1);
+        let top = if cfg.safe_start {
+            cfg.start_speed.1.min(cornering_speed(track, s))
+        } else {
+            cfg.start_speed.1
+        };
+        let speed = self.rng.uniform(cfg.start_speed.0.min(top), top);
         let gear = gear_for_speed(&shared.car, speed);
         self.car.reset(track, s, d, speed, gear);
         self.lap = LapTimer::new(track, self.car.state.position);
@@ -224,6 +245,16 @@ impl Env {
             .iter()
             .filter(|w| w.surface == Surface::Grass)
             .count();
+        let grip_loss = (0..4)
+            .map(|i| {
+                let t = &self.car.telemetry.wheels[i];
+                1.0 - self.car.model.tire(i).condition_grip(
+                    &st.wheels[i].tire,
+                    &t.tread_load,
+                    t.pressure,
+                )
+            })
+            .sum();
         let prev = self.info;
         let info = StepInfo {
             progress,
@@ -231,6 +262,7 @@ impl Env {
             speed,
             offset: q.d / half_width,
             wheels_off,
+            grip_loss,
             barrier_impact,
             heading_cos,
             steer_change: self.input.steer - prev_steer,
@@ -269,6 +301,8 @@ impl Env {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Actuator {
     steer: f64,
+    /// Share of the brake pedal the anti-lock system currently takes away.
+    abs_release: f64,
     /// Gear request of the current decision, not yet sent to the gearbox.
     shift: Shift,
 }
@@ -292,7 +326,7 @@ impl Actuator {
         Controls {
             steer_wheel_angle: self.steer,
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
-            brake: f64::from(action[2]).clamp(0.0, 1.0),
+            brake: self.brake(cfg, car, f64::from(action[2]).clamp(0.0, 1.0)),
             clutch: 0.0,
             shift: if cfg.auto_shift {
                 AutoShift.shift(car)
@@ -300,6 +334,26 @@ impl Actuator {
                 self.take_shift(car)
             },
         }
+    }
+
+    /// Brake pressure for `pedal`: with [`EnvConfig::abs`], released while a wheel slips
+    /// past [`ABS_SLIP`] and reapplied once it grips again.
+    fn brake(&mut self, cfg: &EnvConfig, car: &Car, pedal: f64) -> f64 {
+        if !cfg.abs || pedal == 0.0 || car.speed() < ABS_MIN_SPEED {
+            self.abs_release = 0.0;
+            return pedal;
+        }
+        let locking = car
+            .telemetry
+            .wheels
+            .iter()
+            .any(|w| w.slip_ratio < -ABS_SLIP);
+        self.abs_release = if locking {
+            (self.abs_release + ABS_RELEASE_RATE * DT).min(1.0)
+        } else {
+            (self.abs_release - ABS_APPLY_RATE * DT).max(0.0)
+        };
+        pedal * (1.0 - self.abs_release)
     }
 
     /// The pending gear request; never shifts below first gear (into neutral or reverse),
@@ -330,6 +384,29 @@ impl Actuator {
             brake: f64::from(action[2]).clamp(0.0, 1.0),
         }
     }
+}
+
+/// Braking slip ratio beyond which the anti-lock system releases the brakes; the tyres
+/// peak around 0.1.
+pub const ABS_SLIP: f64 = 0.12;
+/// Rates at which the anti-lock system releases and reapplies the brakes, share of the
+/// pedal per second, and the speed below which it stays out of the way, m/s.
+const ABS_RELEASE_RATE: f64 = 20.0;
+const ABS_APPLY_RATE: f64 = 10.0;
+const ABS_MIN_SPEED: f64 = 3.0;
+
+/// Look-ahead distance and lateral acceleration of [`EnvConfig::safe_start`].
+pub const SAFE_START_DISTANCE: f64 = 60.0;
+pub const SAFE_START_LATERAL_G: f64 = 1.3;
+
+/// Speed at which the corners within [`SAFE_START_DISTANCE`] after `s` can be taken at
+/// [`SAFE_START_LATERAL_G`], m/s.
+fn cornering_speed(track: &Track, s: f64) -> f64 {
+    (0..=(SAFE_START_DISTANCE / 5.0) as usize)
+        .map(|k| track.sample_at(s + 5.0 * k as f64).curvature.abs())
+        .fold(f64::INFINITY, |v, c| {
+            v.min((SAFE_START_LATERAL_G * GRAVITY / c.max(1e-6)).sqrt())
+        })
 }
 
 /// Highest gear that keeps the engine above ~55% of the limiter at `speed`.
