@@ -73,6 +73,8 @@ pub struct AppRequests {
     pub restart_engine: bool,
     pub toggle_help: bool,
     pub toggle_mute: bool,
+    /// Seat the VR view at the driver's eye where the head is now.
+    pub recenter_vr: bool,
 }
 
 /// Which device drives the car. Cycled with Tab (or Select on a gamepad).
@@ -221,6 +223,7 @@ fn keyboard(
     requests.restart_engine = keys.just_pressed(KeyCode::KeyI);
     requests.toggle_help = keys.just_pressed(KeyCode::KeyH);
     requests.toggle_mute = keys.just_pressed(KeyCode::KeyM);
+    requests.recenter_vr = keys.just_pressed(KeyCode::KeyR);
     if !matches!(*selection, InputSelection::Auto | InputSelection::Keyboard) {
         return;
     }

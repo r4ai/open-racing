@@ -37,6 +37,7 @@ V                cycle camera
 P                replay since last reset / stop replay
 T                toggle AI driver (with --ai)
 M                mute / unmute sound
+R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
 Esc              settings: input, force feedback, track condition (Tab)
 H                hide this help

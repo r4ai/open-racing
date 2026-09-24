@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use open_racing_sim::{Coat, GRAVITY, Surface, TireCondition, WheelTelemetry};
 
+use crate::camera::PrimaryView;
 use crate::driving::{self, Simulation};
 use crate::scene::to_bevy;
 
@@ -350,7 +351,7 @@ fn update_smoke(
     sim: Res<Simulation>,
     mut smoke: ResMut<Smoke>,
     mut meshes: ResMut<Assets<Mesh>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<&GlobalTransform, With<PrimaryView>>,
 ) {
     let dt = time.delta_secs();
     let car = &sim.car;

@@ -8,7 +8,12 @@ use crate::input::AppRequests;
 use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, sky_light, to_bevy};
 
 #[derive(Component)]
-struct MainCamera;
+pub struct MainCamera;
+
+/// The camera whose viewpoint effects such as smoke billboards face: the window camera,
+/// or one eye of the headset in VR.
+#[derive(Component)]
+pub struct PrimaryView;
 
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
@@ -75,6 +80,7 @@ impl Plugin for CameraPlugin {
 fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         MainCamera,
+        PrimaryView,
         Camera3d::default(),
         sky_light(&mut images),
         Projection::Perspective(PerspectiveProjection {
@@ -112,13 +118,12 @@ fn follow(
         }
     };
 
-    let driver_eye = eye.map_or(DVec3::new(-0.3, 0.38, 0.45), |e| e.0);
     let chase = to_bevy(pos - flat * CHASE_BACK + DVec3::Z * CHASE_UP);
     let chase_target = to_bevy(pos + flat * 4.0 + DVec3::Z * 0.6);
-    // Views fixed to the body, looking along it.
     let mut ride = |local: DVec3| {
-        cam.translation = to_bevy(pos + rot * local);
-        cam.rotation = quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+        let view = body_view(&sim, local);
+        cam.translation = view.translation;
+        cam.rotation = view.rotation;
     };
 
     match *mode {
@@ -141,7 +146,7 @@ fn follow(
         }
         CameraMode::Cockpit | CameraMode::FirstPerson => {
             set_fov(75.0);
-            ride(driver_eye);
+            ride(driver_eye(eye.as_deref()));
         }
         CameraMode::Bumper => {
             set_fov(70.0);
@@ -176,6 +181,18 @@ fn follow(
             cam.look_at(to_bevy(pos), to_bevy(flat));
         }
     }
+}
+
+/// The driver's eye in body coordinates, m.
+pub fn driver_eye(eye: Option<&DriverEye>) -> DVec3 {
+    eye.map_or(DVec3::new(-0.3, 0.38, 0.45), |e| e.0)
+}
+
+/// A view fixed to the body at `local`, looking along it.
+pub fn body_view(sim: &Simulation, local: DVec3) -> Transform {
+    let (pos, rot) = sim.body_pose();
+    Transform::from_translation(to_bevy(pos + rot * local))
+        .with_rotation(quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
 }
 
 /// Hides the car in views from inside or on it, where its model would block the view.

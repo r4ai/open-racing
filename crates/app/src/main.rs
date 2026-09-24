@@ -14,6 +14,7 @@ mod scene;
 mod settings;
 mod track_model;
 mod tyre_dirt;
+mod vr;
 
 use std::path::PathBuf;
 
@@ -45,6 +46,10 @@ pub struct Args {
     /// Grip the racing line gains per lap driven, as rubber is laid down.
     #[arg(long, default_value_t = open_racing_sim::TrackEvolution::DEFAULT_GAIN_PER_LAP)]
     pub grip_gain: f64,
+    /// Drive in VR through OpenXR (SteamVR, Quest Link, ...), seated in the cockpit.
+    /// R recenters the view.
+    #[arg(long)]
+    pub vr: bool,
 }
 
 fn main() {
@@ -57,33 +62,43 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "open-racing".into(),
-            present_mode: PresentMode::AutoVsync,
+            // In VR the headset paces the frames; the window must not hold them back.
+            present_mode: if args.vr {
+                PresentMode::AutoNoVsync
+            } else {
+                PresentMode::AutoVsync
+            },
             ..default()
         }),
         ..default()
-    }))
-    .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
-    .insert_resource(sim)
-    .insert_resource(track_model)
-    .insert_resource(car_model)
-    .insert_resource(args.clone())
-    .add_plugins((
-        input::InputPlugin,
-        driving::DrivingPlugin,
-        scene::ScenePlugin,
-        camera::CameraPlugin,
-        hud::HudPlugin,
-        capture::CapturePlugin,
-        audio::AudioPlugin,
-        effects::EffectsPlugin,
-        settings::SettingsPlugin,
-        ffb::FfbPlugin,
-        tyre_dirt::TyreDirtPlugin,
-    ));
+    });
+    let mut app = App::new();
+    if args.vr {
+        app.add_plugins((vr::plugins(plugins), vr::VrPlugin));
+    } else {
+        app.add_plugins(plugins);
+    }
+    app.insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
+        .insert_resource(sim)
+        .insert_resource(track_model)
+        .insert_resource(car_model)
+        .insert_resource(args.clone())
+        .add_plugins((
+            input::InputPlugin,
+            driving::DrivingPlugin,
+            scene::ScenePlugin,
+            camera::CameraPlugin,
+            hud::HudPlugin,
+            capture::CapturePlugin,
+            audio::AudioPlugin,
+            effects::EffectsPlugin,
+            settings::SettingsPlugin,
+            ffb::FfbPlugin,
+            tyre_dirt::TyreDirtPlugin,
+        ));
     driving::install_policy(&mut app, &args);
     app.run();
 }
