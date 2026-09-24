@@ -640,3 +640,37 @@ fn mid_engine_rotates_more_on_lift_off() {
     eprintln!("lift-off body slip gain: FR {fr:.2}°, MR {mr:.2}°");
     assert!(mr > fr * 1.2, "MR {mr:.2}°, FR {fr:.2}°");
 }
+
+#[test]
+fn kerb_ridges_shake_the_steering_on_a_straight() {
+    let shake = |kerb_height| {
+        let mut track = circle(5000.0);
+        track.kerb_height = kerb_height;
+        // Left wheels in the middle of the left kerb, right wheels on the asphalt.
+        let model = gt3();
+        let d = 30.5 - 0.5 * model.params.track_front;
+        let mut car = Car::new(model, &track, 0.0, d, 30.0, 4);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for k in 0..2000 {
+            car.step(
+                &track,
+                &Controls {
+                    throttle: 0.3,
+                    ..Default::default()
+                },
+            );
+            if k >= 500 {
+                lo = lo.min(car.telemetry.steering_torque);
+                hi = hi.max(car.telemetry.steering_torque);
+            }
+        }
+        assert_eq!(car.telemetry.wheels[FL].surface, Surface::Kerb);
+        hi - lo
+    };
+    let (flat, ridged) = (shake(0.0), shake(0.03));
+    assert!(flat < 0.05, "flat kerb shakes the wheel by {flat:.2} N·m");
+    assert!(
+        ridged > 1.0,
+        "ridged kerb shakes the wheel by only {ridged:.2} N·m"
+    );
+}

@@ -1,14 +1,15 @@
 //! Force feedback: plays the simulated steering torque on the wheel that steers.
 //!
-//! The simulation already computes the torque the front tyres' aligning moments put
-//! on the steering wheel (`Telemetry::steering_torque`). Here it is scaled to the
-//! motor's range and sent as one constant force, updated every frame. The driver's
-//! own centring spring is switched off, so everything felt comes from the tyres,
-//! including the torque dropping away as the fronts reach their grip limit.
+//! The simulation already computes the torque the front contact patches put on the
+//! steering wheel (`Telemetry::steering_torque`). Here it is scaled to the motor's
+//! range and sent as one constant force, updated every frame. The driver's own
+//! centring spring is switched off, so everything felt comes from the tyres,
+//! including the torque dropping away as the fronts reach their grip limit and the
+//! kicks of bumps and kerbs, which the road detail setting can bring out further.
 //!
-//! The base's peak torque, strength, maximum output, damping and direction are set on
-//! the settings screen and saved to `ffb.ron`, since wheels differ in torque and in
-//! which way they push. Knowing the peak torque lets the force be set in N·m at the rim.
+//! The base's peak torque, strength, maximum output, road detail, damping and
+//! direction are set on the settings screen and saved to `ffb.ron`, since wheels
+//! differ in torque and in which way they push. Knowing the peak torque lets the force be set in N·m at the rim.
 //! Only Windows (DirectInput) is supported; elsewhere the plugin reports that.
 
 #[cfg(windows)]
@@ -33,6 +34,9 @@ const RETRY_INTERVAL: f64 = 2.0;
 const DAMPING_FULL: f64 = 0.5;
 /// Time constant smoothing the steering wheel speed for damping, s.
 const RATE_SMOOTHING: f64 = 0.03;
+/// Time constant separating road detail (bumps, kerbs) from the steady steering
+/// torque, s: changes faster than this count as detail.
+const DETAIL_SMOOTHING: f64 = 0.02;
 /// Runaway guard: the wheel held at the car's lock for this long while the tyres
 /// pull back towards centre with at least this torque (N·m) pauses the force until
 /// the wheel leaves lock. A driver can turn a 900° wheel past the car's lock, but a
@@ -60,6 +64,9 @@ pub struct FfbSettings {
     pub strength: f64,
     /// Largest torque ever sent to the rim, N·m.
     pub max_torque: f64,
+    /// Share of the fast changes in the torque (bumps, kerbs) reproduced, percent;
+    /// 100 plays them as simulated.
+    pub detail: f64,
     /// Resistance to turning the wheel quickly, percent; steadies strong bases.
     pub damping: f64,
     /// Reverses the force for wheels that push the other way.
@@ -71,8 +78,9 @@ impl Default for FfbSettings {
         Self {
             enabled: true,
             wheel_torque: 10.0,
-            strength: 70.0,
+            strength: 40.0,
             max_torque: 8.0,
+            detail: 150.0,
             damping: 20.0,
             invert: false,
         }
@@ -88,9 +96,11 @@ impl FfbSettings {
         bindings::save_config(SETTINGS_FILE, self);
     }
 
-    /// Steering torque in N·m and steering wheel speed in rad/s (both positive to the
-    /// left) → motor force in -1..1, positive turning the wheel left.
-    pub fn force(&self, torque: f64, rate: f64) -> f64 {
+    /// Steering torque and its fast changes (see [`DETAIL_SMOOTHING`]) in N·m and
+    /// steering wheel speed in rad/s (all positive to the left) → motor force in -1..1,
+    /// positive turning the wheel left.
+    pub fn force(&self, torque: f64, detail: f64, rate: f64) -> f64 {
+        let torque = torque + detail * (self.detail / 100.0 - 1.0);
         self.motor(torque * self.strength / 100.0 - rate * DAMPING_FULL * self.damping / 100.0)
     }
 
@@ -150,6 +160,8 @@ struct Ffb {
     /// Steering wheel angle last frame and smoothed speed, for damping.
     angle: f64,
     rate: f64,
+    /// Steering torque without its fast changes, N·m.
+    steady: f64,
     next_watchdog: f64,
     /// Runaway guard: since when the wheel has been pinned at lock, whether the force
     /// is paused for it, the pauses in a row and when the last began.
@@ -283,13 +295,15 @@ fn update(
         ffb.rate += (raw - ffb.rate) * (1.0 - (-dt / RATE_SMOOTHING).exp());
     }
     ffb.angle = angle;
+    let torque = sim.ffb_torque;
+    ffb.steady += (torque - ffb.steady) * (1.0 - (-dt / DETAIL_SMOOTHING).exp());
     if settings.0 {
         ffb.tripped = false;
         ffb.pauses = 0;
     }
     guard_runaway(
         &mut ffb,
-        sim.ffb_torque,
+        torque,
         angle,
         sim.car.model.params.steering.lock,
         now,
@@ -306,7 +320,7 @@ fn update(
         ffb_settings.motor(TEST_TORQUE)
     } else if !settings.0 && !ffb.tripped && !ffb.paused && sim.mode == Mode::Human {
         ffb.fade = (ffb.fade + dt / FADE_IN).min(1.0);
-        ffb_settings.force(sim.ffb_torque, ffb.rate) * ffb.fade
+        ffb_settings.force(torque, torque - ffb.steady, ffb.rate) * ffb.fade
     } else {
         ffb.fade = 0.0;
         0.0
@@ -392,13 +406,13 @@ mod tests {
             damping: 0.0,
             ..default()
         };
-        assert_eq!(s.force(6.0, 0.0), 0.5);
+        assert_eq!(s.force(6.0, 0.0, 0.0), 0.5);
         assert_eq!(
             FfbSettings {
                 strength: 50.0,
                 ..s.clone()
             }
-            .force(-6.0, 0.0),
+            .force(-6.0, 0.0, 0.0),
             -0.25
         );
         assert_eq!(
@@ -406,7 +420,7 @@ mod tests {
                 max_torque: 3.0,
                 ..s.clone()
             }
-            .force(40.0, 0.0),
+            .force(40.0, 0.0, 0.0),
             0.25
         );
         // A maximum above the base's own peak cannot exceed full force.
@@ -415,10 +429,13 @@ mod tests {
                 max_torque: 30.0,
                 ..s.clone()
             }
-            .force(40.0, 0.0),
+            .force(40.0, 0.0, 0.0),
             1.0
         );
-        assert_eq!(FfbSettings { strength: 0.0, ..s }.force(10.0, 0.0), 0.0);
+        assert_eq!(
+            FfbSettings { strength: 0.0, ..s }.force(10.0, 0.0, 0.0),
+            0.0
+        );
     }
 
     #[test]
@@ -447,12 +464,27 @@ mod tests {
     }
 
     #[test]
+    fn road_detail_scales_only_the_fast_changes() {
+        let s = FfbSettings {
+            wheel_torque: 10.0,
+            strength: 100.0,
+            max_torque: 10.0,
+            damping: 0.0,
+            detail: 200.0,
+            ..default()
+        };
+        // 2 N·m steady plus a 1 N·m kick: the kick is doubled, the rest kept.
+        assert!((s.force(3.0, 1.0, 0.0) - 0.4).abs() < 1e-12);
+        assert!((FfbSettings { detail: 0.0, ..s }.force(3.0, 1.0, 0.0) - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
     fn damping_resists_the_wheel_turning() {
         let s = FfbSettings {
             damping: 50.0,
             ..default()
         };
-        assert!(s.force(0.0, 2.0) < 0.0);
-        assert!(s.force(0.0, -2.0) > 0.0);
+        assert!(s.force(0.0, 0.0, 2.0) < 0.0);
+        assert!(s.force(0.0, 0.0, -2.0) > 0.0);
     }
 }

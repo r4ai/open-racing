@@ -44,6 +44,32 @@ pub struct SteeringParams {
     pub lock: f64,
     /// 0 = parallel steer, 1 = full Ackermann.
     pub ackermann: f64,
+    /// Caster angle in radians: the steering axis leans back at the top.
+    #[serde(default = "default_caster")]
+    pub caster: f64,
+    /// Kingpin inclination in radians: the steering axis leans inwards at the top.
+    #[serde(default = "default_kingpin_inclination")]
+    pub kingpin_inclination: f64,
+    /// Mechanical trail in m: how far the contact patch trails the point where the
+    /// steering axis meets the ground.
+    #[serde(default = "default_trail")]
+    pub trail: f64,
+    /// Scrub radius in m: how far the contact patch lies outboard of that point.
+    #[serde(default = "default_scrub_radius")]
+    pub scrub_radius: f64,
+}
+
+fn default_caster() -> f64 {
+    0.12
+}
+fn default_kingpin_inclination() -> f64 {
+    0.15
+}
+fn default_trail() -> f64 {
+    0.025
+}
+fn default_scrub_radius() -> f64 {
+    0.015
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

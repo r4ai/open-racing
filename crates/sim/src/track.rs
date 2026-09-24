@@ -31,7 +31,7 @@ pub struct TrackDef {
     /// Width of the kerbs outside each track edge in metres.
     #[serde(default = "default_kerb_width")]
     pub kerb_width: f64,
-    /// Height of the kerb crown in metres.
+    /// Height of the kerb crown in metres; the ridges across it rise a fifth higher.
     #[serde(default = "default_kerb_height")]
     pub kerb_height: f64,
     /// Width of the grass run-off outside each kerb in metres. An invisible
@@ -249,6 +249,11 @@ pub struct Track {
     pub ground: Option<Arc<GroundMesh>>,
 }
 
+/// Ridges across the kerbs: their height as a share of the kerb's crown, and the
+/// distance between them along the track in m.
+const KERB_RIDGE_SHARE: f64 = 0.2;
+const KERB_RIDGE_PITCH: f64 = 0.9;
+
 /// How far above a query point ground rays start, in m. Keeps wheels on their deck
 /// under an overpass.
 const RAY_UP: f64 = 1.0;
@@ -435,7 +440,7 @@ impl Track {
         let (surface_point, normal, props) = match hit {
             Some(hit) => (hit.point, hit.normal, hit.surface),
             None => {
-                let (mut surface, kerb_rise) = self.classify(d, smp.width_left, smp.width_right);
+                let (mut surface, kerb_rise) = self.classify(s, d, smp.width_left, smp.width_right);
                 if self.ground.is_some() {
                     // Off the meshes: keep the car up on the centreline plane, as grass.
                     surface = Surface::Grass;
@@ -478,16 +483,20 @@ impl Track {
     }
 
     #[inline]
-    fn classify(&self, d: f64, wl: f64, wr: f64) -> (Surface, f64) {
+    fn classify(&self, s: f64, d: f64, wl: f64, wr: f64) -> (Surface, f64) {
         let outside = if d >= 0.0 { d - wl } else { -d - wr };
         if outside <= 0.0 {
             (Surface::Asphalt, 0.0)
         } else if outside <= self.kerb_width {
-            // Kerb crown: rises from the track edge, peaks in the middle.
+            // Kerb crown: rises from the track edge, peaks in the middle, with ridges
+            // across it.
             let x = outside / self.kerb_width;
+            let ridge = (std::f64::consts::PI * s / KERB_RIDGE_PITCH).sin().powi(2);
             (
                 Surface::Kerb,
-                self.kerb_height * (std::f64::consts::PI * x).sin(),
+                self.kerb_height
+                    * (std::f64::consts::PI * x).sin()
+                    * (1.0 + KERB_RIDGE_SHARE * ridge),
             )
         } else {
             (Surface::Grass, 0.0)

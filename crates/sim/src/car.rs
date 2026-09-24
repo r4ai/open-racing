@@ -18,7 +18,7 @@ use glam::{DMat3, DQuat, DVec3};
 use crate::controls::{Controls, Shift};
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::evolution::TrackEvolution;
-use crate::params::CarModel;
+use crate::params::{CarModel, SteeringParams};
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
 use crate::{AIR_DENSITY, DT, FL, GRAVITY, RL};
@@ -123,7 +123,8 @@ pub struct Telemetry {
     pub wheels: [WheelTelemetry; 4],
     /// Specific force at the CG in body coordinates (what an accelerometer measures), m/s².
     pub acceleration: DVec3,
-    /// Torque at the steering wheel from the tyres' aligning moments, N·m.
+    /// Torque at the steering wheel from the front contact patches' forces about the
+    /// steering axes (aligning moment, trail, scrub radius, caster, kingpin), N·m.
     /// Positive turns the steering wheel left. This is the force-feedback source.
     pub steering_torque: f64,
     /// Aerodynamic downforce, front / rear, N.
@@ -378,7 +379,8 @@ impl Car {
             tire_force_body[i] = rot_t * force;
             contact_body[i] = rot_t * (contact - st.position);
             if corner.front {
-                steering_torque += f.mz;
+                steering_torque +=
+                    kingpin_torque(&p.steering, corner.side, delta, tire_force_body[i], f.mz);
             }
 
             tel.wheels[i] = WheelTelemetry {
@@ -573,6 +575,26 @@ fn collide(model: &CarModel, track: &Track, st: &mut CarState, barrier_clearance
     let scrub = (BARRIER_FRICTION * impulse / along.length().max(1e-9)).min(1.0);
     st.velocity = push * (BARRIER_RESTITUTION * outward) + along * (1.0 - scrub);
     outward
+}
+
+/// Torque about a front wheel's steering axis, positive turning it left, from the
+/// force on its contact patch (`force`, body coordinates, including the road's normal
+/// force) and the tyre's aligning torque `mz`. The patch trails the axis by the
+/// mechanical trail and lies outboard of it by the scrub radius, so a lateral force
+/// (cornering, a kerb's slope) acts on the trail, a longitudinal one (braking, the edge
+/// of a bump) on the scrub radius, and the load on the leaning axis.
+fn kingpin_torque(s: &SteeringParams, side: f64, steer: f64, force: DVec3, mz: f64) -> f64 {
+    let (sd, cd) = steer.sin_cos();
+    let along = force.x * cd + force.y * sd;
+    let across = force.y * cd - force.x * sd;
+    let load = force.z;
+    let (caster, kingpin) = (s.caster.sin(), s.kingpin_inclination.sin());
+    mz - s.trail * across - side * s.scrub_radius * along
+        // Opposite on the two sides, so it cancels until a bump or kerb loads one
+        // wheel more than the other.
+        - side * load * (s.scrub_radius * caster + s.trail * kingpin)
+        // Steering lifts the car on the kingpin inclination, which centres the wheel.
+        - load * s.scrub_radius * kingpin * sd
 }
 
 /// Road wheel angles for a steering wheel angle, with partial Ackermann.
