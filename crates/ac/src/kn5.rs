@@ -2,7 +2,8 @@
 //!
 //! Layout (all little-endian, strings are an i32 byte length followed by bytes):
 //! - header: magic `sc6969`, i32 version, one more i32 when version > 5
-//! - textures: count, then per texture i32 kind, name, i32 size, bytes
+//! - textures: count, then per texture i32 kind, and unless the kind is 0 (an empty
+//!   slot) name, i32 size, bytes
 //! - materials: count, then per material name, shader, u8 blend mode, and for
 //!   version > 4 u8 alpha tested and i32 depth mode; properties (name, f32 value,
 //!   9 more f32); samplers (name, i32 slot, texture name)
@@ -59,6 +60,8 @@ impl Material {
 #[derive(Clone, Debug)]
 pub struct Mesh {
     pub name: String,
+    /// Index into `Kn5::dummies` of the node holding the mesh.
+    pub parent: Option<usize>,
     pub visible: bool,
     pub renderable: bool,
     pub cast_shadows: bool,
@@ -69,10 +72,15 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
-/// Empty node, used by tracks as markers such as `AC_START_0`.
+/// Empty node, used by tracks as markers such as `AC_START_0` and by cars as the pivots
+/// of moving parts such as `WHEEL_LF`.
 #[derive(Clone, Debug)]
 pub struct Dummy {
     pub name: String,
+    /// Index into `Kn5::dummies` of the parent node.
+    pub parent: Option<usize>,
+    /// Transform from the node's frame to the file's world space (column vectors).
+    pub world: DMat4,
     pub position: DVec3,
 }
 
@@ -106,8 +114,10 @@ pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
         r.i32()?;
     }
 
-    for _ in 0..r.count(12)? {
-        let _kind = r.i32()?;
+    for _ in 0..r.count(4)? {
+        if r.i32()? == 0 {
+            continue;
+        }
         let name = r.string()?;
         let size = r.count(1)?;
         kn5.textures.push(Texture {
@@ -141,7 +151,7 @@ pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
         kn5.materials.push(m);
     }
 
-    node(&mut r, &mut kn5, DMat4::IDENTITY, 0)?;
+    node(&mut r, &mut kn5, DMat4::IDENTITY, None, 0)?;
     if r.remaining() > 0 {
         // Every byte of a plain file belongs to the node tree; leftovers mean a
         // variant this reader does not understand, such as a protected file.
@@ -153,7 +163,13 @@ pub fn parse(buf: &[u8]) -> Result<Kn5, Error> {
     Ok(kn5)
 }
 
-fn node(r: &mut Reader, kn5: &mut Kn5, parent: DMat4, depth: usize) -> Result<(), Error> {
+fn node(
+    r: &mut Reader,
+    kn5: &mut Kn5,
+    world: DMat4,
+    parent: Option<usize>,
+    depth: usize,
+) -> Result<(), Error> {
     if depth > 256 {
         return Err(Error::Format("node tree too deep".into()));
     }
@@ -161,29 +177,38 @@ fn node(r: &mut Reader, kn5: &mut Kn5, parent: DMat4, depth: usize) -> Result<()
     let name = r.string()?;
     let children = r.count(4)?;
     let _active = r.u8()?;
-    let mut world = parent;
+    let (mut world, mut parent) = (world, parent);
     match class {
         1 => {
             // Row-vector matrix with the translation in the last row, which is the
             // column-major layout glam expects for column vectors.
             let m: [f32; 16] = r.f32s()?;
-            world = parent * DMat4::from_cols_array(&m.map(f64::from));
+            world *= DMat4::from_cols_array(&m.map(f64::from));
             kn5.dummies.push(Dummy {
                 name,
+                parent,
+                world,
                 position: world.w_axis.truncate(),
             });
+            parent = Some(kn5.dummies.len() - 1);
         }
-        2 => mesh(r, kn5, name, parent)?,
+        2 => mesh(r, kn5, name, world, parent)?,
         3 => skinned(r)?,
         other => return Err(Error::Format(format!("unknown KN5 node class {other}"))),
     }
     for _ in 0..children {
-        node(r, kn5, world, depth + 1)?;
+        node(r, kn5, world, parent, depth + 1)?;
     }
     Ok(())
 }
 
-fn mesh(r: &mut Reader, kn5: &mut Kn5, name: String, world: DMat4) -> Result<(), Error> {
+fn mesh(
+    r: &mut Reader,
+    kn5: &mut Kn5,
+    name: String,
+    world: DMat4,
+    parent: Option<usize>,
+) -> Result<(), Error> {
     let cast_shadows = r.u8()? != 0;
     let visible = r.u8()? != 0;
     let _transparent = r.u8()?;
@@ -222,6 +247,7 @@ fn mesh(r: &mut Reader, kn5: &mut Kn5, name: String, world: DMat4) -> Result<(),
     let renderable = r.u8()? != 0;
     kn5.meshes.push(Mesh {
         name,
+        parent,
         visible,
         renderable,
         cast_shadows,
@@ -259,7 +285,13 @@ pub(crate) mod tests {
     pub fn sample() -> Vec<u8> {
         let mut w = Writer::default();
         w.raw(MAGIC).i32(6).i32(0);
-        w.i32(1).i32(1).string("road.dds").i32(4).raw(b"DDS ");
+        // An empty slot, then the texture.
+        w.i32(2)
+            .i32(0)
+            .i32(1)
+            .string("road.dds")
+            .i32(4)
+            .raw(b"DDS ");
         w.i32(1)
             .string("mat")
             .string("ksPerPixel")
@@ -315,6 +347,10 @@ pub(crate) mod tests {
         assert!(mesh.renderable);
         let start = kn5.dummies.iter().find(|d| d.name == "AC_START_0").unwrap();
         assert_eq!(start.position, DVec3::new(11.0, 2.0, 3.0));
+        // Both the mesh and the marker hang off the root.
+        assert_eq!(start.parent, Some(0));
+        assert_eq!(mesh.parent, Some(0));
+        assert_eq!(kn5.dummies[0].parent, None);
     }
 
     #[test]

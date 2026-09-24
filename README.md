@@ -18,7 +18,8 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 | `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
 | `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
 | `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |
-| `crates/ac`         | Converter from track folders in the Assetto Corsa format to track packages                                                                                                                   |
+| `crates/car`        | Car package format: physics, tyres, and a 3D model whose parts move with the simulated car                                                                                                    |
+| `crates/ac`         | Converter from track and car folders in the Assetto Corsa format to track and car packages                                                                                                    |
 | `crates/train-burn` | PPO (GAE, clipping, observation normalisation) and `BurnPolicy`                                                                                                                              |
 | `crates/app`        | Driving, AI spectating, replay, HUD                                                                                                                                                          |
 
@@ -73,7 +74,7 @@ Force feedback (Windows, DirectInput) plays the simulated steering torque from t
 ## Adding content
 
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
-- Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template. Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
+- Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template, or convert a car into a car package (below). Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
 - Tyres: add `assets/tires/<name>.ron` using `velloni_zeta_gt_front.ron` as a template. A tyre file holds the size, the force curves, how pressure changes stiffness, peak slip, rolling resistance and grip, and the thermal model (inner / middle / outer tread zones and carcass, cooling, operating window, wear). Hot pressure follows the carcass temperature (gas law), so the cold pressure, camber and driving style show up in the tread temperatures on the HUD as they would on a real car. The bundled GT3 runs on the fictional Velloni Zeta GT, modelled on public figures for GT3 slicks (30/68-18 front, 31/71-18 rear).
 
 ### Track packages
@@ -117,6 +118,44 @@ Limitations:
 - Model rotations in `models_*.ini` are ignored.
 - Custom Shaders Patch extensions (`extension/`: generated trees, lights, mesh adjustments) are not applied, so a track looks as it does without the patch.
 
+### Car packages
+
+Cars with 3D models are loaded from open-racing's car package format: a directory `content/cars/<name>/` holding
+
+- `car.ron`: the physics, in the same format as `assets/cars/*.ron`, naming its tyres,
+- `front_tire.ron`, `rear_tire.ron`: the tyres, in the format of `assets/tires/*.ron`,
+- `visual.ron`: format version, and the part of the car each mesh belongs to (body, a wheel, a wheel's hub, the steering wheel), which says how it moves; plus the steering wheel's axis and the driver's eye point,
+- `visual.bin`: meshes, materials and textures, in the same encoding as a track package's render data, read only by the app.
+
+Select one with `--car <name>`. Training and evaluation read only `car.ron` and the tyres. The files are plain RON, so the physics of a converted car can be tuned by hand.
+
+### Converting cars
+
+No third-party cars ship with open-racing. Only convert and use cars whose licence allows it.
+
+**Assetto Corsa format** (`open-racing-ac`, the same command as for tracks; a folder with `ui/ui_car.json`, `data.acd` or `data/car.ini` is taken as a car):
+
+```bash
+# Writes content/cars/my_car/ and prints the car's figures and a quick acceleration test
+cargo run --release -p open-racing-ac -- path/to/<car folder> --name my_car
+cargo run --release -p open-racing-app -- --car my_car
+cargo run --release -p open-racing-train-burn -- train --car my_car
+```
+
+Options: `--skin <skin>` picks a livery from `skins/` (default: the first), `--data <dir>` points to a folder of physics files, `--base <car.ron>` sets the car that stands in for values the folder does not give (default: the bundled GT3), and `--max-texture <texels>` caps the texture size (default 4096; larger textures keep their smaller mip levels).
+
+How the folder is converted:
+
+- **Model:** `<folder>.kn5` (or the largest KN5 file), with the chosen skin's textures replacing those of the same name. Parts move by node name, as in the game: `WHEEL_LF`/`RF`/`LR`/`RR` spin, steer and follow the suspension; `SUSP_<corner>`, and whatever shares a parent node with a single wheel, steer and follow the suspension without spinning; `STEER_HR` turns with the steering input. Low-detail copies (`COCKPIT_LR`, `STEER_LR`), motion-blurred wheels, damaged parts and unfastened belts are left out. Materials are converted as for tracks.
+- **Geometry:** wheelbase, tracks and tyre sizes come from the wheels in the model, so the model and the simulated wheels line up.
+- **Physics:** read from the physics files (`car.ini`, `suspensions.ini`, `tyres.ini`, `engine.ini`, `drivetrain.ini`, `brakes.ini`, `aero.ini` and the tables they name) in the folder's `data/` or in `--data`. Physics packed into `data.acd` are **not** read: open-racing does not unpack them. Without physics files, the mass, the engine's torque curve and rev limit, and the final drive (for the stated top speed) come from `ui/ui_car.json`, and everything else from the base car. The converter lists where each group of values came from.
+
+Limitations:
+
+- The simulation drives the rear wheels only; front- and all-wheel-drive cars are converted as rear-wheel drive.
+- The game's tyre model, aero maps (ride height sensitivity, per-wing damage) and turbo dynamics are reduced to open-racing's parameters: peak grip and slip, load sensitivity, pressures, operating temperature; drag and downforce areas; the torque curve at full boost.
+- Skinned meshes (the driver, animated belts), animations (doors, wipers), lights and Custom Shaders Patch extensions are not converted.
+
 ## Tests and benchmarks
 
 ```bash
@@ -125,6 +164,8 @@ cargo bench -p open-racing-sim  # one physics step
 cargo bench -p open-racing-env  # 256-env parallel throughput
 # A lap on every track package in content/tracks/ (ignored by default)
 cargo test -p open-racing-api --test content_tracks -- --ignored
+# A drive in every car package in content/cars/ (ignored by default)
+cargo test -p open-racing-api --test content_cars -- --ignored
 ```
 
 Reference results (Apple M5, 10 cores): 1 physics step ≈ 0.4 µs; `BatchEnv` ≈ 9.8M physics steps/s (≈ 9,800× real time).

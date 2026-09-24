@@ -364,7 +364,7 @@ impl CarModel {
 }
 
 /// Path of the tyre `name` for a car file in `car_dir`.
-fn tire_path(car_dir: &Path, name: &str) -> PathBuf {
+pub fn tire_path(car_dir: &Path, name: &str) -> PathBuf {
     if Path::new(name).extension().is_some() {
         car_dir.join(name)
     } else {

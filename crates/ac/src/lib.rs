@@ -1,7 +1,9 @@
-//! Converts track folders in the Assetto Corsa format into open-racing track packages.
+//! Converts track and car folders in the Assetto Corsa format into open-racing track and
+//! car packages (see `car` for cars).
 //!
 //! Conversion runs ahead of time, on files the user supplies; the runtime only reads
-//! the resulting package. Protected (encrypted) models are rejected.
+//! the resulting package. Protected (encrypted) models are rejected, and packed data is
+//! not unpacked.
 //!
 //! A track folder contains KN5 models listed in `models.ini` (or `models_<layout>.ini`
 //! for multi-layout tracks), and per layout `ai/fast_lane.ai` and `data/surfaces.ini`.
@@ -13,8 +15,12 @@
 //! timing. The tyres ride on the road meshes.
 
 mod ai;
+pub mod car;
+mod car_physics;
 mod ini;
+mod json;
 mod kn5;
+mod lut;
 mod material;
 mod reader;
 

@@ -17,6 +17,19 @@ impl Section {
     pub fn get_f64(&self, key: &str) -> Option<f64> {
         self.get(key)?.parse().ok()
     }
+
+    /// A comma-separated list of numbers, e.g. `0.1, 0.5, -1`.
+    pub fn get_f64s(&self, key: &str) -> Option<Vec<f64>> {
+        self.get(key)?
+            .split(',')
+            .map(|v| v.trim().parse().ok())
+            .collect()
+    }
+}
+
+/// The first section called `name`, compared case-insensitively.
+pub fn section<'a>(sections: &'a [Section], name: &str) -> Option<&'a Section> {
+    sections.iter().find(|s| s.name.eq_ignore_ascii_case(name))
 }
 
 pub fn parse(src: &str) -> Vec<Section> {
@@ -53,5 +66,16 @@ mod tests {
         assert_eq!(s[0].get("key"), Some("ROAD"));
         assert_eq!(s[0].get_f64("FRICTION"), Some(0.97));
         assert_eq!(s[1].get("FILE"), Some("a.kn5"));
+        let s = parse(
+            "[A]
+POS=0.5, -1,2
+BAD=1,x
+",
+        );
+        assert_eq!(
+            section(&s, "a").unwrap().get_f64s("POS"),
+            Some(vec![0.5, -1.0, 2.0])
+        );
+        assert_eq!(s[0].get_f64s("BAD"), None);
     }
 }

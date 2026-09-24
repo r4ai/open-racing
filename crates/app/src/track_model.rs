@@ -1,6 +1,6 @@
 //! Renders a track package's 3D model: standard PBR materials extended with the
 //! package's surface textures (reflection, roughness, reflectance), normal maps and
-//! mask-blended detail layers.
+//! mask-blended detail layers. Car packages' models share the format and the materials.
 
 use bevy::asset::{RenderAssetUsages, embedded_asset};
 use bevy::image::{
@@ -124,7 +124,7 @@ impl Images<'_> {
             self.sampler.clone(),
             RenderAssetUsages::RENDER_WORLD,
         )
-        .inspect_err(|e| warn!("track texture {i}: {e}"))
+        .inspect_err(|e| warn!("texture {i}: {e}"))
         .ok()
         .map(|img| self.images.add(img));
         cache[i] = Some(handle.clone());
@@ -143,6 +143,23 @@ pub fn spawn(
 ) {
     let Some(visual) = model.0.take() else { return };
     let formats = formats.map_or(CompressedImageFormats::BC, |f| f.0);
+    let mats = add_materials(&visual, formats, &mut materials, &mut images);
+    for m in visual.meshes {
+        let (material, cast_shadows) = (mats[m.material as usize].clone(), m.cast_shadows);
+        let mut entity = commands.spawn((Mesh3d(meshes.add(to_mesh(m))), MeshMaterial3d(material)));
+        if !cast_shadows {
+            entity.insert(NotShadowCaster);
+        }
+    }
+}
+
+/// Adds the materials of a package's render data, and the textures they use.
+pub fn add_materials(
+    visual: &Visual,
+    formats: CompressedImageFormats,
+    materials: &mut Assets<TrackMaterial>,
+    images: &mut Assets<Image>,
+) -> Vec<Handle<TrackMaterial>> {
     let sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
@@ -151,14 +168,14 @@ pub fn spawn(
     });
     let n = visual.textures.len();
     let mut images = Images {
-        visual: &visual,
+        visual,
         formats,
         sampler,
-        images: &mut images,
+        images,
         srgb: vec![None; n],
         linear: vec![None; n],
     };
-    let mats: Vec<Handle<TrackMaterial>> = visual
+    visual
         .materials
         .iter()
         .map(|m| {
@@ -208,31 +225,27 @@ pub fn spawn(
             }
             materials.add(TrackMaterial { base, extension })
         })
-        .collect();
+        .collect()
+}
 
-    for m in visual.meshes {
-        // As `to_bevy`, without the round trip through f64.
-        let convert = |[x, y, z]: [f32; 3]| [x, z, -y];
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        mesh.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            m.positions.into_iter().map(convert).collect::<Vec<_>>(),
-        );
-        mesh.insert_attribute(
-            Mesh::ATTRIBUTE_NORMAL,
-            m.normals.into_iter().map(convert).collect::<Vec<_>>(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs);
-        mesh.insert_indices(Indices::U32(m.indices));
-        let mut entity = commands.spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(mats[m.material as usize].clone()),
-        ));
-        if !m.cast_shadows {
-            entity.insert(NotShadowCaster);
-        }
-    }
+/// A Bevy mesh from a package mesh, whose positions and normals are in the simulation's
+/// Z-up axes.
+pub fn to_mesh(m: open_racing_track::Mesh) -> Mesh {
+    // As `to_bevy`, without the round trip through f64.
+    let convert = |[x, y, z]: [f32; 3]| [x, z, -y];
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        m.positions.into_iter().map(convert).collect::<Vec<_>>(),
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        m.normals.into_iter().map(convert).collect::<Vec<_>>(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs);
+    mesh.insert_indices(Indices::U32(m.indices));
+    mesh
 }

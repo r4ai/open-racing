@@ -214,7 +214,8 @@ impl VisualBuilder {
 }
 
 impl Visual {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    /// Checks that every index refers to something that exists.
+    pub fn validate(&self) -> Result<(), Error> {
         let bad = |what: &str| Err(Error::Format(format!("visual: {what}")));
         let missing = |t: u32| t as usize >= self.textures.len();
         for m in &self.materials {
@@ -241,7 +242,7 @@ impl Visual {
         Ok(())
     }
 
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new(MAGIC, VERSION);
         w.u32(self.textures.len() as u32);
         for t in &self.textures {
@@ -288,7 +289,7 @@ impl Visual {
         w.finish()
     }
 
-    pub(crate) fn decode(buf: &[u8]) -> Result<Self, Error> {
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(buf, MAGIC, VERSION, "visual.bin")?;
         let mut v = Visual::default();
         for _ in 0..r.u32()? {
