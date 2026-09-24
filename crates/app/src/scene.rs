@@ -1,13 +1,21 @@
 //! Track geometry and car visuals generated from the simulation data.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats};
 use bevy::light::{GeneratedEnvironmentMapLight, NotShadowCaster};
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::pbr::generate::{
+    GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
+};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+    Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureViewDescriptor,
+    TextureViewDimension,
 };
+use bevy::render::{Render, RenderApp};
 use glam::{DQuat, DVec3};
 use open_racing_car::{CarVisual, Part};
 use open_racing_sim::Track;
@@ -40,7 +48,15 @@ impl Plugin for ScenePlugin {
                     spawn_lights,
                 ),
             )
-            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
+            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate))
+            .add_systems(Update, freeze_sky_light);
+        let filtered = SkyFiltered::default();
+        app.insert_resource(filtered.clone());
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .insert_resource(filtered)
+                .add_systems(Render, note_sky_filtered.after(filtering_system));
+        }
     }
 }
 
@@ -131,6 +147,56 @@ pub fn sky_light(images: &mut Assets<Image>) -> GeneratedEnvironmentMapLight {
         environment_map: images.add(image),
         intensity: SKY_BRIGHTNESS,
         ..default()
+    }
+}
+
+/// Set by the render world once it has filtered the sky light into the camera's diffuse
+/// and specular maps.
+#[derive(Resource, Clone, Default)]
+struct SkyFiltered(Arc<AtomicBool>);
+
+/// Notes that the sky light's filter passes ran this frame: their pipelines are compiled
+/// and a map had its bind groups.
+fn note_sky_filtered(
+    filtered: Res<SkyFiltered>,
+    pipelines: Option<Res<GeneratorPipelines>>,
+    cache: Res<PipelineCache>,
+    maps: Query<(), (With<GeneratorBindGroups>, With<RenderEnvironmentMap>)>,
+) {
+    let Some(p) = pipelines else { return };
+    let ready = [
+        p.copy,
+        p.downsample_first,
+        p.downsample_second,
+        p.radiance,
+        p.irradiance,
+    ]
+    .into_iter()
+    .all(|id| cache.get_compute_pipeline(id).is_some());
+    if ready && !maps.is_empty() {
+        filtered.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The sky never changes, but Bevy filters a `GeneratedEnvironmentMapLight` again every
+/// frame. Once it has been filtered, keep the maps it made and stop filtering.
+fn freeze_sky_light(
+    mut commands: Commands,
+    filtered: Res<SkyFiltered>,
+    cameras: Query<
+        Entity,
+        (
+            With<GeneratedEnvironmentMapLight>,
+            With<EnvironmentMapLight>,
+        ),
+    >,
+) {
+    if filtered.0.load(Ordering::Relaxed) {
+        for camera in &cameras {
+            commands
+                .entity(camera)
+                .remove::<GeneratedEnvironmentMapLight>();
+        }
     }
 }
 

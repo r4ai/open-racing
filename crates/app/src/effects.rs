@@ -1,15 +1,16 @@
 //! Tyre marks and tyre smoke, driven by the simulated slip and tread temperature at
 //! each contact patch.
 //!
-//! Both are single dynamic meshes rebuilt on the CPU: skid marks are a ring buffer
-//! of quads laid on the road, smoke is a pool of camera-facing billboards. Nothing
-//! here feeds back into the simulation.
+//! Both are dynamic meshes written on the CPU: skid marks are a ring buffer of quads
+//! laid on the road, split into chunks so that a new segment re-uploads only its chunk;
+//! smoke is a pool of camera-facing billboards. Nothing here feeds back into the
+//! simulation.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use open_racing_sim::{Coat, GRAVITY, Surface, TireCondition, WheelTelemetry};
@@ -19,6 +20,8 @@ use crate::scene::to_bevy;
 
 /// Skid mark quads kept before the oldest are overwritten.
 const MARK_CAPACITY: usize = 8192;
+/// Skid mark quads per mesh.
+const MARK_CHUNK: usize = 512;
 /// Minimum distance a contact patch travels before a new mark segment is laid, m.
 const MARK_SEGMENT: f32 = 0.25;
 /// A contact patch jumping further than this in one frame (reset, replay) starts a new trail, m.
@@ -74,34 +77,59 @@ struct TrailEnd {
 
 #[derive(Resource)]
 struct SkidMarks {
-    mesh: Handle<Mesh>,
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
+    /// `MARK_CAPACITY / MARK_CHUNK` meshes of `MARK_CHUNK` quads each.
+    chunks: Vec<Handle<Mesh>>,
     /// Next quad to write.
     next: usize,
     trails: [Option<TrailEnd>; 4],
 }
 
 impl SkidMarks {
-    fn push(&mut self, from: TrailEnd, to: TrailEnd, normal: Vec3) {
-        let v = self.next * 4;
-        let color = |a: f32| [0.02, 0.02, 0.02, a * MARK_OPACITY];
-        for (k, (p, a)) in [
+    fn push(&mut self, meshes: &mut Assets<Mesh>, from: TrailEnd, to: TrailEnd, normal: Vec3) {
+        let (chunk, quad) = (self.next / MARK_CHUNK, self.next % MARK_CHUNK);
+        self.next = (self.next + 1) % MARK_CAPACITY;
+        let Some(mut mesh) = meshes.get_mut(&self.chunks[chunk]) else {
+            return;
+        };
+        let v = quad * 4;
+        let corners = [
             (from.left, from.alpha),
             (from.right, from.alpha),
             (to.left, to.alpha),
             (to.right, to.alpha),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            self.positions[v + k] = p.to_array();
-            self.normals[v + k] = normal.to_array();
-            self.colors[v + k] = color(a);
+        ];
+        let (positions, colors) = attributes(&mut mesh);
+        for (k, (p, a)) in corners.into_iter().enumerate() {
+            positions[v + k] = p.to_array();
+            colors[v + k] = [0.02, 0.02, 0.02, a * MARK_OPACITY];
         }
-        self.next = (self.next + 1) % MARK_CAPACITY;
+        if let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+        {
+            normals[v..v + 4].fill(normal.to_array());
+        }
     }
+}
+
+/// The positions and colours of a mesh made by `dynamic_mesh`, to write in place.
+fn attributes(mesh: &mut Mesh) -> (&mut [[f32; 3]], &mut [[f32; 4]]) {
+    let mut positions = None;
+    let mut colors = None;
+    for (attribute, values) in mesh.attributes_mut() {
+        match values {
+            VertexAttributeValues::Float32x3(v) if attribute.id == Mesh::ATTRIBUTE_POSITION.id => {
+                positions = Some(v.as_mut_slice())
+            }
+            VertexAttributeValues::Float32x4(v) if attribute.id == Mesh::ATTRIBUTE_COLOR.id => {
+                colors = Some(v.as_mut_slice())
+            }
+            _ => {}
+        }
+    }
+    (
+        positions.expect("dynamic mesh has positions"),
+        colors.expect("dynamic mesh has colours"),
+    )
 }
 
 struct Particle {
@@ -119,6 +147,8 @@ struct Particle {
 struct Smoke {
     mesh: Handle<Mesh>,
     particles: Vec<Particle>,
+    /// Particles written to the mesh last frame.
+    drawn: usize,
     /// Fractional particles owed per wheel.
     owed: [f32; 4],
     rng: u32,
@@ -143,15 +173,17 @@ fn quad_indices(quads: usize) -> Indices {
     )
 }
 
+/// `quads` empty quads, each with UVs over the whole texture.
 fn dynamic_mesh(quads: usize) -> Mesh {
     let n = quads * 4;
+    let uvs = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]].repeat(quads);
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n])
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n])
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; n])
     .with_inserted_indices(quad_indices(quads))
 }
@@ -186,24 +218,27 @@ fn spawn(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let marks = meshes.add(dynamic_mesh(MARK_CAPACITY));
-    commands.spawn((
-        Mesh3d(marks.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.95,
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            ..default()
-        })),
-        NoFrustumCulling,
-        NotShadowCaster,
-    ));
+    let mark_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.95,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    });
+    let chunks = (0..MARK_CAPACITY / MARK_CHUNK)
+        .map(|_| {
+            let mesh = meshes.add(dynamic_mesh(MARK_CHUNK));
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mark_material.clone()),
+                NoFrustumCulling,
+                NotShadowCaster,
+            ));
+            mesh
+        })
+        .collect();
     commands.insert_resource(SkidMarks {
-        mesh: marks,
-        positions: vec![[0.0; 3]; MARK_CAPACITY * 4],
-        normals: vec![[0.0, 1.0, 0.0]; MARK_CAPACITY * 4],
-        colors: vec![[0.0; 4]; MARK_CAPACITY * 4],
+        chunks,
         next: 0,
         trails: [None; 4],
     });
@@ -225,6 +260,7 @@ fn spawn(
     commands.insert_resource(Smoke {
         mesh: smoke,
         particles: Vec::with_capacity(SMOKE_CAPACITY),
+        drawn: 0,
         owed: [0.0; 4],
         rng: 0x2545_F491,
     });
@@ -257,7 +293,6 @@ fn update_marks(
     let car = &sim.car;
     let static_load = car.model.params.mass * GRAVITY / 4.0;
     let moving = smoothstep(0.5, 3.0, car.speed());
-    let mut dirty = false;
     for i in 0..4 {
         let w = &car.telemetry.wheels[i];
         let alpha = wheel_slide(w, static_load, moving);
@@ -304,15 +339,9 @@ fn update_marks(
             } else {
                 last
             };
-            marks.push(start, end, normal);
+            marks.push(&mut meshes, start, end, normal);
             marks.trails[i] = Some(end);
-            dirty = true;
         }
-    }
-    if dirty && let Some(mut mesh) = meshes.get_mut(&marks.mesh) {
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, marks.positions.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, marks.normals.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, marks.colors.clone());
     }
 }
 
@@ -411,7 +440,12 @@ fn update_smoke(
         smoke.owed[i] = smoke.owed[i].min(1.0);
     }
 
+    // Nothing to draw and nothing left to clear: leave the mesh as it is.
+    if smoke.particles.is_empty() && smoke.drawn == 0 {
+        return;
+    }
     let Ok(camera) = cameras.single() else { return };
+    let smoke = &mut *smoke;
     let Some(mut mesh) = meshes.get_mut(&smoke.mesh) else {
         return;
     };
@@ -424,12 +458,7 @@ fn update_smoke(
             .total_cmp(&a.pos.distance_squared(eye))
     });
 
-    let n = SMOKE_CAPACITY * 4;
-    let (mut positions, mut uvs, mut colors) = (
-        vec![[0.0f32; 3]; n],
-        vec![[0.0f32; 2]; n],
-        vec![[0.0f32; 4]; n],
-    );
+    let (positions, colors) = attributes(&mut mesh);
     for (q, p) in smoke.particles.iter().enumerate() {
         let t = p.age / p.life;
         let radius = 0.5 * (p.size.0 + (p.size.1 - p.size.0) * (1.0 - (1.0 - t).powi(2)));
@@ -439,21 +468,16 @@ fn update_smoke(
             (right * cos + up * sin) * radius,
             (up * cos - right * sin) * radius,
         );
-        for (k, (corner, uv)) in [
-            (-r + u, [0.0, 0.0]),
-            (r + u, [1.0, 0.0]),
-            (-r - u, [0.0, 1.0]),
-            (r - u, [1.0, 1.0]),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        // In the order of `dynamic_mesh`'s UVs.
+        for (k, corner) in [-r + u, r + u, -r - u, r - u].into_iter().enumerate() {
             positions[4 * q + k] = (p.pos + corner).to_array();
-            uvs[4 * q + k] = uv;
             colors[4 * q + k] = [p.color[0], p.color[1], p.color[2], alpha];
         }
     }
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    // Collapse the quads of particles that have died since the last frame.
+    let live = smoke.particles.len();
+    if smoke.drawn > live {
+        positions[4 * live..4 * smoke.drawn].fill([0.0; 3]);
+    }
+    smoke.drawn = live;
 }
