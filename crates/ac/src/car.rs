@@ -367,6 +367,12 @@ pub fn convert(dir: &Path, options: CarOptions) -> Result<CarConversion, Error> 
         let axis = if axis.x > 0.0 { -axis } else { axis };
         (to_body(node.position), axis)
     });
+    // The wheel nodes' x axes are the axles, tilted by the camber and toe the model shows.
+    let wheel_axles = rig.wheels.map(|w| {
+        let axle = to_body(kn5.dummies[w].world.transform_vector3(DVec3::X)).normalize_or(DVec3::Y);
+        let axle = if axle.y < 0.0 { -axle } else { axle };
+        axle.as_vec3().to_array()
+    });
     let origin = |part: Part| match part {
         Part::Body => cg,
         Part::Wheel(i) | Part::Hub(i) => geometry.centres[i as usize],
@@ -390,6 +396,7 @@ pub fn convert(dir: &Path, options: CarOptions) -> Result<CarConversion, Error> 
                 axis: axis.as_vec3().to_array(),
             }),
             driver_eye: eye,
+            wheel_axles: Some(wheel_axles),
             ..visual
         }),
     };
@@ -461,6 +468,7 @@ fn build_visual(
         visual,
         steering_wheel: None,
         driver_eye: None,
+        wheel_axles: None,
     }
 }
 
@@ -631,6 +639,9 @@ mod tests {
                 .iter()
                 .all(|q| (q[0].hypot(q[2]) - 0.33).abs() < 1e-5)
         );
+
+        // Untilted wheel nodes spin about y.
+        assert_eq!(v.wheel_axles, Some([[0.0, 1.0, 0.0]; 4]));
 
         // The column points back to the driver, and the eyes sit behind and above the wheel.
         let s = v.steering_wheel.unwrap();

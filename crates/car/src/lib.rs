@@ -84,8 +84,8 @@ pub fn list() -> Vec<String> {
 pub enum Part {
     /// Fixed to the body. Relative to the centre of gravity at static ride height.
     Body,
-    /// A wheel: rim and tyre, which spin about the axle (y), steer and follow the
-    /// suspension. Relative to the wheel centre. The index is the simulation's wheel order:
+    /// A wheel: rim and tyre, which spin about the axle (`CarVisual::wheel_axles`, else
+    /// y), steer and follow the suspension. Relative to the wheel centre. The index is the simulation's wheel order:
     /// front-left, front-right, rear-left, rear-right.
     Wheel(u8),
     /// What steers and follows the suspension with a wheel without spinning, such as
@@ -116,6 +116,9 @@ pub struct CarVisual {
     pub steering_wheel: Option<SteeringWheel>,
     /// The driver's eye point relative to the centre of gravity, for the cockpit view.
     pub driver_eye: Option<[f32; 3]>,
+    /// Each wheel's axle as modelled, a unit vector pointing left: models may tilt the
+    /// wheels by their camber and toe, and a wheel spun about y would then wobble.
+    pub wheel_axles: Option<[[f32; 3]; 4]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +127,8 @@ struct Manifest {
     mesh_parts: Vec<Part>,
     steering_wheel: Option<SteeringWheel>,
     driver_eye: Option<[f32; 3]>,
+    #[serde(default)]
+    wheel_axles: Option<[[f32; 3]; 4]>,
 }
 
 impl CarVisual {
@@ -215,6 +220,7 @@ impl CarPackage {
             mesh_parts: manifest.mesh_parts,
             steering_wheel: manifest.steering_wheel,
             driver_eye: manifest.driver_eye,
+            wheel_axles: manifest.wheel_axles,
         };
         visual.validate()?;
         Ok(Some(visual))
@@ -239,6 +245,7 @@ impl CarPackage {
                         mesh_parts: v.mesh_parts.clone(),
                         steering_wheel: v.steering_wheel,
                         driver_eye: v.driver_eye,
+                        wheel_axles: v.wheel_axles,
                     },
                 )?;
             }
@@ -294,6 +301,7 @@ mod tests {
                     axis: [-1.0, 0.0, 0.0],
                 }),
                 driver_eye: Some([-0.2, 0.3, 0.5]),
+                wheel_axles: Some([[0.0, 0.998, 0.061]; 4]),
             }),
         }
     }

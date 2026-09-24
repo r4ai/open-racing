@@ -50,6 +50,10 @@ struct CarBody;
 #[derive(Component)]
 struct CarWheel(usize);
 
+/// The axles of a car model's wheels (see `CarVisual::wheel_axles`), in body axes.
+#[derive(Resource, Clone, Copy)]
+struct WheelAxles([DVec3; 4]);
+
 /// What steers and follows the suspension with a wheel without spinning.
 #[derive(Component)]
 struct CarHub(usize);
@@ -455,6 +459,10 @@ fn spawn_car_model(
             entity.insert(NotShadowCaster);
         }
     }
+    let axles = car.wheel_axles.map_or([DVec3::Y; 4], |a| {
+        a.map(|[x, y, z]| DVec3::new(x.into(), y.into(), z.into()))
+    });
+    commands.insert_resource(WheelAxles(axles));
     if let Some([x, y, z]) = car.driver_eye {
         commands.insert_resource(DriverEye(DVec3::new(x.into(), y.into(), z.into())));
     }
@@ -463,6 +471,7 @@ fn spawn_car_model(
 #[allow(clippy::type_complexity)]
 fn update_car(
     sim: Res<Simulation>,
+    axles: Option<Res<WheelAxles>>,
     mut bodies: Query<&mut Transform, (With<CarBody>, Without<CarWheel>, Without<CarHub>)>,
     mut wheels: Query<(&CarWheel, &mut Transform), (Without<CarBody>, Without<CarHub>)>,
     mut hubs: Query<(&CarHub, &mut Transform), (Without<CarBody>, Without<CarWheel>)>,
@@ -478,14 +487,16 @@ fn update_car(
     }
     let car = &sim.car;
     // Wheel centre and orientation in the world: steered about z, then, if it spins,
-    // turned about the axle (+y; rolling forward is a positive rotation in ISO coordinates).
+    // turned about the axle (about +y; rolling forward is a positive rotation in ISO
+    // coordinates).
+    let axles = axles.map_or([DVec3::Y; 4], |a| a.0);
     let wheel = |i: usize, spin: bool| {
         let corner = &car.model.corners[i];
         let w = &car.state.wheels[i];
         let local = corner.hardpoint - DVec3::Z * w.extension;
         let steer = car.telemetry.wheels[i].steer;
         let angle = if spin { w.angle } else { 0.0 };
-        let q = rot * DQuat::from_rotation_z(steer) * DQuat::from_rotation_y(angle);
+        let q = rot * DQuat::from_rotation_z(steer) * DQuat::from_axis_angle(axles[i], angle);
         (to_bevy(pos + rot * local), quat_to_bevy(q))
     };
     for (w, mut t) in &mut wheels {
