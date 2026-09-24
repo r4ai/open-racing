@@ -5,6 +5,7 @@
 //! - Force feedback: the base's peak torque, strength, maximum output in N·m, road
 //!   detail, effects, damping and direction, with a test push.
 //! - Track: the rubber on the racing line to start from and how fast it builds up.
+//! - Graphics: a quality preset, anti-aliasing, shadows and distance haze.
 //!
 //! The simulation is paused while the screen is open.
 
@@ -19,6 +20,7 @@ use open_racing_sim::TrackCondition;
 use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, Reported, Source};
 use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
+use crate::graphics::{AntiAliasing, GraphicsSettings, Preset, Shadows};
 use crate::input::InputSelection;
 
 /// Smallest movement over which an axis counts as moved when it is assigned.
@@ -50,7 +52,23 @@ enum Page {
     Input,
     ForceFeedback,
     Track,
+    Graphics,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum GraphicsRow {
+    Preset,
+    AntiAliasing,
+    Shadows,
+    Fog,
+}
+
+const GRAPHICS_ROWS: [GraphicsRow; 4] = [
+    GraphicsRow::Preset,
+    GraphicsRow::AntiAliasing,
+    GraphicsRow::Shadows,
+    GraphicsRow::Fog,
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum TrackRow {
@@ -142,7 +160,13 @@ impl Plugin for SettingsPlugin {
                 Update,
                 (
                     toggle,
-                    (switch_page, navigate, navigate_ffb, navigate_track)
+                    (
+                        switch_page,
+                        navigate,
+                        navigate_ffb,
+                        navigate_track,
+                        navigate_graphics,
+                    )
                         .chain()
                         .run_if(|o: Res<SettingsOpen>| o.0),
                     listen,
@@ -199,7 +223,8 @@ fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
         screen.page = match screen.page {
             Page::Input => Page::ForceFeedback,
             Page::ForceFeedback => Page::Track,
-            Page::Track => Page::Input,
+            Page::Track => Page::Graphics,
+            Page::Graphics => Page::Input,
         };
         screen.row = 0;
         screen.message.clear();
@@ -261,6 +286,52 @@ fn navigate_ffb(
         _ => {}
     }
     if *settings != before {
+        settings.save();
+    }
+}
+
+/// The option before (`left`) or after `current` in `all`, wrapping around.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, left: bool) -> T {
+    let i = all.iter().position(|&x| x == current).unwrap_or(0);
+    let n = all.len();
+    all[if left { (i + n - 1) % n } else { (i + 1) % n }]
+}
+
+fn navigate_graphics(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut settings: ResMut<GraphicsSettings>,
+) {
+    if screen.page != Page::Graphics {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, GRAPHICS_ROWS.len());
+    let (left, right) = (
+        keys.just_pressed(KeyCode::ArrowLeft),
+        keys.just_pressed(KeyCode::ArrowRight),
+    );
+    if left == right && !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+    let mut s = *settings;
+    match GRAPHICS_ROWS[screen.row] {
+        GraphicsRow::Preset => {
+            // From custom settings, Left and Right both start at the nearest ends.
+            let preset = s
+                .preset()
+                .map_or(if left { Preset::High } else { Preset::Low }, |p| {
+                    cycle(&Preset::ALL, p, left)
+                });
+            s = preset.settings();
+        }
+        GraphicsRow::AntiAliasing => {
+            s.anti_aliasing = cycle(&AntiAliasing::ALL, s.anti_aliasing, left);
+        }
+        GraphicsRow::Shadows => s.shadows = cycle(&Shadows::ALL, s.shadows, left),
+        GraphicsRow::Fog => s.fog = !s.fog,
+    }
+    if s != *settings {
+        *settings = s;
         settings.save();
     }
 }
@@ -467,6 +538,7 @@ fn render(
     selection: Res<InputSelection>,
     ffb_settings: Res<FfbSettings>,
     ffb_status: Res<FfbStatus>,
+    graphics: Res<GraphicsSettings>,
     sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
@@ -484,17 +556,54 @@ fn render(
         return;
     }
     let tabs = match screen.page {
-        Page::Input => "[INPUT]  force feedback   track ",
-        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track ",
-        Page::Track => " input   force feedback  [TRACK]",
+        Page::Input => "[INPUT]  force feedback   track   graphics ",
+        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   graphics ",
+        Page::Track => " input   force feedback  [TRACK]  graphics ",
+        Page::Graphics => " input   force feedback   track  [GRAPHICS]",
     };
     let mut s = format!("{tabs}   (Tab page, simulation paused)            Esc close\n\n");
     match screen.page {
         Page::Input => render_input(&mut s, &screen, &bindings, &reported, *selection, &pads),
         Page::ForceFeedback => render_ffb(&mut s, &screen, &ffb_settings, &ffb_status),
         Page::Track => render_track(&mut s, &screen, &sim),
+        Page::Graphics => render_graphics(&mut s, &screen, &graphics),
     }
     text.0 = s;
+}
+
+fn render_graphics(s: &mut String, screen: &Screen, settings: &GraphicsSettings) {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    for (i, row) in GRAPHICS_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let line = match row {
+            GraphicsRow::Preset => format!(
+                "{:<14} {:<8} (Left/Right; sets everything below)",
+                "Quality",
+                settings.preset().map_or("custom", Preset::name)
+            ),
+            GraphicsRow::AntiAliasing => format!(
+                "{:<14} {:<8} (Left/Right; smooths jagged edges, MSAA sharpest)",
+                "Anti-aliasing",
+                settings.anti_aliasing.name()
+            ),
+            GraphicsRow::Shadows => format!(
+                "{:<14} {:<8} (Left/Right; sharpness and reach of shadows)",
+                "Shadows",
+                settings.shadows.name()
+            ),
+            GraphicsRow::Fog => format!(
+                "{:<14} {:<8} (Enter; haze over distant scenery)",
+                "Haze",
+                on_off(settings.fog)
+            ),
+        };
+        let _ = writeln!(s, "{cursor} {line}");
+    }
+    let _ = writeln!(
+        s,
+        "
+Lower settings raise the frame rate on slower GPUs."
+    );
 }
 
 fn render_track(s: &mut String, screen: &Screen, sim: &Simulation) {

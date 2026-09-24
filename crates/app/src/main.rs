@@ -8,6 +8,7 @@ mod capture;
 mod driving;
 mod effects;
 mod ffb;
+mod graphics;
 mod hud;
 mod input;
 mod scene;
@@ -97,6 +98,7 @@ fn main() {
             effects::EffectsPlugin,
             settings::SettingsPlugin,
             ffb::FfbPlugin,
+            graphics::GraphicsPlugin,
             tyre_dirt::TyreDirtPlugin,
         ));
     driving::install_policy(&mut app, &args);

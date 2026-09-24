@@ -172,7 +172,7 @@ pub fn add_materials(
     let sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
-        anisotropy_clamp: 8,
+        anisotropy_clamp: 16,
         ..ImageSamplerDescriptor::linear()
     });
     let n = visual.textures.len();
