@@ -263,14 +263,15 @@ impl Env {
         let speed = self.car.speed();
         let forward = st.orientation * DVec3::X;
         let heading_cos = q
+            .sample
             .tangent
             .truncate()
             .normalize()
             .dot(forward.truncate().normalize());
         let half_width = if q.d >= 0.0 {
-            q.width_left
+            q.sample.width_left
         } else {
-            q.width_right
+            q.sample.width_right
         };
         let wheels_off = self
             .car

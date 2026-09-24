@@ -306,7 +306,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
         }
         if let Some(file) = &mut trace {
             let car = env.cars().next().expect("one car");
-            let q = spec.track.query(
+            let q = spec.track.locate(
                 car.state.position,
                 spec.track.nearest_index(car.state.position),
             );
@@ -355,8 +355,8 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
                 grips[2],
                 grips[3],
                 wheels_off,
-                q.width_left,
-                q.width_right,
+                q.sample.width_left,
+                q.sample.width_right,
             )
             .unwrap();
         }
@@ -396,7 +396,7 @@ fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize, safe_start: bo
         for (e, pos) in before.iter().enumerate() {
             if r.terminated[e] != 0 {
                 crashes += 1;
-                crashes_at[(track.query(*pos, track.nearest_index(*pos)).s / BIN) as usize] += 1;
+                crashes_at[(track.locate(*pos, track.nearest_index(*pos)).s / BIN) as usize] += 1;
             }
         }
         for (_, stats) in env.finished_episodes() {

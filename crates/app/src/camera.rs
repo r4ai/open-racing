@@ -151,7 +151,7 @@ fn follow(
         }
         CameraMode::Tv => {
             let track = &sim.track;
-            let s = track.query(pos, sim.lap.hint()).s;
+            let s = track.locate(pos, sim.lap.hint()).s;
             let slot = ((s + 0.5 * TV_SPACING) / TV_SPACING).floor() * TV_SPACING;
             let smp = track.sample_at(slot);
             let side = if smp.curvature >= 0.0 { -1.0 } else { 1.0 }; // outside of the corner

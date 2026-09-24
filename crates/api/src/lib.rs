@@ -365,7 +365,7 @@ impl AgentDriver {
     /// Call once per physics step, before `Car::step`.
     pub fn controls(&mut self, policy: &mut dyn Policy, car: &Car, track: &Track) -> Controls {
         if self.countdown == 0 {
-            self.hint = track.query(car.state.position, self.hint).index;
+            self.hint = track.locate(car.state.position, self.hint).index;
             open_racing_env::obs::encode(
                 &self.config.obs_layout(),
                 car,

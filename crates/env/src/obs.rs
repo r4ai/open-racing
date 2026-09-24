@@ -110,14 +110,15 @@ pub fn encode(
     let inv = st.orientation.inverse();
     let v = inv * st.velocity;
     let tel = &car.telemetry;
-    let q = track.query(st.position, hint);
+    let q = track.locate(st.position, hint);
     let forward = st.orientation * DVec3::X;
-    let heading_sin = q.tangent.truncate().perp_dot(forward.truncate());
-    let heading_cos = q.tangent.truncate().dot(forward.truncate());
+    let tangent = q.sample.tangent.truncate();
+    let heading_sin = tangent.perp_dot(forward.truncate());
+    let heading_cos = tangent.dot(forward.truncate());
     let half_width = if q.d >= 0.0 {
-        q.width_left
+        q.sample.width_left
     } else {
-        q.width_right
+        q.sample.width_right
     };
 
     let mut o = Writer { out, i: 0 };

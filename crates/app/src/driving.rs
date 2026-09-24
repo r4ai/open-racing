@@ -120,7 +120,10 @@ impl Simulation {
 
     /// Puts the car back on the centreline at the nearest point, at rest.
     fn reset_car(&mut self) {
-        let s = self.track.query(self.car.state.position, self.lap.hint()).s;
+        let s = self
+            .track
+            .locate(self.car.state.position, self.lap.hint())
+            .s;
         self.car.reset(&self.track, s, 0.0, 0.0, 1);
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
