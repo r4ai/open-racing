@@ -54,6 +54,30 @@ pub fn prepare(encoded: &[u8], mips: Mips) -> Result<Vec<u8>, String> {
         .unwrap_or_else(|| encoded.to_vec()))
 }
 
+/// Drops the top mip levels of a block-compressed DDS until neither side exceeds
+/// `max_size` texels. Textures without those levels stored, and other formats, are
+/// returned unchanged.
+pub fn limit_size(dds: Vec<u8>, max_size: usize) -> Vec<u8> {
+    let Ok(Some(Source::Blocks {
+        format,
+        width,
+        height,
+        levels,
+    })) = parse_dds(&dds)
+    else {
+        return dds;
+    };
+    let mut top = 0;
+    while width.max(height) >> top > max_size && top + 1 < levels.len() {
+        top += 1;
+    }
+    if top == 0 {
+        return dds;
+    }
+    let (w, h) = level_size(width, height, top);
+    write_dds(format, w, h, &levels[top..])
+}
+
 /// Decodes the top level of a texture that `prepare` handles.
 pub fn decode(encoded: &[u8]) -> Result<Image, String> {
     match parse(encoded)? {
@@ -88,6 +112,7 @@ fn parse(encoded: &[u8]) -> Result<Option<Source>, String> {
 /// Encodes `source` with the mip levels `mips` asks for; `None` when a block-compressed
 /// source already has them.
 fn finish(source: Source, mips: Mips) -> Option<Vec<u8>> {
+    let source = whole_blocks(source);
     let alpha_test = match mips {
         Mips::AlphaTest(c) if c > 0.0 && c < 1.0 => Some(c),
         _ => None,
@@ -142,6 +167,52 @@ fn finish(source: Source, mips: Mips) -> Option<Vec<u8>> {
         levels.push(compress(format, &image));
     }
     Some(write_dds(format, width, height, &levels))
+}
+
+/// A block-compressed texture's sides must be whole blocks: GPUs size its mip levels from
+/// the rounded-up top level. Other sizes are resampled to the next multiple of 4.
+fn whole_blocks(source: Source) -> Source {
+    let (width, height) = match &source {
+        Source::Blocks { width, height, .. } => (*width, *height),
+        Source::Pixels(image) => (image.width, image.height),
+    };
+    let fit = |n: usize| n.div_ceil(4) * 4;
+    if (fit(width), fit(height)) == (width, height) {
+        return source;
+    }
+    let top = match source {
+        Source::Blocks { format, levels, .. } => decode_blocks(format, &levels[0], width, height),
+        Source::Pixels(image) => image,
+    };
+    Source::Pixels(resample(&top, fit(width), fit(height)))
+}
+
+/// Bilinear resampling to `width` × `height`, texel centres aligned.
+fn resample(src: &Image, width: usize, height: usize) -> Image {
+    let mut pixels = vec![0; width * height * 4];
+    let coord = |i: usize, dst: usize, src: usize| {
+        let f = ((i as f32 + 0.5) * src as f32 / dst as f32 - 0.5).clamp(0.0, (src - 1) as f32);
+        let i0 = f.floor() as usize;
+        (i0, (i0 + 1).min(src - 1), f - i0 as f32)
+    };
+    for y in 0..height {
+        let (y0, y1, fy) = coord(y, height, src.height);
+        for x in 0..width {
+            let (x0, x1, fx) = coord(x, width, src.width);
+            let at =
+                |x: usize, y: usize, c: usize| f32::from(src.pixels[(y * src.width + x) * 4 + c]);
+            for c in 0..4 {
+                let top = at(x0, y0, c) * (1.0 - fx) + at(x1, y0, c) * fx;
+                let bottom = at(x0, y1, c) * (1.0 - fx) + at(x1, y1, c) * fx;
+                pixels[(y * width + x) * 4 + c] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+    }
+    Image {
+        width,
+        height,
+        pixels,
+    }
 }
 
 fn mip_count(width: usize, height: usize) -> usize {
@@ -397,6 +468,50 @@ mod tests {
             } => (format, width, height, levels.len()),
             Source::Pixels(_) => panic!("expected blocks"),
         }
+    }
+
+    #[test]
+    fn sides_become_whole_blocks() {
+        let odd = Image {
+            width: 6,
+            height: 3,
+            pixels: [10, 20, 30, 255].repeat(18),
+        };
+        let out = finish(Source::Pixels(odd.clone()), Mips::Complete).unwrap();
+        assert_eq!(levels_of(&out), (Format::Bc1, 8, 4, 4));
+        // Resampling keeps a flat colour.
+        let top = decode(&out).unwrap();
+        assert!(
+            top.pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[0].abs_diff(10) <= 4)
+        );
+        // Block sources are resampled too, so a source-only chain still fits.
+        let dds = write_dds(Format::Bc1, 6, 3, &[compress(Format::Bc1, &odd)]);
+        assert_eq!(
+            levels_of(&prepare(&dds, Mips::Source).unwrap()),
+            (Format::Bc1, 8, 4, 1)
+        );
+    }
+
+    #[test]
+    fn large_textures_lose_their_top_levels() {
+        let dds = encode(checker(64, false));
+        assert_eq!(
+            levels_of(&limit_size(dds.clone(), 16)),
+            (Format::Bc1, 16, 16, 5)
+        );
+        assert_eq!(limit_size(dds.clone(), 64), dds);
+        // A single level cannot shrink.
+        let one = write_dds(
+            Format::Bc1,
+            64,
+            64,
+            &[compress(Format::Bc1, &checker(64, false))],
+        );
+        assert_eq!(limit_size(one.clone(), 16), one);
     }
 
     #[test]

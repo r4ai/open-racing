@@ -241,12 +241,24 @@ enum Prepared {
 /// Prepared textures, shared across the models of a track so each is prepared and
 /// added once.
 #[derive(Default)]
-pub struct TextureCache(HashMap<CacheKey, Prepared>);
+pub struct TextureCache {
+    prepared: HashMap<CacheKey, Prepared>,
+    /// Largest texture edge in texels, where the texture has smaller mip levels.
+    max_size: Option<usize>,
+}
 
 impl TextureCache {
+    /// A cache whose textures keep at most `max_size` texels along each edge.
+    pub fn with_max_size(max_size: usize) -> Self {
+        Self {
+            max_size: Some(max_size),
+            ..Default::default()
+        }
+    }
+
     /// Package index of a prepared texture, moving it into the package on first use.
     fn index(&mut self, key: &CacheKey, visual: &mut VisualBuilder) -> Option<u32> {
-        let entry = self.0.get_mut(key)?;
+        let entry = self.prepared.get_mut(key)?;
         if let Prepared::Ready(data) = entry {
             *entry = Prepared::Added(visual.add_texture(Texture {
                 data: std::mem::take(data),
@@ -288,28 +300,42 @@ impl<'a> Materials<'a> {
                 };
                 let key = cache_key(&t.data, job);
                 textures.insert((name.to_ascii_lowercase(), job.key()), key);
-                if !cache.0.contains_key(&key) {
+                if !cache.prepared.contains_key(&key) {
                     missing.insert(key, (name, &t.data, job));
                 }
             }
         }
+        let max_size = cache.max_size;
         let prepared: Vec<_> = missing
             .into_par_iter()
             .map(|(key, (name, data, job))| match job.run(data) {
-                Ok(out) => (key, Prepared::Ready(out)),
+                Ok(out) => {
+                    let out = match max_size {
+                        Some(max) => texture::limit_size(out, max),
+                        None => out,
+                    };
+                    (key, Prepared::Ready(out))
+                }
                 Err(e) => {
                     eprintln!("warning: texture {name}: {e}");
                     (key, Prepared::Failed)
                 }
             })
             .collect();
-        cache.0.extend(prepared);
+        cache.prepared.extend(prepared);
         Self {
             kn5,
             textures,
             added: vec![None; kn5.materials.len()],
             fallback: None,
         }
+    }
+
+    /// Makes `get` add new package materials from here on, so that meshes added after this
+    /// never share a material, and so a batch, with meshes added before.
+    pub fn start_group(&mut self) {
+        self.added.fill(None);
+        self.fallback = None;
     }
 
     pub fn get(

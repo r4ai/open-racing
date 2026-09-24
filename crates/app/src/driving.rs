@@ -45,6 +45,10 @@ impl Recording {
 #[derive(Resource, Default)]
 pub struct TrackModel(pub Option<open_racing_track::Visual>);
 
+/// 3D model of a car package, taken by the scene when it spawns.
+#[derive(Resource, Default)]
+pub struct CarModelVisual(pub Option<open_racing_car::CarVisual>);
+
 #[derive(Resource)]
 pub struct Simulation {
     pub track: Arc<Track>,
@@ -65,11 +69,12 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    /// Also returns the track's 3D model, if it has one, for the scene to spawn.
-    pub fn new(args: &Args) -> Result<(Self, TrackModel), open_racing_api::Error> {
+    /// Also returns the track's and the car's 3D models, where they have one, for the
+    /// scene to spawn.
+    pub fn new(args: &Args) -> Result<(Self, TrackModel, CarModelVisual), open_racing_api::Error> {
         let (track, model) =
             open_racing_api::load_track_with_visual(args.track.as_deref().unwrap_or("lakeside"))?;
-        let car_model = open_racing_api::load_car(&args.car)?;
+        let (car_model, car_visual) = open_racing_api::load_car_with_visual(&args.car)?;
         let spec = EnvSpec::new(track, car_model, Default::default());
         let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
         let sim = Self {
@@ -86,7 +91,7 @@ impl Simulation {
             ffb_torque: 0.0,
             spec,
         };
-        Ok((sim, TrackModel(model)))
+        Ok((sim, TrackModel(model), CarModelVisual(car_visual)))
     }
 
     /// Body pose interpolated between the last two physics states.

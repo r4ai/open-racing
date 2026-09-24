@@ -60,7 +60,7 @@ impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8], magic: &[u8; 4], version: u32, what: &str) -> Result<Self, Error> {
         if !buf.starts_with(magic) {
             return Err(Error::Format(format!(
-                "{what}: not an open-racing track file"
+                "{what}: not an open-racing package file"
             )));
         }
         let mut r = Self {
@@ -70,7 +70,7 @@ impl<'a> Reader<'a> {
         let found = r.u32()?;
         if found != version {
             return Err(Error::Format(format!(
-                "{what}: format version {found}, expected {version}; convert the track again"
+                "{what}: format version {found}, expected {version}; convert it again"
             )));
         }
         Ok(r)

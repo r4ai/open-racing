@@ -27,7 +27,7 @@ pub struct Args {
     /// policy was trained on, otherwise lakeside.
     #[arg(long)]
     pub track: Option<String>,
-    /// Car name (assets/cars/<name>.ron) or path.
+    /// Car name (assets/cars/<name>.ron, or a car package in <content>/cars/) or path.
     #[arg(long, default_value = "gt3")]
     pub car: String,
     /// Directory of a trained policy to watch (toggle with T).
@@ -43,7 +43,7 @@ fn main() {
     if args.track.is_none() {
         args.track = driving::policy_track(&args);
     }
-    let (sim, track_model) = driving::Simulation::new(&args).unwrap_or_else(|e| {
+    let (sim, track_model, car_model) = driving::Simulation::new(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
@@ -60,6 +60,7 @@ fn main() {
     .insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
     .insert_resource(sim)
     .insert_resource(track_model)
+    .insert_resource(car_model)
     .insert_resource(args.clone())
     .add_plugins((
         input::InputPlugin,

@@ -1,17 +1,19 @@
 //! Track geometry and car visuals generated from the simulation data.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::light::GeneratedEnvironmentMapLight;
+use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats};
+use bevy::light::{GeneratedEnvironmentMapLight, NotShadowCaster};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
 use glam::{DQuat, DVec3};
+use open_racing_car::{CarVisual, Part};
 use open_racing_sim::Track;
 
-use crate::driving::{Simulation, TrackModel};
-use crate::track_model::{self, TrackModelPlugin};
+use crate::driving::{CarModelVisual, Simulation, TrackModel};
+use crate::track_model::{self, TrackMaterial, TrackModelPlugin};
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
 pub fn to_bevy(v: DVec3) -> Vec3 {
@@ -47,6 +49,19 @@ struct CarBody;
 
 #[derive(Component)]
 struct CarWheel(usize);
+
+/// What steers and follows the suspension with a wheel without spinning.
+#[derive(Component)]
+struct CarHub(usize);
+
+/// The steering wheel of a car model, turning about this axis of the body (Bevy axes).
+#[derive(Component)]
+struct CarSteeringWheel(Vec3);
+
+/// The driver's eye point in the body frame (ISO axes), for the cockpit camera, when the
+/// car's model gives one.
+#[derive(Resource)]
+pub struct DriverEye(pub DVec3);
 
 /// Edge of the sky cube map's faces, in texels. The sky is a smooth gradient.
 const SKY_MAP_SIZE: u32 = 64;
@@ -287,12 +302,24 @@ fn spawn_track(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_car(
     mut commands: Commands,
     sim: Res<Simulation>,
+    mut model: ResMut<CarModelVisual>,
+    formats: Option<Res<CompressedImageFormatSupport>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut model_materials: ResMut<Assets<TrackMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
+    if let Some(visual) = model.0.take() {
+        let formats = formats.map_or(CompressedImageFormats::BC, |f| f.0);
+        let mats =
+            track_model::add_materials(&visual.visual, formats, &mut model_materials, &mut images);
+        spawn_car_model(&mut commands, visual, &mats, &mut meshes);
+        return;
+    }
     let p = &sim.car.model.params;
     let paint = materials.add(StandardMaterial {
         base_color: Color::srgb(0.95, 0.45, 0.05),
@@ -377,10 +404,72 @@ fn spawn_car(
     }
 }
 
+/// Spawns a car package's model: the body's meshes on the body, the wheels' and hubs'
+/// on entities that follow the simulated wheels, and the steering wheel on the body,
+/// turning with the steering.
+fn spawn_car_model(
+    commands: &mut Commands,
+    car: CarVisual,
+    materials: &[Handle<TrackMaterial>],
+    meshes: &mut Assets<Mesh>,
+) {
+    // As `to_bevy`, in f32.
+    let bevy = |[x, y, z]: [f32; 3]| Vec3::new(x, z, -y);
+    let body = commands
+        .spawn((CarBody, Transform::default(), Visibility::default()))
+        .id();
+    let wheels: [Entity; 4] = std::array::from_fn(|i| {
+        commands
+            .spawn((CarWheel(i), Transform::default(), Visibility::default()))
+            .id()
+    });
+    let hubs: [Entity; 4] = std::array::from_fn(|i| {
+        commands
+            .spawn((CarHub(i), Transform::default(), Visibility::default()))
+            .id()
+    });
+    let steering = car.steering_wheel.map(|s| {
+        commands
+            .spawn((
+                CarSteeringWheel(bevy(s.axis)),
+                Transform::from_translation(bevy(s.pivot)),
+                Visibility::default(),
+                ChildOf(body),
+            ))
+            .id()
+    });
+    for (m, part) in car.visual.meshes.into_iter().zip(car.mesh_parts) {
+        let parent = match part {
+            Part::Body => body,
+            Part::Wheel(i) => wheels[i as usize],
+            Part::Hub(i) => hubs[i as usize],
+            Part::SteeringWheel => steering.unwrap_or(body),
+        };
+        let (material, cast_shadows) = (materials[m.material as usize].clone(), m.cast_shadows);
+        let mut entity = commands.spawn((
+            Mesh3d(meshes.add(track_model::to_mesh(m))),
+            MeshMaterial3d(material),
+            ChildOf(parent),
+        ));
+        if !cast_shadows {
+            entity.insert(NotShadowCaster);
+        }
+    }
+    if let Some([x, y, z]) = car.driver_eye {
+        commands.insert_resource(DriverEye(DVec3::new(x.into(), y.into(), z.into())));
+    }
+}
+
+#[allow(clippy::type_complexity)]
 fn update_car(
     sim: Res<Simulation>,
-    mut bodies: Query<&mut Transform, (With<CarBody>, Without<CarWheel>)>,
-    mut wheels: Query<(&CarWheel, &mut Transform), Without<CarBody>>,
+    mut bodies: Query<&mut Transform, (With<CarBody>, Without<CarWheel>, Without<CarHub>)>,
+    mut wheels: Query<(&CarWheel, &mut Transform), (Without<CarBody>, Without<CarHub>)>,
+    mut hubs: Query<(&CarHub, &mut Transform), (Without<CarBody>, Without<CarWheel>)>,
+    mut steering: Query<
+        (&CarSteeringWheel, &mut Transform),
+        (Without<CarBody>, Without<CarWheel>, Without<CarHub>),
+    >,
 ) {
     let (pos, rot) = sim.body_pose();
     for mut t in &mut bodies {
@@ -388,16 +477,26 @@ fn update_car(
         t.rotation = quat_to_bevy(rot);
     }
     let car = &sim.car;
-    for (wheel, mut t) in &mut wheels {
-        let i = wheel.0;
+    // Wheel centre and orientation in the world: steered about z, then, if it spins,
+    // turned about the axle (+y; rolling forward is a positive rotation in ISO coordinates).
+    let wheel = |i: usize, spin: bool| {
         let corner = &car.model.corners[i];
         let w = &car.state.wheels[i];
         let local = corner.hardpoint - DVec3::Z * w.extension;
         let steer = car.telemetry.wheels[i].steer;
-        // Wheel orientation in the body: steer about z, then spin about the axle (+y;
-        // rolling forward is a positive rotation in ISO coordinates).
-        let q = rot * DQuat::from_rotation_z(steer) * DQuat::from_rotation_y(w.angle);
-        t.translation = to_bevy(pos + rot * local);
-        t.rotation = quat_to_bevy(q);
+        let angle = if spin { w.angle } else { 0.0 };
+        let q = rot * DQuat::from_rotation_z(steer) * DQuat::from_rotation_y(angle);
+        (to_bevy(pos + rot * local), quat_to_bevy(q))
+    };
+    for (w, mut t) in &mut wheels {
+        (t.translation, t.rotation) = wheel(w.0, true);
+    }
+    for (h, mut t) in &mut hubs {
+        (t.translation, t.rotation) = wheel(h.0, false);
+    }
+    let lock = car.model.params.steering.lock;
+    let angle = sim.controls.steer_wheel_angle.clamp(-lock, lock) as f32;
+    for (s, mut t) in &mut steering {
+        t.rotation = Quat::from_axis_angle(s.0, angle);
     }
 }

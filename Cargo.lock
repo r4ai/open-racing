@@ -6796,6 +6796,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "glam 0.33.8",
+ "open-racing-car",
  "open-racing-sim",
  "open-racing-track",
  "rayon",
@@ -6805,6 +6806,7 @@ dependencies = [
 name = "open-racing-api"
 version = "0.1.0"
 dependencies = [
+ "open-racing-car",
  "open-racing-env",
  "open-racing-sim",
  "open-racing-track",
@@ -6818,6 +6820,7 @@ dependencies = [
  "clap",
  "glam 0.33.8",
  "open-racing-api",
+ "open-racing-car",
  "open-racing-sim",
  "open-racing-track",
  "open-racing-train-burn",
@@ -6825,6 +6828,16 @@ dependencies = [
  "ron",
  "serde",
  "windows",
+]
+
+[[package]]
+name = "open-racing-car"
+version = "0.1.0"
+dependencies = [
+ "open-racing-sim",
+ "open-racing-track",
+ "ron",
+ "serde",
 ]
 
 [[package]]

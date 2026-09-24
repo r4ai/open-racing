@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/ac", "crates/train-burn", "crates/app"]
-default-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/ac"]
+members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/train-burn", "crates/app"]
+default-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ open-racing-sim = { path = "crates/sim" }
 open-racing-env = { path = "crates/env" }
 open-racing-api = { path = "crates/api" }
 open-racing-track = { path = "crates/track" }
+open-racing-car = { path = "crates/car" }
 open-racing-ac = { path = "crates/ac" }
 glam = { version = "0.33", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

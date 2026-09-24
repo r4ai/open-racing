@@ -9,3 +9,4 @@ license.workspace = true
 open-racing-sim.workspace = true
 open-racing-env.workspace = true
 open-racing-track.workspace = true
+open-racing-car.workspace = true

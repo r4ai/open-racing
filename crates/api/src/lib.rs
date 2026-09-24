@@ -69,6 +69,7 @@ pub enum Error {
     Track(open_racing_sim::TrackError),
     Car(open_racing_sim::ParamsError),
     Package(open_racing_track::Error),
+    CarPackage(open_racing_car::Error),
     NotFound(PathBuf),
 }
 
@@ -78,6 +79,7 @@ impl std::fmt::Display for Error {
             Self::Track(e) => e.fmt(f),
             Self::Car(e) => e.fmt(f),
             Self::Package(e) => e.fmt(f),
+            Self::CarPackage(e) => e.fmt(f),
             Self::NotFound(p) => write!(f, "asset not found: {}", p.display()),
         }
     }
@@ -141,14 +143,50 @@ fn load_track_and_model(
     ))
 }
 
-/// Loads a car by name (`assets/cars/<name>.ron`) or by path.
+/// Loads a car by name (`assets/cars/<name>.ron` or the package `<content>/cars/<name>/`),
+/// or by path to either.
 pub fn load_car(name_or_path: &str) -> Result<CarModel, Error> {
-    CarModel::load(resolve("cars", name_or_path)?).map_err(Error::Car)
+    let file = match car_package(name_or_path) {
+        Some(dir) => open_racing_car::physics_path(&dir),
+        None => resolve("cars", name_or_path)?,
+    };
+    CarModel::load(file).map_err(Error::Car)
 }
 
-/// Names of the tracks in the assets directory, then of the packages in the content directory.
-pub fn list_tracks() -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(assets_dir().join("tracks"))
+/// Like `load_car`, plus the 3D model for rendering when the car has one.
+pub fn load_car_with_visual(
+    name_or_path: &str,
+) -> Result<(CarModel, Option<open_racing_car::CarVisual>), Error> {
+    let visual = match car_package(name_or_path) {
+        Some(dir) => open_racing_car::CarPackage::load_visual(&dir).map_err(Error::CarPackage)?,
+        None => None,
+    };
+    Ok((load_car(name_or_path)?, visual))
+}
+
+/// The package directory a car name or path refers to: a package given by path, or,
+/// unless `assets/cars/<name>.ron` exists, the package `<content>/cars/<name>/`.
+fn car_package(name_or_path: &str) -> Option<PathBuf> {
+    let direct = Path::new(name_or_path);
+    if open_racing_car::is_package(direct) {
+        return Some(direct.to_path_buf());
+    }
+    let named = open_racing_car::cars_dir().join(name_or_path);
+    (resolve("cars", name_or_path).is_err()
+        && direct.extension().is_none()
+        && open_racing_car::is_package(&named))
+    .then_some(named)
+}
+
+/// Names of the cars in the assets directory, then of the packages in the content directory.
+pub fn list_cars() -> Vec<String> {
+    let mut names = ron_names("cars");
+    names.extend(open_racing_car::list());
+    names
+}
+
+fn ron_names(kind: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(assets_dir().join(kind))
         .into_iter()
         .flatten()
         .flatten()
@@ -158,6 +196,12 @@ pub fn list_tracks() -> Vec<String> {
         })
         .collect();
     names.sort();
+    names
+}
+
+/// Names of the tracks in the assets directory, then of the packages in the content directory.
+pub fn list_tracks() -> Vec<String> {
+    let mut names = ron_names("tracks");
     names.extend(open_racing_track::list());
     names
 }

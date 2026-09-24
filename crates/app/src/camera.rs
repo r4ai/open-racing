@@ -5,7 +5,7 @@ use glam::DVec3;
 
 use crate::driving::Simulation;
 use crate::input::AppRequests;
-use crate::scene::{quat_to_bevy, sky_light, to_bevy};
+use crate::scene::{DriverEye, quat_to_bevy, sky_light, to_bevy};
 
 #[derive(Component)]
 struct MainCamera;
@@ -71,6 +71,7 @@ fn follow(
     time: Res<Time>,
     requests: Res<AppRequests>,
     sim: Res<Simulation>,
+    eye: Option<Res<DriverEye>>,
     mut mode: ResMut<CameraMode>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
 ) {
@@ -105,7 +106,8 @@ fn follow(
         }
         CameraMode::Cockpit => {
             set_fov(75.0);
-            cam.translation = to_bevy(pos + rot * DVec3::new(-0.3, 0.38, 0.45));
+            let eye = eye.map_or(DVec3::new(-0.3, 0.38, 0.45), |e| e.0);
+            cam.translation = to_bevy(pos + rot * eye);
             cam.rotation = quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
         }
         CameraMode::Tv => {
