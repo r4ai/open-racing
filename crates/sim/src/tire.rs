@@ -21,13 +21,24 @@ pub struct CurveParams {
 }
 
 /// Magic Formula curve with precomputed stiffness factor.
-#[derive(Clone, Copy, Debug)]
+///
+/// The curve is tabulated over `B·x` with its exact slopes and evaluated by cubic
+/// Hermite interpolation, which is several times cheaper than the chain of `atan`,
+/// `atan` and `sin` and matches it to about 1e-9.
+#[derive(Clone, Debug)]
 pub struct Curve {
     pub b: f64,
     pub c: f64,
     pub e: f64,
     pub peak_slip: f64,
+    /// Value and slope (per table step) at `B·x = k / TABLE_STEPS_PER_UNIT`.
+    table: Box<[(f64, f64)]>,
 }
+
+/// Table resolution in steps per unit of `B·x`, and its extent; beyond it the curve is
+/// evaluated directly.
+const TABLE_STEPS_PER_UNIT: f64 = 64.0;
+const TABLE_END: f64 = 64.0;
 
 impl Curve {
     pub fn new(p: &CurveParams) -> Self {
@@ -44,19 +55,53 @@ impl Curve {
                 hi = mid;
             }
         }
-        Self {
+        let mut curve = Self {
             b: 0.5 * (lo + hi) / p.peak_slip,
             c: p.shape,
             e: p.curvature,
             peak_slip: p.peak_slip,
-        }
+            table: Box::default(),
+        };
+        let h = 1.0 / TABLE_STEPS_PER_UNIT;
+        curve.table = (0..=(TABLE_END * TABLE_STEPS_PER_UNIT) as usize + 1)
+            .map(|k| {
+                let bx = k as f64 * h;
+                let phi = bx - curve.e * (bx - bx.atan());
+                let dphi = 1.0 - curve.e + curve.e / (1.0 + bx * bx);
+                let slope = (curve.c * phi.atan()).cos() * curve.c / (1.0 + phi * phi) * dphi;
+                (curve.exact(bx), slope * h)
+            })
+            .collect();
+        curve
+    }
+
+    /// The Magic Formula at `B·x`.
+    #[inline]
+    fn exact(&self, bx: f64) -> f64 {
+        (self.c * (bx - self.e * (bx - bx.atan())).atan()).sin()
     }
 
     /// Normalised force (−1..1) at the given slip.
     #[inline]
     pub fn eval(&self, x: f64) -> f64 {
         let bx = self.b * x;
-        (self.c * (bx - self.e * (bx - bx.atan())).atan()).sin()
+        let t = bx.abs() * TABLE_STEPS_PER_UNIT;
+        // Also false for NaN, which the formula passes on.
+        if t < TABLE_END * TABLE_STEPS_PER_UNIT {
+            let i = t as usize;
+            let u = t - i as f64;
+            let ((y0, m0), (y1, m1)) = (self.table[i], self.table[i + 1]);
+            // Cubic Hermite basis.
+            let u2 = u * u;
+            let u3 = u2 * u;
+            let y = (2.0 * u3 - 3.0 * u2 + 1.0) * y0
+                + (u3 - 2.0 * u2 + u) * m0
+                + (3.0 * u2 - 2.0 * u3) * y1
+                + (u3 - u2) * m1;
+            y.copysign(bx)
+        } else {
+            self.exact(bx)
+        }
     }
 }
 
@@ -460,6 +505,23 @@ mod tests {
         assert!((peak - 1.0).abs() < 1e-6);
         assert!(c.eval(0.09) < peak && c.eval(0.11) < peak);
         assert!((c.eval(-0.1) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tabulated_curve_matches_the_formula() {
+        for (shape, curvature) in [(1.3, -1.0), (1.6, 0.5), (1.9, 0.95), (1.45, 0.0)] {
+            let c = Curve::new(&CurveParams {
+                peak_slip: 0.08,
+                shape,
+                curvature,
+            });
+            let mut worst: f64 = 0.0;
+            for k in -20_000..=20_000 {
+                let x = k as f64 * 1e-4 * 1.37;
+                worst = worst.max((c.eval(x) - c.exact(c.b * x)).abs());
+            }
+            assert!(worst < 1e-8, "C {shape} E {curvature}: error {worst}");
+        }
     }
 
     fn front() -> TireModel {
