@@ -10,10 +10,10 @@ pub struct StepInfo {
     pub speed: f64,
     /// Lateral offset normalised by the half width on that side (|x| > 1 = beyond the edge).
     pub offset: f64,
-    /// Number of wheels on grass.
+    /// Number of wheels off the track (on anything but asphalt and kerbs).
     pub wheels_off: usize,
-    /// Grip the tyres have lost to tread temperature, pressure and wear, summed over the
-    /// four tyres (0 = all at their best).
+    /// Grip the tyres have lost to tread temperature, pressure, wear and dirt, summed
+    /// over the four tyres (0 = all at their best).
     pub grip_loss: f64,
     /// Hardest hit into a wall or barrier during the step, m/s into the wall.
     pub barrier_impact: f64,
@@ -54,7 +54,7 @@ pub trait TerminationFn: Send + Sync {
 pub struct DefaultReward {
     /// Reward per metre of progress.
     pub progress_weight: f64,
-    /// Penalty per step per wheel on the grass.
+    /// Penalty per step per wheel off the track.
     pub off_track_weight: f64,
     /// Penalty per unit of steering input change (smoothness).
     pub steer_change_weight: f64,
@@ -95,7 +95,7 @@ impl RewardFn for DefaultReward {
 pub struct DefaultTermination {
     /// Episode length limit, s.
     pub max_time: f64,
-    /// Allowed time with all four wheels on the grass, s.
+    /// Allowed time with all four wheels off the track, s.
     pub max_off_track_time: f64,
     /// Allowed time below 1 m/s (after the first seconds), s.
     pub max_stuck_time: f64,
