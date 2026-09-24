@@ -6,7 +6,9 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use glam::{DQuat, DVec3};
 use open_racing_api::{AgentDriver, EnvSpec, LapTimer, Policy};
-use open_racing_sim::{AutoShift, Car, CarState, Controls, DT, Shift, Track};
+use open_racing_sim::{
+    AutoShift, Car, CarState, Controls, DT, RubberMap, Shift, Track, TrackEvolution,
+};
 
 use crate::Args;
 use crate::input::{AppRequests, DriverInput};
@@ -27,14 +29,17 @@ pub enum Mode {
 /// because the simulation is deterministic.
 pub struct Recording {
     start: CarState,
+    /// Rubber and dirt on the track at the start.
+    track: TrackEvolution,
     controls: Vec<Controls>,
     cursor: usize,
 }
 
 impl Recording {
-    fn new(start: CarState) -> Self {
+    fn new(start: CarState, track: TrackEvolution) -> Self {
         Self {
             start,
+            track,
             controls: Vec::new(),
             cursor: 0,
         }
@@ -53,6 +58,11 @@ pub struct CarModelVisual(pub Option<open_racing_car::CarVisual>);
 pub struct Simulation {
     pub track: Arc<Track>,
     pub car: Car,
+    /// Rubber and dirt on the track.
+    pub evolution: TrackEvolution,
+    /// Racing-line grip the track starts from, and what it gains per lap.
+    pub track_grip: f64,
+    pub grip_gain: f64,
     /// State before the last physics step, for render interpolation.
     pub previous: CarState,
     /// Fraction of a physics step accumulated but not simulated yet.
@@ -77,10 +87,15 @@ impl Simulation {
         let (car_model, car_visual) = open_racing_api::load_car_with_visual(&args.car)?;
         let spec = EnvSpec::new(track, car_model, Default::default());
         let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
+        let rubber = Arc::new(RubberMap::new(&spec.track));
+        let evolution = TrackEvolution::new(rubber, args.track_grip, args.grip_gain);
         let sim = Self {
             lap: LapTimer::new(&spec.track, car.state.position),
             previous: car.state,
-            recording: Recording::new(car.state),
+            recording: Recording::new(car.state, evolution.clone()),
+            evolution,
+            track_grip: args.track_grip,
+            grip_gain: args.grip_gain,
             track: spec.track.clone(),
             car,
             alpha: 0.0,
@@ -109,11 +124,23 @@ impl Simulation {
         self.car.reset(&self.track, s, 0.0, 0.0, 1);
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
-        self.recording = Recording::new(self.car.state);
+        self.recording = Recording::new(self.car.state, self.evolution.clone());
+    }
+
+    /// Starts the track over from `track_grip` and `grip_gain`: the rubber and dirt the
+    /// car left are gone.
+    pub fn restart_track(&mut self) {
+        self.evolution.restart(self.track_grip, self.grip_gain);
+        if self.mode == Mode::Replay {
+            self.mode = Mode::Human;
+        }
+        self.recording = Recording::new(self.car.state, self.evolution.clone());
     }
 
     fn start_replay(&mut self) {
         self.car.state = self.recording.start;
+        self.evolution = self.recording.track.clone();
+        self.evolution.mark_all_changed();
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
         self.recording.cursor = 0;
@@ -261,7 +288,8 @@ pub fn step_simulation(
         }
         sim.controls = controls;
         sim.previous = sim.car.state;
-        sim.car.step(&sim.track, &controls);
+        sim.car
+            .step_evolving(&sim.track, &mut sim.evolution, &controls);
         torque += sim.car.telemetry.steering_torque;
         let (pos, t) = (sim.car.state.position, sim.car.state.time);
         sim.lap.update(&sim.track, pos, t);

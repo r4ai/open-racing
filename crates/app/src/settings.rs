@@ -1,9 +1,10 @@
-//! Settings screen (Esc), with two pages switched by Tab:
+//! Settings screen (Esc), with three pages switched by Tab:
 //! - Input: assign steering, pedals and shift buttons from any connected device and
 //!   check the result on live values. Axes are calibrated while they are assigned,
 //!   so inverted pedals and any axis layout work.
 //! - Force feedback: the base's peak torque, strength, maximum output in N·m, damping
 //!   and direction, with a test push.
+//! - Track: the rubber on the racing line to start from and how fast it builds up.
 //!
 //! The simulation is paused while the screen is open.
 
@@ -13,7 +14,10 @@ use std::fmt::Write;
 use bevy::input::gamepad::GamepadInput;
 use bevy::prelude::*;
 
+use open_racing_sim::TrackCondition;
+
 use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, Reported, Source};
+use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::input::InputSelection;
 
@@ -27,6 +31,9 @@ const FFB_WHEEL_TORQUE_RANGE: (f64, f64) = (1.0, 40.0);
 const FFB_PERCENT_STEP: f64 = 5.0;
 const FFB_STRENGTH_RANGE: (f64, f64) = (0.0, 200.0);
 const FFB_DAMPING_RANGE: (f64, f64) = (0.0, 100.0);
+/// Track evolution: step and range of the grip the racing line gains per lap.
+const GRIP_GAIN_STEP: f64 = 0.0005;
+const GRIP_GAIN_RANGE: (f64, f64) = (0.0, 0.01);
 
 #[derive(Resource, Default)]
 pub struct SettingsOpen(pub bool);
@@ -40,7 +47,17 @@ enum Page {
     #[default]
     Input,
     ForceFeedback,
+    Track,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum TrackRow {
+    Condition,
+    Gain,
+    Restart,
+}
+
+const TRACK_ROWS: [TrackRow; 3] = [TrackRow::Condition, TrackRow::Gain, TrackRow::Restart];
 
 #[derive(Clone, Copy, PartialEq)]
 enum FfbRow {
@@ -119,7 +136,7 @@ impl Plugin for SettingsPlugin {
                 Update,
                 (
                     toggle,
-                    (switch_page, navigate, navigate_ffb)
+                    (switch_page, navigate, navigate_ffb, navigate_track)
                         .chain()
                         .run_if(|o: Res<SettingsOpen>| o.0),
                     listen,
@@ -175,7 +192,8 @@ fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
     if screen.listen.is_none() && keys.just_pressed(KeyCode::Tab) {
         screen.page = match screen.page {
             Page::Input => Page::ForceFeedback,
-            Page::ForceFeedback => Page::Input,
+            Page::ForceFeedback => Page::Track,
+            Page::Track => Page::Input,
         };
         screen.row = 0;
         screen.message.clear();
@@ -237,6 +255,55 @@ fn navigate_ffb(
     if *settings != before {
         settings.save();
     }
+}
+
+fn navigate_track(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut sim: ResMut<Simulation>,
+) {
+    if screen.page != Page::Track {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, TRACK_ROWS.len());
+    let (left, right, enter) = (
+        keys.just_pressed(KeyCode::ArrowLeft),
+        keys.just_pressed(KeyCode::ArrowRight),
+        keys.just_pressed(KeyCode::Enter),
+    );
+    let grip = sim.track_grip;
+    match TRACK_ROWS[screen.row] {
+        // To the next named condition below or above the current level.
+        TrackRow::Condition if left => {
+            if let Some(c) = TrackCondition::ALL
+                .into_iter()
+                .rev()
+                .find(|c| c.grip() < grip - 1e-6)
+            {
+                sim.track_grip = c.grip();
+            }
+        }
+        TrackRow::Condition if right => {
+            if let Some(c) = TrackCondition::ALL
+                .into_iter()
+                .find(|c| c.grip() > grip + 1e-6)
+            {
+                sim.track_grip = c.grip();
+            }
+        }
+        TrackRow::Gain if left || right => {
+            let step = if left {
+                -GRIP_GAIN_STEP
+            } else {
+                GRIP_GAIN_STEP
+            };
+            sim.grip_gain = (sim.grip_gain + step).clamp(GRIP_GAIN_RANGE.0, GRIP_GAIN_RANGE.1);
+        }
+        TrackRow::Restart if enter => {}
+        _ => return,
+    }
+    sim.restart_track();
+    screen.message = "Track restarted.".into();
 }
 
 fn navigate(
@@ -392,6 +459,7 @@ fn render(
     selection: Res<InputSelection>,
     ffb_settings: Res<FfbSettings>,
     ffb_status: Res<FfbStatus>,
+    sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
 ) {
@@ -408,15 +476,61 @@ fn render(
         return;
     }
     let tabs = match screen.page {
-        Page::Input => "[INPUT]  force feedback",
-        Page::ForceFeedback => " input  [FORCE FEEDBACK]",
+        Page::Input => "[INPUT]  force feedback   track ",
+        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track ",
+        Page::Track => " input   force feedback  [TRACK]",
     };
     let mut s = format!("{tabs}   (Tab page, simulation paused)            Esc close\n\n");
     match screen.page {
         Page::Input => render_input(&mut s, &screen, &bindings, &reported, *selection, &pads),
         Page::ForceFeedback => render_ffb(&mut s, &screen, &ffb_settings, &ffb_status),
+        Page::Track => render_track(&mut s, &screen, &sim),
     }
     text.0 = s;
+}
+
+fn render_track(s: &mut String, screen: &Screen, sim: &Simulation) {
+    let (on_line, off_line) = sim.evolution.start_grip();
+    for (i, row) in TRACK_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let line = match row {
+            TrackRow::Condition => format!(
+                "{:<12} {:<8} racing line {:.0} %, off line {:.0} %   (Left/Right)",
+                "Condition",
+                TrackCondition::nearest(on_line).name(),
+                on_line * 100.0,
+                off_line * 100.0
+            ),
+            TrackRow::Gain => format!(
+                "{:<12} +{:.2} % grip per lap   (Left/Right; rubber laid by the tyres)",
+                "Rubber",
+                sim.grip_gain * 100.0
+            ),
+            TrackRow::Restart => format!(
+                "{:<12} Enter: clear the rubber and dirt the car left",
+                "Restart"
+            ),
+        };
+        let _ = writeln!(s, "{cursor} {line}");
+    }
+    let _ = writeln!(s);
+    if !screen.message.is_empty() {
+        let _ = writeln!(
+            s,
+            "{}
+",
+            screen.message
+        );
+    }
+    let _ = writeln!(
+        s,
+        "Rubber builds up where the tyres roll, so the racing line grips best. Tyres that"
+    );
+    let _ = writeln!(
+        s,
+        "leave the track pick up dirt, lose grip, and drop it on the road where they rejoin."
+    );
+    let _ = writeln!(s, "Changing a setting restarts the track.");
 }
 
 fn render_ffb(s: &mut String, screen: &Screen, settings: &FfbSettings, status: &FfbStatus) {

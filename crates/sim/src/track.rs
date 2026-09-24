@@ -56,11 +56,36 @@ fn default_spacing() -> f64 {
     1.0
 }
 
+/// Kind of ground under a tyre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {
+    /// The paved racing surface (also concrete and painted areas that count as track).
     Asphalt,
     Kerb,
+    /// Paved ground outside the track limits.
+    Runoff,
     Grass,
+    /// Artificial turf strips beside kerbs.
+    Turf,
+    /// Gravel and sand traps.
+    Gravel,
+    /// Bare earth.
+    Dirt,
+}
+
+/// Loose material a tyre picks up off the road.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coat {
+    /// Grass clippings and the soil under them.
+    Grass = 0,
+    /// Earth and mud.
+    Soil = 1,
+    /// Sand and gravel.
+    Grit = 2,
+}
+
+impl Coat {
+    pub const ALL: [Self; 3] = [Self::Grass, Self::Soil, Self::Grit];
 }
 
 impl Surface {
@@ -69,16 +94,53 @@ impl Surface {
         match self {
             Self::Asphalt => 1.0,
             Self::Kerb => 0.92,
+            Self::Runoff => 0.9,
             Self::Grass => 0.55,
+            Self::Turf => 0.7,
+            Self::Gravel => 0.5,
+            Self::Dirt => 0.6,
         }
     }
 
     /// Extra rolling resistance coefficient on top of the tyre's own.
     pub fn drag(self) -> f64 {
         match self {
-            Self::Asphalt | Self::Kerb => 0.0,
+            Self::Asphalt | Self::Kerb | Self::Runoff => 0.0,
+            Self::Turf => 0.02,
             Self::Grass => 0.06,
+            Self::Dirt => 0.08,
+            Self::Gravel => 0.2,
         }
+    }
+
+    /// How readily a tyre picks up loose material here, 0..1 (Assetto Corsa's
+    /// `DIRT_ADDITIVE`).
+    pub fn dirt(self) -> f64 {
+        match self {
+            Self::Asphalt | Self::Kerb | Self::Runoff => 0.0,
+            Self::Turf => 0.1,
+            Self::Grass | Self::Gravel | Self::Dirt => 1.0,
+        }
+    }
+
+    /// What sticks to a tyre rolling here.
+    pub fn coat(self) -> Option<Coat> {
+        match self {
+            Self::Asphalt | Self::Kerb | Self::Runoff => None,
+            Self::Grass | Self::Turf => Some(Coat::Grass),
+            Self::Dirt => Some(Coat::Soil),
+            Self::Gravel => Some(Coat::Grit),
+        }
+    }
+
+    /// Paved: sheds the coat of a tyre rolling on it, and holds what is shed.
+    pub fn paved(self) -> bool {
+        matches!(self, Self::Asphalt | Self::Kerb | Self::Runoff)
+    }
+
+    /// Outside the track limits.
+    pub fn off_track(self) -> bool {
+        !matches!(self, Self::Asphalt | Self::Kerb)
     }
 }
 
@@ -118,6 +180,8 @@ pub struct TrackQuery {
     pub grip: f64,
     /// Extra rolling resistance coefficient of the surface.
     pub drag: f64,
+    /// How readily a tyre picks up loose material from the surface, 0..1.
+    pub dirt: f64,
     pub width_left: f64,
     pub width_right: f64,
 }
@@ -357,6 +421,7 @@ impl Track {
             surface: props.kind,
             grip: props.grip,
             drag: props.drag,
+            dirt: props.dirt(),
             width_left: smp.width_left,
             width_right: smp.width_right,
         }

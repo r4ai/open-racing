@@ -12,7 +12,9 @@ mod rng;
 use std::sync::Arc;
 
 use glam::DVec3;
-use open_racing_sim::{AutoShift, Car, CarModel, Controls, DT, GRAVITY, Shift, Surface, Track};
+use open_racing_sim::{
+    AutoShift, Car, CarModel, Controls, DT, GRAVITY, RubberMap, Shift, Track, TrackEvolution,
+};
 use rayon::prelude::*;
 
 pub use lap::LapTimer;
@@ -48,6 +50,15 @@ pub struct EnvConfig {
     pub abs: bool,
     /// Maximum steering wheel speed in rad/s (a human arm / wheel base limit).
     pub max_steer_rate: f64,
+    /// Track evolution: grip on the racing line at the start of an episode, relative
+    /// to a fully rubbered-in line, drawn uniformly from this range (see
+    /// `TrackCondition` for named levels). Off the line the asphalt is dirtier. `None`
+    /// gives the whole asphalt the tyres' nominal grip.
+    pub track_grip: Option<(f64, f64)>,
+    /// Grip the racing line gains per lap the car drives, with `track_grip`. Off by
+    /// default: one car adds little within an episode, and the laid rubber takes a
+    /// grid of the whole track per environment.
+    pub grip_gain_per_lap: f64,
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
     /// Append ground-truth tyre state to the observation.
@@ -70,6 +81,8 @@ impl Default for EnvConfig {
             auto_shift: true,
             abs: false,
             max_steer_rate: 15.0,
+            track_grip: None,
+            grip_gain_per_lap: 0.0,
             lookahead_points: 20,
             lookahead_spacing: 10.0,
             privileged_obs: false,
@@ -110,14 +123,18 @@ impl EnvConfig {
 pub struct EnvShared {
     pub config: EnvConfig,
     pub track: Arc<Track>,
+    /// Racing line of `track`, when `config.track_grip` is set.
+    pub rubber: Option<Arc<RubberMap>>,
     pub car: Arc<CarModel>,
     pub reward: Arc<dyn RewardFn>,
     pub termination: Arc<dyn TerminationFn>,
 }
 
 impl EnvShared {
+    /// Also estimates the racing line of `track` when `config.track_grip` is set.
     pub fn new(config: EnvConfig, track: Arc<Track>, car: Arc<CarModel>) -> Self {
         Self {
+            rubber: config.track_grip.map(|_| Arc::new(RubberMap::new(&track))),
             config,
             track,
             car,
@@ -140,6 +157,8 @@ pub struct EpisodeStats {
 
 pub struct Env {
     pub car: Car,
+    /// Rubber on this episode's track.
+    pub evolution: TrackEvolution,
     rng: Rng,
     lap: LapTimer,
     actuator: Actuator,
@@ -155,6 +174,7 @@ impl Env {
         let car = Car::new(shared.car.clone(), &shared.track, 0.0, 0.0, 0.0, 1);
         let mut env = Self {
             car,
+            evolution: TrackEvolution::UNIFORM,
             rng: Rng::new(seed),
             lap: LapTimer::default(),
             actuator: Actuator::default(),
@@ -184,6 +204,19 @@ impl Env {
         let speed = self.rng.uniform(cfg.start_speed.0.min(top), top);
         let gear = gear_for_speed(&shared.car, speed);
         self.car.reset(track, s, d, speed, gear);
+        if let (Some((lo, hi)), Some(map)) = (cfg.track_grip, &shared.rubber) {
+            // Only draw when randomised, so fixed-grip runs keep their start sequence.
+            let grip = if hi > lo {
+                self.rng.uniform(lo, hi)
+            } else {
+                lo
+            };
+            if self.evolution.map().is_some() {
+                self.evolution.reset(grip);
+            } else {
+                self.evolution = TrackEvolution::new(map.clone(), grip, cfg.grip_gain_per_lap);
+            }
+        }
         self.lap = LapTimer::new(track, self.car.state.position);
         self.actuator = Actuator::default();
         self.input = AppliedInput::default();
@@ -213,7 +246,8 @@ impl Env {
         let mut barrier_impact: f64 = 0.0;
         for _ in 0..substeps {
             let controls = self.actuator.controls(cfg, &self.car, action);
-            self.car.step(track, &controls);
+            self.car
+                .step_evolving(track, &mut self.evolution, &controls);
             barrier_impact = barrier_impact.max(self.car.telemetry.barrier_impact);
         }
         self.input = self.actuator.applied(&self.car, action);
@@ -243,7 +277,7 @@ impl Env {
             .telemetry
             .wheels
             .iter()
-            .filter(|w| w.surface == Surface::Grass)
+            .filter(|w| w.surface.off_track())
             .count();
         let grip_loss = (0..4)
             .map(|i| {

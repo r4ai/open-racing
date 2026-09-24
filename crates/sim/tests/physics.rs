@@ -128,6 +128,71 @@ fn braking_distance_from_100() {
     assert!((22.0..36.0).contains(&best), "100-0 km/h in {best:.1} m");
 }
 
+#[test]
+fn dusty_track_brakes_longer_and_rubbers_in() {
+    let track = circle(5000.0);
+    let map = Arc::new(RubberMap::new(&track));
+    let stop = |evolution: &mut TrackEvolution| {
+        let mut car = Car::new(gt3(), &track, 0.0, 0.0, 100.0 / 3.6, 3);
+        let start = car.state.position;
+        while car.speed() > 0.2 && car.state.time < 10.0 {
+            let controls = Controls {
+                brake: 0.7,
+                clutch: 1.0,
+                ..Default::default()
+            };
+            car.step_evolving(&track, evolution, &controls);
+        }
+        (car.state.position - start).length()
+    };
+    let optimum = stop(&mut TrackEvolution::default());
+    let mut dusty = TrackEvolution::new(map, TrackCondition::Dusty.grip(), 0.01);
+    let on_dusty = stop(&mut dusty);
+    assert!(
+        on_dusty > optimum * 1.05,
+        "dusty {on_dusty:.1} m vs optimum {optimum:.1} m"
+    );
+    // The first metres of the stop now have rubber under the wheels, not beside them.
+    let (s, d) = (2.0, -0.8);
+    let dusty_grip = TrackCondition::Dusty.grip();
+    assert!(dusty.grip_at(Surface::Asphalt, s, d) > dusty_grip);
+    assert_eq!(dusty.grip_at(Surface::Asphalt, s, d + 5.0), dusty_grip);
+}
+
+#[test]
+fn grass_coats_the_tyres_and_they_drop_it_on_the_road() {
+    let track = circle(5000.0);
+    let map = Arc::new(RubberMap::new(&track));
+    let mut evolution = TrackEvolution::new(map, 1.0, 0.0);
+    // Beyond the 30 m of track and 1 m of kerb: grass.
+    let mut car = Car::new(gt3(), &track, 0.0, 33.0, 20.0, 2);
+    for _ in 0..1000 {
+        car.step_evolving(&track, &mut evolution, &Controls::default());
+    }
+    let coated = car.state.wheels.map(|w| w.tire.dirt());
+    assert!(coated.iter().all(|&d| d > 0.5), "coats {coated:?}");
+    assert!(
+        car.state
+            .wheels
+            .iter()
+            .all(|w| w.tire.coat[Coat::Grass as usize] == w.tire.dirt())
+    );
+    let s = track.query(car.state.position, 0).s;
+    car.reset(&track, s, 0.0, 20.0, 2);
+    for w in &mut car.state.wheels {
+        w.tire.coat = [0.8, 0.0, 0.0];
+    }
+    let clean = evolution.grip_at(Surface::Asphalt, s + 20.0, 0.8);
+    for _ in 0..1000 {
+        car.step_evolving(&track, &mut evolution, &Controls::default());
+    }
+    assert!(car.state.wheels.iter().all(|w| w.tire.dirt() < 0.8));
+    let dirty = (0..20)
+        .map(|k| evolution.grip_at(Surface::Asphalt, s + 5.0 + k as f64, 0.8))
+        .fold(f64::INFINITY, f64::min);
+    assert!(dirty < clean - 0.01, "road {dirty} vs {clean}");
+}
+
 /// Drives a constant-radius circle with a simple path/speed controller and returns the
 /// highest lateral acceleration sustained for 3 s while staying on the line.
 fn skidpad(model: Arc<CarModel>, radius: f64) -> f64 {

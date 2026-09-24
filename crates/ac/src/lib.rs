@@ -78,6 +78,10 @@ struct SurfaceDef {
     friction: f64,
     damping: f64,
     valid_track: bool,
+    /// How much dirt tyres pick up (`DIRT_ADDITIVE`), when given.
+    dirt: Option<f64>,
+    /// Rolling sound (`WAV`), which tells kerbs, grass and sand apart when the key does not.
+    wav: String,
 }
 
 /// Surfaces a track may use without defining them itself.
@@ -87,6 +91,8 @@ fn builtin_surfaces() -> Vec<SurfaceDef> {
         friction,
         damping,
         valid_track,
+        dirt: None,
+        wav: String::new(),
     };
     vec![
         s("ROAD", 1.0, 0.0, true),
@@ -113,6 +119,8 @@ fn surfaces(ini_src: Option<&str>) -> Vec<SurfaceDef> {
             friction: sec.get_f64("FRICTION").unwrap_or(1.0),
             damping: sec.get_f64("DAMPING").unwrap_or(0.0),
             valid_track: sec.get_f64("IS_VALID_TRACK").unwrap_or(0.0) != 0.0,
+            dirt: sec.get_f64("DIRT_ADDITIVE"),
+            wav: sec.get("WAV").unwrap_or_default().to_ascii_lowercase(),
         };
         match out.iter_mut().find(|s| s.key == def.key) {
             Some(s) => *s = def,
@@ -147,8 +155,44 @@ fn classify(mesh_name: &str, surfaces: &[SurfaceDef]) -> Option<Physical> {
         .map(|(i, _)| Physical::Ground(i))
 }
 
+/// What a surface is made of, from its key (`GRAVEL`, `CURB_2`, `GRS-CUT-A`), else its
+/// rolling sound, else whether it counts as track and how dirty it makes tyres.
+fn surface_kind(s: &SurfaceDef) -> Surface {
+    const KINDS: [(&[&str], Surface); 5] = [
+        (&["KERB", "CURB", "KURB", "RUMBLE"], Surface::Kerb),
+        (&["SAND", "GRAVEL"], Surface::Gravel),
+        (&["DIRT", "MUD", "SOIL"], Surface::Dirt),
+        (&["CARPET", "TURF", "ASTRO"], Surface::Turf),
+        (&["GRASS", "GRS"], Surface::Grass),
+    ];
+    const SOUNDS: [(&str, Surface); 5] = [
+        ("kerb", Surface::Kerb),
+        ("kurb", Surface::Kerb),
+        ("sand", Surface::Gravel),
+        ("gravel", Surface::Gravel),
+        ("grass", Surface::Grass),
+    ];
+    if let Some((_, kind)) = KINDS
+        .iter()
+        .find(|(keys, _)| keys.iter().any(|k| s.key.contains(k)))
+    {
+        return *kind;
+    }
+    if s.wav.contains("extraturf") {
+        return Surface::Turf;
+    }
+    if let Some((_, kind)) = SOUNDS.iter().find(|(wav, _)| s.wav.starts_with(wav)) {
+        return *kind;
+    }
+    match (s.valid_track, s.dirt.unwrap_or(0.0)) {
+        (true, _) => Surface::Asphalt,
+        (false, dirt) if dirt >= 0.5 => Surface::Grass,
+        _ => Surface::Runoff,
+    }
+}
+
 /// Simulation properties of each surface. Grip is relative to the grippiest
-/// valid-track surface; anything that does not count as track is `Grass`.
+/// valid-track surface.
 fn surface_props(surfaces: &[SurfaceDef]) -> Vec<SurfaceProps> {
     let reference = surfaces
         .iter()
@@ -158,19 +202,11 @@ fn surface_props(surfaces: &[SurfaceDef]) -> Vec<SurfaceProps> {
     let reference = if reference > 0.0 { reference } else { 1.0 };
     surfaces
         .iter()
-        .map(|s| {
-            let kind = if s.key.contains("KERB") {
-                Surface::Kerb
-            } else if s.valid_track {
-                Surface::Asphalt
-            } else {
-                Surface::Grass
-            };
-            SurfaceProps {
-                kind,
-                grip: (s.friction / reference).clamp(0.05, 1.5),
-                drag: s.damping.clamp(0.0, 0.3),
-            }
+        .map(|s| SurfaceProps {
+            kind: surface_kind(s),
+            grip: (s.friction / reference).clamp(0.05, 1.5),
+            drag: s.damping.clamp(0.0, 0.3),
+            dirt: s.dirt.map(|d| d.clamp(0.0, 1.0)),
         })
         .collect()
 }
@@ -455,9 +491,63 @@ mod tests {
         let kerb = s.iter().position(|s| s.key == "KERB").unwrap();
         assert_eq!(p[road].kind, Surface::Asphalt);
         assert!((p[road].grip - 1.0).abs() < 1e-12);
-        assert_eq!(p[out].kind, Surface::Grass);
+        assert_eq!(p[out].kind, Surface::Runoff);
         assert!((p[out].grip - 0.5).abs() < 1e-12);
         assert_eq!(p[kerb].kind, Surface::Kerb);
+    }
+
+    #[test]
+    fn surface_kinds_follow_key_then_sound() {
+        let s = surfaces(Some(concat!(
+            "[SURFACE_0]
+KEY=GRS-CUT-A
+FRICTION=0.6
+DIRT_ADDITIVE=1
+",
+            "[SURFACE_1]
+KEY=CARPET
+FRICTION=0.7
+DIRT_ADDITIVE=0.1
+IS_VALID_TRACK=1
+WAV=extraturf.wav
+",
+            "[SURFACE_2]
+KEY=TRAP
+FRICTION=0.8
+DAMPING=0.1
+WAV=sand.wav
+",
+            "[SURFACE_3]
+KEY=CURB_2
+FRICTION=0.9
+IS_VALID_TRACK=1
+",
+            "[SURFACE_4]
+KEY=GRAVEL_B
+WAV=kerb.wav
+IS_VALID_TRACK=1
+",
+            "[SURFACE_5]
+KEY=VERGE
+DIRT_ADDITIVE=1
+",
+            "[SURFACE_6]
+KEY=TARMAC
+IS_VALID_TRACK=1
+",
+        )));
+        let p = surface_props(&s);
+        let kind = |key: &str| p[s.iter().position(|s| s.key == key).unwrap()].kind;
+        assert_eq!(kind("GRS-CUT-A"), Surface::Grass);
+        assert_eq!(kind("CARPET"), Surface::Turf);
+        assert_eq!(kind("TRAP"), Surface::Gravel);
+        assert_eq!(kind("CURB_2"), Surface::Kerb);
+        assert_eq!(kind("GRAVEL_B"), Surface::Gravel);
+        assert_eq!(kind("VERGE"), Surface::Grass);
+        assert_eq!(kind("TARMAC"), Surface::Asphalt);
+        assert_eq!(kind("DIRT"), Surface::Dirt);
+        let carpet = s.iter().position(|s| s.key == "CARPET").unwrap();
+        assert_eq!(p[carpet].dirt(), 0.1);
     }
 
     #[test]

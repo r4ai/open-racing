@@ -11,12 +11,15 @@ use crate::track::Surface;
 /// Physical properties of one surface type.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceProps {
-    /// Coarse class used by rewards, effects and audio.
+    /// Coarse class used by rewards, effects, audio and dirt.
     pub kind: Surface,
     /// Grip multiplier relative to the tyre's nominal μ.
     pub grip: f64,
     /// Extra rolling resistance coefficient on top of the tyre's own.
     pub drag: f64,
+    /// How readily a tyre picks up loose material, 0..1; `None` takes the kind's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirt: Option<f64>,
 }
 
 impl SurfaceProps {
@@ -25,7 +28,13 @@ impl SurfaceProps {
             kind,
             grip: kind.grip(),
             drag: kind.drag(),
+            dirt: None,
         }
+    }
+
+    /// How readily a tyre picks up loose material, 0..1.
+    pub fn dirt(&self) -> f64 {
+        self.dirt.unwrap_or_else(|| self.kind.dirt())
     }
 }
 

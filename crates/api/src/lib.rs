@@ -17,7 +17,9 @@ pub use open_racing_env::{
     DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, RewardFn, StepInfo,
     TerminationFn,
 };
-pub use open_racing_sim::{Car, CarModel, Controls, Surface, Track};
+pub use open_racing_sim::{
+    Car, CarModel, Controls, RubberMap, Surface, Track, TrackCondition, TrackEvolution, parse_grip,
+};
 
 /// A box-shaped space with named dimensions.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +208,19 @@ pub fn list_tracks() -> Vec<String> {
     names
 }
 
+/// Parses a racing-line grip level or range for `EnvConfig::track_grip`: `green`,
+/// `0.97`, `97%`, or a range such as `green..optimum`.
+pub fn parse_grip_range(s: &str) -> Result<(f64, f64), String> {
+    let (lo, hi) = match s.split_once("..") {
+        Some((lo, hi)) => (parse_grip(lo)?, parse_grip(hi)?),
+        None => {
+            let g = parse_grip(s)?;
+            (g, g)
+        }
+    };
+    Ok((lo.min(hi), lo.max(hi)))
+}
+
 /// Everything needed to build environments.
 #[derive(Clone)]
 pub struct EnvSpec {
@@ -234,11 +249,9 @@ impl EnvSpec {
 
     fn shared(&self) -> EnvShared {
         EnvShared {
-            config: self.config.clone(),
-            track: self.track.clone(),
-            car: self.car.clone(),
             reward: self.reward.clone(),
             termination: self.termination.clone(),
+            ..EnvShared::new(self.config.clone(), self.track.clone(), self.car.clone())
         }
     }
 

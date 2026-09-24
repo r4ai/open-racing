@@ -13,6 +13,7 @@ mod input;
 mod scene;
 mod settings;
 mod track_model;
+mod track_surface;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,14 @@ pub struct Args {
     /// Let the gearbox shift automatically for the human driver.
     #[arg(long)]
     pub auto_shift: bool,
+    /// Track evolution: grip on the racing line at the start (dusty, green, fast,
+    /// optimum, or e.g. 0.97). Off the line the asphalt stays dirtier. Also set in the
+    /// settings screen (Esc, Tab to "track").
+    #[arg(long, default_value = "optimum", value_parser = open_racing_sim::parse_grip)]
+    pub track_grip: f64,
+    /// Grip the racing line gains per lap driven, as rubber is laid down.
+    #[arg(long, default_value_t = open_racing_sim::TrackEvolution::DEFAULT_GAIN_PER_LAP)]
+    pub grip_gain: f64,
 }
 
 fn main() {
@@ -73,6 +82,7 @@ fn main() {
         effects::EffectsPlugin,
         settings::SettingsPlugin,
         ffb::FfbPlugin,
+        track_surface::TrackSurfacePlugin,
     ));
     driving::install_policy(&mut app, &args);
     app.run();

@@ -17,6 +17,7 @@ use glam::{DMat3, DQuat, DVec3};
 
 use crate::controls::{Controls, Shift};
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
+use crate::evolution::TrackEvolution;
 use crate::params::CarModel;
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
@@ -219,8 +220,22 @@ impl Car {
         self.state.position + self.state.orientation * local
     }
 
-    /// Advances the simulation by one fixed step of `DT`.
+    /// Advances the simulation by one fixed step of `DT`, with the same grip over the
+    /// whole asphalt and nothing left on it (see [`Self::step_evolving`]).
     pub fn step(&mut self, track: &Track, controls: &Controls) {
+        let mut uniform = TrackEvolution::UNIFORM;
+        self.step_evolving(track, &mut uniform, controls);
+    }
+
+    /// Advances the simulation by one fixed step of `DT` on a track with the rubber and
+    /// dirt of `evolution`. The tyres lay rubber where they roll on the asphalt, pick up
+    /// dirt off the road and leave it where they rejoin.
+    pub fn step_evolving(
+        &mut self,
+        track: &Track,
+        evolution: &mut TrackEvolution,
+        controls: &Controls,
+    ) {
         let model = &*self.model;
         let p = &model.params;
         let st = &mut self.state;
@@ -308,7 +323,10 @@ impl Car {
             // Lateral force towards the centreline per unit load, from the pure-slip curve.
             let inward_force = -corner.side * tp.mu_y * tire.lat.eval(alpha_eff);
             let tread_load = tire.tread_load(corner.side * inclination, inward_force, pressure);
-            let mu = q.grip * camber_grip * tire.condition_grip(&w.tire, &tread_load, pressure);
+            let mu = q.grip
+                * evolution.grip_at(q.surface, q.s, q.d)
+                * camber_grip
+                * tire.condition_grip(&w.tire, &tread_load, pressure);
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu, pressure);
 
             let blend = (1.0 - speed / LOW_SPEED).max(0.0);
@@ -318,6 +336,17 @@ impl Car {
                 let damping = blend * LOW_SPEED_DAMPING * fz;
                 f.fx = (f.fx + damping * slip_vel).clamp(-limit_x, limit_x);
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
+            }
+
+            if fz > 0.0 {
+                let shed = w
+                    .tire
+                    .roll_dirt(q.surface, q.dirt, speed * dt, slip_vel.hypot(vy) * dt);
+                if q.surface == Surface::Asphalt {
+                    let grip_use = f.fx.hypot(f.fy) / (tp.mu_y * mu * fz).max(1e-9);
+                    let picked = evolution.roll(q.s, q.d, speed * dt, grip_use, shed);
+                    w.tire.add_coat(picked);
+                }
             }
 
             let rolling_resistance = tire.rolling_resistance(pressure);

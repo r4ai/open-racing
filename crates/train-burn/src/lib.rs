@@ -151,6 +151,12 @@ pub struct PolicyMeta {
     pub abs: bool,
     pub max_steer_rate: f64,
     pub auto_shift: bool,
+    /// Racing-line grip range of the episodes (absent: uniform grip, no rubber model).
+    #[serde(default)]
+    pub track_grip: Option<(f64, f64)>,
+    /// Grip the racing line gained per lap in training (absent in older policies).
+    #[serde(default)]
+    pub grip_gain_per_lap: Option<f64>,
     pub track: String,
     pub car: String,
 }
@@ -168,6 +174,10 @@ impl PolicyMeta {
             abs: self.abs,
             max_steer_rate: self.max_steer_rate,
             auto_shift: self.auto_shift,
+            track_grip: self.track_grip,
+            grip_gain_per_lap: self
+                .grip_gain_per_lap
+                .unwrap_or(EnvConfig::default().grip_gain_per_lap),
             ..EnvConfig::default()
         }
     }

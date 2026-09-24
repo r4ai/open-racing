@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use open_racing_api::{Car, CarModel, Controls, Track, load_track};
-use open_racing_sim::Surface;
 
 /// Follows the centreline at a steady speed and returns (distance, seconds off track).
 fn drive(track: &Track, seconds: f64, speed: f64) -> (f64, f64) {
@@ -44,12 +43,7 @@ fn drive(track: &Track, seconds: f64, speed: f64) -> (f64, f64) {
             p.z,
             ground.z
         );
-        if car
-            .telemetry
-            .wheels
-            .iter()
-            .all(|w| w.surface == Surface::Grass)
-        {
+        if car.telemetry.wheels.iter().all(|w| w.surface.off_track()) {
             off += open_racing_sim::DT;
         }
     }

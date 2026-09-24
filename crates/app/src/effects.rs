@@ -12,7 +12,7 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use open_racing_sim::{GRAVITY, Surface, TireCondition, WheelTelemetry};
+use open_racing_sim::{Coat, GRAVITY, Surface, TireCondition, WheelTelemetry};
 
 use crate::driving::{self, Simulation};
 use crate::scene::to_bevy;
@@ -39,6 +39,8 @@ const SMOKE_TEMPERATURE: (f64, f64) = (130.0, 230.0);
 const FLASH_PER_SLIDE_SPEED: f64 = 4.0;
 /// Particles per second from one tyre on grass at speed.
 const DUST_RATE: f32 = 35.0;
+/// Particles per second from one fully dirt-coated tyre flinging it off on the road.
+const DEBRIS_RATE: f32 = 25.0;
 
 /// How much a tyre on asphalt or a kerb is sliding, 0..1. Shared with the tyre squeal.
 pub fn slide(w: &WheelTelemetry) -> f64 {
@@ -230,7 +232,7 @@ fn spawn(
 
 /// Slide intensity of a wheel weighted by how hard it is pressed into the road, 0..1.
 fn wheel_slide(w: &WheelTelemetry, static_load: f64, moving: f64) -> f32 {
-    if w.load <= 0.0 || w.surface == Surface::Grass {
+    if w.load <= 0.0 || !w.surface.paved() {
         return 0.0;
     }
     (slide(w) * (w.load / static_load).min(1.5) * moving).min(1.0) as f32
@@ -338,27 +340,51 @@ fn update_smoke(
 
     for i in 0..4 {
         let w = &car.telemetry.wheels[i];
-        let (rate, color, opacity, life, size) = match w.surface {
-            Surface::Grass if w.load > 0.0 => {
-                // Thrown up by speed or by a spinning / sliding tyre.
+        let (rate, color, opacity, life, size) = match w.surface.coat() {
+            Some(coat) if w.load > 0.0 => {
+                // Thrown up by speed or by a spinning / sliding tyre; gravel and dry
+                // earth raise the most dust, turf hardly any.
                 let dust = smoothstep(3.0, 25.0, speed).max(slide(w) * moving) as f32;
+                let (color, amount) = match (w.surface, coat) {
+                    (Surface::Turf, _) => ([0.45, 0.45, 0.35], 0.2),
+                    (_, Coat::Grass) => ([0.45, 0.40, 0.28], 1.0),
+                    (_, Coat::Soil) => ([0.42, 0.33, 0.22], 1.3),
+                    (_, Coat::Grit) => ([0.62, 0.56, 0.45], 1.6),
+                };
                 (
-                    DUST_RATE * dust,
-                    [0.45, 0.38, 0.27],
-                    0.35 * dust,
-                    1.4,
-                    (0.4, 2.2),
+                    DUST_RATE * dust * amount,
+                    color,
+                    0.35 * dust * amount.min(1.2),
+                    1.4 * amount.max(0.8),
+                    (0.4, 2.2 * amount.max(0.8)),
                 )
             }
             _ => {
-                let s = tire_smoke(w, &car.state.wheels[i].tire) as f32;
-                (
-                    SMOKE_RATE * s,
-                    [0.82, 0.82, 0.84],
-                    0.45 * s.sqrt(),
-                    2.6,
-                    (0.5, 2.0 + 1.5 * s),
-                )
+                let tire = &car.state.wheels[i].tire;
+                let s = tire_smoke(w, tire) as f32;
+                // A dirty tyre flings its coat off as it gets back up to speed.
+                let debris = if w.load > 0.0 {
+                    (tire.dirt() * smoothstep(3.0, 20.0, speed)) as f32
+                } else {
+                    0.0
+                };
+                if DEBRIS_RATE * debris > SMOKE_RATE * s {
+                    (
+                        DEBRIS_RATE * debris,
+                        crate::track_surface::coat_color(&tire.coat),
+                        0.3 * debris.sqrt(),
+                        1.0,
+                        (0.3, 1.4),
+                    )
+                } else {
+                    (
+                        SMOKE_RATE * s,
+                        [0.82, 0.82, 0.84],
+                        0.45 * s.sqrt(),
+                        2.6,
+                        (0.5, 2.0 + 1.5 * s),
+                    )
+                }
             }
         };
         smoke.owed[i] += rate * dt;

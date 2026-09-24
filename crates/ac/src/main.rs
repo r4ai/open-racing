@@ -9,9 +9,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use open_racing_ac::car::{self, CarOptions};
-use open_racing_sim::{
-    AutoShift, Car, CarModel, Controls, Drive, Surface, Track, TrackDef, TrackPoint,
-};
+use open_racing_sim::{AutoShift, Car, CarModel, Controls, Drive, Track, TrackDef, TrackPoint};
 
 #[derive(Parser)]
 #[command(
@@ -292,8 +290,12 @@ fn report(track: &Track) {
         }
         // Just inside each edge the surface should count as track, if the widths are
         // on the right sides.
-        let on_track =
-            |off: f64| track.query(smp.pos + smp.lateral * off, 0).surface != Surface::Grass;
+        let on_track = |off: f64| {
+            !track
+                .query(smp.pos + smp.lateral * off, 0)
+                .surface
+                .off_track()
+        };
         edge_l += on_track(smp.width_left - 0.5) as usize;
         edge_r += on_track(-(smp.width_right - 0.5)) as usize;
     }

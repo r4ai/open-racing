@@ -4,6 +4,8 @@ use std::fmt::Write;
 
 use bevy::prelude::*;
 
+use open_racing_sim::TrackCondition;
+
 use crate::camera::CameraMode;
 use crate::driving::{Mode, Simulation};
 use crate::ffb::FfbStatus;
@@ -36,7 +38,7 @@ P                replay since last reset / stop replay
 T                toggle AI driver (with --ai)
 M                mute / unmute sound
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
-Esc              input settings: assign steering, pedals and shift buttons
+Esc              settings: input, force feedback, track condition (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
 Wheel and pedals: assign them in the Esc settings (input \"custom\")";
@@ -189,6 +191,22 @@ fn update(
                 * 100.0
         );
     }
+    let q = sim.track.query(st.position, sim.lap.hint());
+    let here = sim.evolution.grip_at(q.surface, q.s, q.d);
+    let (line, off) = sim.evolution.start_grip();
+    let _ = writeln!(
+        s,
+        "track {} (line {:.0} %, off line {:.0} %)   grip here {:.1} %   tyre dirt {}",
+        TrackCondition::nearest(line).name(),
+        line * 100.0,
+        off * 100.0,
+        here * 100.0,
+        st.wheels
+            .iter()
+            .map(|w| format!("{:3.0}", w.tire.dirt() * 100.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let a = car.telemetry.acceleration;
     let _ = write!(
         s,

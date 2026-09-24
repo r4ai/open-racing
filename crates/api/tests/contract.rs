@@ -220,3 +220,24 @@ fn observation_supports_a_simple_driver() {
     let progress = env.episode_stats().next().unwrap().progress;
     assert!(progress > 1000.0, "progress {progress}");
 }
+
+#[test]
+fn track_grip_range_parses_and_randomises_episodes() {
+    assert_eq!(parse_grip_range("optimum..green"), Ok((0.94, 1.0)));
+    assert_eq!(parse_grip_range("97%"), Ok((0.97, 0.97)));
+    let spec = spec(EnvConfig {
+        track_grip: Some((0.9, 1.0)),
+        ..EnvConfig::default()
+    });
+    let mut env = spec.make_vec_env(4);
+    let mut policy = PurePursuit::new(env.observation_space());
+    let mut obs = env.reset(3).to_vec();
+    let mut actions = vec![0.0; 4 * 3];
+    for _ in 0..200 {
+        policy.act(&obs, &mut actions);
+        let r = env.step(&actions);
+        assert!(r.obs.iter().all(|x| x.is_finite()));
+        obs.copy_from_slice(r.obs);
+    }
+    assert!(env.episode_stats().all(|s| s.progress > 50.0));
+}

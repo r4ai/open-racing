@@ -48,11 +48,11 @@ impl Plugin for ScenePlugin {
 struct CarBody;
 
 #[derive(Component)]
-struct CarWheel(usize);
+pub struct CarWheel(pub usize);
 
 /// The axles of a car model's wheels (see `CarVisual::wheel_axles`), in body axes.
 #[derive(Resource, Clone, Copy)]
-struct WheelAxles([DVec3; 4]);
+pub struct WheelAxles(pub [DVec3; 4]);
 
 /// What steers and follows the suspension with a wheel without spinning.
 #[derive(Component)]

@@ -46,6 +46,27 @@ cargo run --release -p open-racing-app -- --ai runs/lakeside
 
 Use `--features ndarray` or `--features flex` for a CPU backend.
 
+### Track evolution
+
+Rubber builds up on the racing line as cars drive, as in other sims. The road is a grid of patches in track coordinates (4 m along × 0.5 m across), each with its own rubber level:
+
+- **Rubber:** grip runs from 90 % on dusty asphalt to 100 % where the line is fully rubbered in. Tyres lay rubber in proportion to their frictional work (the square of how much of their grip they use), so braking zones, apexes and corner exits rubber in fastest and straights least. Starting conditions put rubber on a racing line estimated from the track (the minimum-curvature line, driven at an estimated speed); off the line the asphalt stays at 94 %, and outside the line in corners marbles cost up to a further 8 %.
+- **Dirt:** tyres rolling on grass, earth or gravel pick up a coat (grass clippings, earth, grit) that costs them up to 20–30 % grip. On paved ground they shed it over a few hundred metres (faster when sliding; grit flies off quickest) and it lands on the asphalt, where it costs grip until tyres rolling over it sweep it away again. The HUD shows the grip under the car and each tyre's coat.
+- **Levels:** `dusty` (90 %), `green` (94 %), `fast` (97 %), `optimum` (100 %), or any number such as `0.96`, is the grip where the line is worked hardest. Kerbs, run-off and grass keep their own grip.
+
+```bash
+# Drive on a green track that rubbers in by 0.2 % per lap (also on the Esc settings, page "track")
+cargo run --release -p open-racing-app -- --track-grip green --grip-gain 0.002
+
+# Train over randomised track conditions (the policy sees them only through the car's behaviour)
+cargo run --release -p open-racing-train-burn -- train --track-grip green..optimum --out runs/evolving
+
+# Evaluate on a given condition (defaults to what the policy was trained with)
+cargo run --release -p open-racing-train-burn -- eval --model runs/evolving --track-grip dusty
+```
+
+Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app draws the rubber, marbles and dirt over the road and the coat on the tyres.
+
 ### Controls
 
 | key       | action                                                     |
@@ -61,7 +82,7 @@ Use `--features ndarray` or `--features flex` for a CPU backend.
 | T         | switch to the AI driver                                    |
 | M         | mute / unmute sound                                        |
 | Tab       | choose the input device                                    |
-| Esc       | input settings (assign steering, pedals and shift buttons) |
+| Esc       | settings: input devices, force feedback, track condition   |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
 
@@ -109,7 +130,7 @@ cargo run --release -p open-racing-train-burn -- train --track my_track
 
 How the folder is converted:
 
-- **Tyres:** a mesh is physical when its name starts with digits followed by a surface key from `surfaces.ini` (e.g. `1ROAD_05`). Grip is `FRICTION` relative to the grippiest valid-track surface, and surfaces that are not valid track count as off track in rewards. Meshes named `<digits>WALL…` are solid walls.
+- **Tyres:** a mesh is physical when its name starts with digits followed by a surface key from `surfaces.ini` (e.g. `1ROAD_05`). Grip is `FRICTION` relative to the grippiest valid-track surface. The kind of surface comes from its key (`KERB`/`CURB`/`RUMBLE`, `SAND`/`GRAVEL`, `DIRT`/`MUD`, `CARPET`/`TURF`, `GRASS`/`GRS`), else its sound (`kerb.wav`, `sand.wav`, `grass.wav`, `extraturf.wav`), else paved (valid track: asphalt, otherwise run-off) or grass when `DIRT_ADDITIVE` is high; `DIRT_ADDITIVE` also sets how readily tyres pick up dirt there. Anything but asphalt and kerbs counts as off track in rewards. Packages converted before these surface kinds existed treat everything off track as grass; convert them again to get gravel, earth, turf and run-off. Meshes named `<digits>WALL…` are solid walls.
 - **Centreline:** the AI line only defines the centreline and the track widths, which give progress, observations and lap timing. It is not used as a driving line. The start/finish line is at the timing markers.
 - **Materials:** diffuse textures, normal maps (`txNormal`) and the mask and detail layers of multi-layer materials carry over. The game's highlights (`ksSpecular`, `ksSpecularEXP`) and reflections (`fresnelMaxLevel`) become a PBR roughness and reflectance, per texel where `txMaps` varies them. Surfaces reflect the sky only where the game reflects its surroundings.
 

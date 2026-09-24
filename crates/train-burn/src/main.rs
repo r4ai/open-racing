@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use open_racing_api::{DefaultReward, EnvConfig, EnvSpec, Policy, RacingVecEnv, Surface, VecEnv};
+use open_racing_api::{
+    DefaultReward, EnvConfig, EnvSpec, Policy, RacingVecEnv, VecEnv, parse_grip_range,
+};
 use open_racing_train_burn::ppo::{self, PpoConfig, TrainContext};
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
@@ -92,6 +94,15 @@ enum Command {
         /// Let the policy shift gears itself instead of the automatic gear selector.
         #[arg(long)]
         manual_shift: bool,
+        /// Track evolution: grip on the racing line at the start of each episode, as a
+        /// level (dusty, green, fast, optimum, or e.g. 0.97) or a range to randomise over
+        /// (e.g. green..optimum). Rubber lies on the racing line, dust off it. Without it
+        /// the whole asphalt has the tyres' nominal grip.
+        #[arg(long, value_parser = parse_grip_range)]
+        track_grip: Option<(f64, f64)>,
+        /// Grip the racing line gains per lap the car drives, with --track-grip.
+        #[arg(long, default_value_t = EnvConfig::default().grip_gain_per_lap)]
+        grip_gain: f64,
         #[arg(long, default_value = "runs/ppo")]
         out: PathBuf,
         /// Continue from a trained policy (weights and observation normaliser).
@@ -113,6 +124,10 @@ enum Command {
         /// Start the robustness cars no faster than the corners just ahead allow.
         #[arg(long)]
         safe_start: bool,
+        /// Racing-line grip level or range to evaluate on (see `train --track-grip`);
+        /// defaults to what the policy was trained with.
+        #[arg(long, value_parser = parse_grip_range)]
+        track_grip: Option<(f64, f64)>,
     },
 }
 
@@ -145,6 +160,8 @@ fn main() {
             max_steer_rate,
             hidden,
             manual_shift,
+            track_grip,
+            grip_gain,
             out,
             init,
         } => {
@@ -157,6 +174,8 @@ fn main() {
                 control_hz,
                 max_steer_rate,
                 auto_shift: !manual_shift,
+                track_grip,
+                grip_gain_per_lap: grip_gain,
                 seed,
                 ..EnvConfig::default()
             };
@@ -186,6 +205,8 @@ fn main() {
                 abs: config.abs,
                 max_steer_rate: config.max_steer_rate,
                 auto_shift: config.auto_shift,
+                track_grip: config.track_grip,
+                grip_gain_per_lap: Some(config.grip_gain_per_lap),
                 track,
                 car,
             };
@@ -219,9 +240,13 @@ fn main() {
             envs,
             trace,
             safe_start,
+            track_grip,
         } => {
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
+            if track_grip.is_some() {
+                policy.meta.track_grip = track_grip;
+            }
             flying_lap(&mut policy, seconds, trace.as_deref());
             if envs > 0 {
                 robustness(&mut policy, seconds, envs, safe_start);
@@ -306,7 +331,7 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
                 .telemetry
                 .wheels
                 .iter()
-                .filter(|w| w.surface == Surface::Grass)
+                .filter(|w| w.surface.off_track())
                 .count();
             writeln!(
                 file,

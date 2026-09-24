@@ -1,10 +1,11 @@
 //! Tyre force model: Pacejka "Magic Formula" with combined slip via normalised slip,
-//! plus inflation pressure, a tread (three zones) and carcass temperature model, and
-//! wear, which together scale the grip.
+//! plus inflation pressure, a tread (three zones) and carcass temperature model, wear
+//! and dirt picked up off the road, which together scale the grip.
 
 use serde::{Deserialize, Serialize};
 
 use crate::AMBIENT_TEMPERATURE;
+use crate::track::Surface;
 
 /// Shape of one Magic Formula curve, specified by physically meaningful numbers.
 ///
@@ -172,7 +173,18 @@ const ATMOSPHERE: f64 = 1.01325;
 /// 0 °C in K.
 const KELVIN: f64 = 273.15;
 
-/// Temperature and wear of one tyre.
+/// Grip lost by a tread fully coated, per kind of coat ([`crate::Coat`] order): wet grass
+/// clippings are slickest, grit rolls under the tread like ball bearings.
+const COAT_GRIP_LOSS: [f64; 3] = [0.3, 0.25, 0.2];
+/// Distance off the road over which the tread picks up most of a coat, m.
+const DIRT_PICKUP_LENGTH: f64 = 8.0;
+/// Distance rolled on paved surfaces over which the tread sheds most of its coat, m,
+/// per kind of coat: loose grit flies off quickly, sticky soil takes longest.
+const COAT_SHED_LENGTH: [f64; 3] = [250.0, 350.0, 120.0];
+/// How much faster sliding scrubs the coat off than rolling, per metre.
+const DIRT_SCRUB: f64 = 4.0;
+
+/// Temperature, wear and dirt of one tyre.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TireCondition {
     /// Surface temperature of the inner, middle and outer tread zone, °C.
@@ -181,6 +193,9 @@ pub struct TireCondition {
     pub core_temperature: f64,
     /// Tread worn away, 0 = new, 1 = worn out.
     pub wear: f64,
+    /// Loose material on the tread by kind ([`crate::Coat`] order); the sum is 0 when clean and
+    /// 1 when fully coated.
+    pub coat: [f64; 3],
 }
 
 impl TireCondition {
@@ -190,6 +205,51 @@ impl TireCondition {
     pub fn pressure(&self, cold: f64) -> f64 {
         (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (AMBIENT_TEMPERATURE + KELVIN)
             - ATMOSPHERE
+    }
+
+    /// How much of the tread is coated, 0 = clean, 1 = fully.
+    #[inline]
+    pub fn dirt(&self) -> f64 {
+        self.coat.iter().sum()
+    }
+
+    /// Covers `coat` (by kind, as shares of the tread) of the part of the tread still
+    /// clean, so a coated tyre picks up less.
+    #[inline]
+    pub fn add_coat(&mut self, coat: [f64; 3]) {
+        let room = (1.0 - self.dirt()).max(0.0);
+        let scale = room / coat.iter().sum::<f64>().max(1.0);
+        for (c, add) in self.coat.iter_mut().zip(coat) {
+            *c += add * scale;
+        }
+    }
+
+    /// Rolls `distance` m on `surface` (sliding `slide` m of it): picks up its loose
+    /// material, `pickup` (0..1) setting how readily, or sheds the coat on a paved
+    /// surface, faster while sliding. Returns what was shed, by kind of coat.
+    #[inline]
+    pub fn roll_dirt(
+        &mut self,
+        surface: Surface,
+        pickup: f64,
+        distance: f64,
+        slide: f64,
+    ) -> [f64; 3] {
+        if let Some(coat) = surface.coat() {
+            let mut add = [0.0; 3];
+            add[coat as usize] = (pickup * distance / DIRT_PICKUP_LENGTH).min(1.0);
+            self.add_coat(add);
+            return [0.0; 3];
+        }
+        if !surface.paved() {
+            return [0.0; 3];
+        }
+        let wipe = distance + DIRT_SCRUB * slide;
+        std::array::from_fn(|k| {
+            let shed = self.coat[k] * (wipe / COAT_SHED_LENGTH[k]).min(1.0);
+            self.coat[k] -= shed;
+            shed
+        })
     }
 
     /// Surface temperature weighted by the load on each tread zone, °C.
@@ -237,6 +297,7 @@ impl TireModel {
             tread_temperature: [t; 3],
             core_temperature: t,
             wear: 0.0,
+            coat: [0.0; 3],
         }
     }
 
@@ -267,7 +328,7 @@ impl TireModel {
         w.map(|x| x / sum)
     }
 
-    /// Grip multiplier for tread temperature, wear and pressure.
+    /// Grip multiplier for tread temperature, wear, pressure and dirt.
     #[inline]
     pub fn condition_grip(&self, c: &TireCondition, load: &[f64; 3], pressure: f64) -> f64 {
         let t = &self.p.thermal;
@@ -285,6 +346,7 @@ impl TireModel {
         temperature
             * window_grip(pressure - pp.optimal, pp.window, pp.grip_loss)
             * (1.0 - t.wear_grip_loss * c.wear)
+            * (1.0 - (0..3).map(|k| COAT_GRIP_LOSS[k] * c.coat[k]).sum::<f64>())
     }
 
     /// Advances temperatures and wear by `dt`.
@@ -405,6 +467,40 @@ mod tests {
     }
 
     #[test]
+    fn grass_coats_the_tread_and_the_road_wipes_it_off() {
+        use crate::track::Coat;
+        let mut c = front().fresh();
+        for _ in 0..20 {
+            c.roll_dirt(Surface::Grass, 1.0, 1.0, 0.0);
+        }
+        assert!(c.coat[Coat::Grass as usize] > 0.9, "coat {:?}", c.coat);
+        // The coat is full: gravel adds nothing.
+        c.roll_dirt(Surface::Gravel, 1.0, 1.0, 0.0);
+        assert!(c.dirt() <= 1.0 + 1e-12);
+        let coated = c.dirt();
+        let shed: f64 = (0..100)
+            .map(|_| {
+                c.roll_dirt(Surface::Asphalt, 0.0, 1.0, 0.0)
+                    .iter()
+                    .sum::<f64>()
+            })
+            .sum();
+        assert!((shed + c.dirt() - coated).abs() < 1e-12);
+        assert!(
+            (0.3..0.8).contains(&c.dirt()),
+            "dirt after 100 m {}",
+            c.dirt()
+        );
+        let rolled = c.dirt();
+        c.roll_dirt(Surface::Asphalt, 0.0, 10.0, 10.0);
+        assert!(rolled - c.dirt() > 5.0 * rolled * 10.0 / COAT_SHED_LENGTH[0] * 0.9);
+        // Turf barely coats.
+        let mut t = front().fresh();
+        t.roll_dirt(Surface::Turf, Surface::Turf.dirt(), 1.0, 0.0);
+        assert!(t.dirt() < 0.02);
+    }
+
+    #[test]
     fn grip_peaks_at_optimal_temperature_and_pressure_and_drops_with_wear() {
         let tire = front();
         let (t, p) = (tire.p.thermal.optimal_temperature, tire.p.pressure.optimal);
@@ -415,6 +511,7 @@ mod tests {
                     tread_temperature: [temperature; 3],
                     core_temperature: temperature,
                     wear,
+                    coat: [0.0; 3],
                 },
                 &even,
                 pressure,

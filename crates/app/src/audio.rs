@@ -368,11 +368,13 @@ fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<Ca
             continue;
         }
         match w.surface {
-            Surface::Asphalt => {}
+            Surface::Asphalt | Surface::Runoff => {}
             Surface::Kerb => kerb += 0.5,
-            Surface::Grass => grass += 0.25,
+            Surface::Turf => grass += 0.15,
+            Surface::Grass | Surface::Dirt => grass += 0.25,
+            Surface::Gravel => grass += 0.4,
         }
-        if w.surface != Surface::Grass {
+        if w.surface.paved() {
             skid = skid.max(slide(w) * (w.load / static_load).min(1.5));
         }
     }
