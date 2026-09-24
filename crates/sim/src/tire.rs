@@ -140,12 +140,29 @@ pub struct TireParams {
     pub optimal_camber: f64,
     /// Grip loss per rad² of deviation from the optimal camber.
     pub camber_grip_loss: f64,
-    /// Pneumatic trail at zero slip in metres (drives aligning torque / FFB).
+    /// Pneumatic trail at zero slip, nominal load and optimal pressure in metres
+    /// (drives aligning torque / FFB). It grows with the length of the contact patch.
     pub pneumatic_trail: f64,
+    /// Torque per radian of twist of the contact patch about the road normal, before
+    /// it starts slipping round, at nominal load and optimal pressure, N·m/rad: what
+    /// resists turning the steering wheel at a standstill.
+    #[serde(default = "default_twist_stiffness")]
+    pub twist_stiffness: f64,
+    /// Lever of the friction that lets a twisted contact patch slip round, at nominal
+    /// load and optimal pressure: its torque is the load times μ times this, m.
+    #[serde(default = "default_twist_radius")]
+    pub twist_radius: f64,
     /// Rolling resistance coefficient at the optimal pressure.
     pub rolling_resistance: f64,
     pub pressure: PressureParams,
     pub thermal: ThermalParams,
+}
+
+fn default_twist_stiffness() -> f64 {
+    2000.0
+}
+fn default_twist_radius() -> f64 {
+    0.025
 }
 
 /// How the inflation pressure changes the tyre. Pressures are gauge, in bar.
@@ -352,6 +369,42 @@ impl TireModel {
             + self.p.pressure.stiffness_per_bar * (pressure - self.p.pressure.optimal)
     }
 
+    /// Length of the contact patch relative to that at nominal load and optimal
+    /// pressure. It grows as the square root of the tyre's deflection.
+    #[inline]
+    fn patch_scale(&self, fz: f64, pressure: f64) -> f64 {
+        let deflection = fz.max(0.0) / self.vertical_stiffness(pressure).max(1.0);
+        (deflection * self.p.vertical_stiffness / self.p.nominal_load).sqrt()
+    }
+
+    /// Winds up the torque with which the contact patch resists the wheel turning over
+    /// the road, from `torque` after a further turn of `turn` rad (positive to the
+    /// left, and so is the torque it returns). Rubber-like (Dahl friction): stiff at
+    /// first, softening as the patch starts slipping round towards its friction limit,
+    /// and stiff again the moment the turn reverses, so a released wheel springs back.
+    /// The stiffness grows with the cube of the patch's length and drops on loose
+    /// ground (`firmness`); the limit is `mu` (the tyre's own μ times the grip
+    /// multipliers) times the load on a lever that grows with the patch's length.
+    #[inline]
+    pub fn twist(
+        &self,
+        torque: f64,
+        turn: f64,
+        fz: f64,
+        mu: f64,
+        pressure: f64,
+        firmness: f64,
+    ) -> f64 {
+        let scale = self.patch_scale(fz, pressure);
+        let limit = mu * fz.max(0.0) * self.p.twist_radius * scale;
+        if limit <= 0.0 {
+            return 0.0;
+        }
+        let stiffness = self.p.twist_stiffness * scale.powi(3) * firmness;
+        let target = limit * turn.signum();
+        target + (torque.clamp(-limit, limit) - target) * (-stiffness * turn.abs() / limit).exp()
+    }
+
     #[inline]
     pub fn rolling_resistance(&self, pressure: f64) -> f64 {
         self.p.rolling_resistance
@@ -478,9 +531,13 @@ impl TireModel {
         let fx = self.p.mu_x * load_mu * fz * self.long.eval(rho * self.long.peak_slip) * sx / rho;
         let fy = self.p.mu_y * load_mu * fz * self.lat.eval(rho * self.lat.peak_slip) * sy / rho;
 
-        // Pneumatic trail collapses as the tyre saturates, so aligning torque drops
-        // past the peak – the classic "light steering" cue.
-        let trail = self.p.pneumatic_trail * (1.0 - (sy.abs() / 1.5).min(1.0)).powi(2);
+        // The pneumatic trail scales with the contact patch's length, which grows as the
+        // square root of the tyre's deflection: more load or less pressure, more trail.
+        // It collapses as the patch starts sliding, so aligning torque drops past the
+        // peak – the classic "light steering" cue – and under braking or wheelspin too.
+        let trail = self.p.pneumatic_trail
+            * self.patch_scale(fz, pressure)
+            * (1.0 - (rho / 1.5).min(1.0)).powi(2);
         TireForce {
             fx,
             fy,

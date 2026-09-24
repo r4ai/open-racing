@@ -34,6 +34,8 @@ const BARRIER_RESTITUTION: f64 = 0.2;
 const BARRIER_FRICTION: f64 = 0.3;
 /// Wheels this far inside the run-off barrier cannot reach it within one step, m.
 const BARRIER_SKIN: f64 = 1.0;
+/// Rolling speed over which the pneumatic trail swaps ends when the wheel reverses, m/s.
+const TRAIL_REVERSAL_SPEED: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelState {
@@ -48,6 +50,11 @@ pub struct WheelState {
     pub kappa: f64,
     /// Transient slip angle (tan α).
     pub alpha: f64,
+    /// Road wheel steer angle at the last step, rad.
+    pub steer: f64,
+    /// Torque with which the twisted contact patch resists the wheel having turned
+    /// over it, N·m, positive after a turn to the left.
+    pub twist: f64,
     /// Track query hint.
     pub hint: usize,
     pub tire: TireCondition,
@@ -334,6 +341,20 @@ impl Car {
                 * camber_grip
                 * tire.condition_grip(&w.tire, &tread_load, pressure);
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu, pressure);
+            // The pneumatic trail lies behind the patch's middle in the direction the
+            // wheel rolls, so it swaps ends in reverse; on loose ground the tyre ploughs
+            // and the lateral force acts nearer the middle.
+            let firmness = q.surface.firmness();
+            f.mz *= (vx / TRAIL_REVERSAL_SPEED).clamp(-1.0, 1.0) * firmness;
+            // Turning the wheel over the road (steering, the car yawing) twists the patch
+            // until it slips round; rolling unwinds it once fresh tread has come through
+            // half the patch, whose length follows from the tyre's deflection.
+            let turn = delta - w.steer + omega.dot(rot_t * n) * dt;
+            let half_patch = (2.0 * tp.radius * penetration.max(0.0)).sqrt().max(0.01);
+            let unwound = w.twist * (-speed * dt / half_patch).exp();
+            w.steer = delta;
+            w.twist = tire.twist(unwound, turn, fz, tp.mu_y * mu, pressure, firmness);
+            f.mz -= w.twist;
 
             let blend = (1.0 - speed / LOW_SPEED).max(0.0);
             if blend > 0.0 {

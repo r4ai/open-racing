@@ -113,6 +113,19 @@ impl Surface {
         }
     }
 
+    /// How firmly the ground holds a tyre's contact patch, 0..1. Loose ground gives way
+    /// under it: the tyre ploughs, so the lateral force acts nearer the middle of the
+    /// patch (less pneumatic trail), and a twisted patch winds up more softly.
+    pub fn firmness(self) -> f64 {
+        match self {
+            Self::Asphalt | Self::Kerb | Self::Runoff => 1.0,
+            Self::Turf => 0.7,
+            Self::Grass => 0.5,
+            Self::Dirt => 0.4,
+            Self::Gravel => 0.25,
+        }
+    }
+
     /// How readily a tyre picks up loose material here, 0..1 (Assetto Corsa's
     /// `DIRT_ADDITIVE`).
     pub fn dirt(self) -> f64 {

@@ -8,13 +8,18 @@ use open_racing_sim::params::DifferentialParams;
 use open_racing_sim::*;
 
 fn circle(radius: f64) -> Track {
+    circle_of_width(radius, 30.0)
+}
+
+/// A circle `width` wide on each side of its centreline, with grass beyond its kerbs.
+fn circle_of_width(radius: f64, width: f64) -> Track {
     let points = (0..32)
         .map(|i| {
             let a = i as f64 / 32.0 * std::f64::consts::TAU;
             TrackPoint {
                 pos: (radius * a.cos(), radius * a.sin(), 0.0),
-                width_left: 30.0,
-                width_right: 30.0,
+                width_left: width,
+                width_right: width,
                 bank: 0.0,
             }
         })
@@ -672,5 +677,116 @@ fn kerb_ridges_shake_the_steering_on_a_straight() {
     assert!(
         ridged > 1.0,
         "ridged kerb shakes the wheel by only {ridged:.2} N·m"
+    );
+}
+
+/// Steering torque and lateral acceleration (g) after holding `steer` for 3 s from
+/// `speed` (negative: in reverse) on an open field of asphalt, or of grass.
+fn steady_steering(grass: bool, speed: f64, steer: f64) -> (f64, f64) {
+    // Far outside a narrow road, or on a wide one: the car circles without leaving it.
+    let (track, d) = if grass {
+        (circle_of_width(5000.0, 1.0), -200.0)
+    } else {
+        (circle_of_width(5000.0, 1000.0), 0.0)
+    };
+    let gear = if speed < 0.0 { -1 } else { 2 };
+    let mut car = Car::new(gt3(), &track, 0.0, d, 0.0, gear);
+    car.state.velocity = car.state.orientation * DVec3::X * speed;
+    for wheel in &mut car.state.wheels {
+        wheel.spin = speed / car.model.front_tire.p.radius;
+    }
+    for _ in 0..3000 {
+        let hold = (car.local_velocity().x.abs() < speed.abs()) as i32 as f64;
+        car.step(
+            &track,
+            &Controls {
+                throttle: 0.3 * hold,
+                steer_wheel_angle: steer,
+                ..Default::default()
+            },
+        );
+    }
+    (
+        car.telemetry.steering_torque,
+        car.telemetry.acceleration.y / GRAVITY,
+    )
+}
+
+#[test]
+fn loose_ground_lightens_the_steering() {
+    let (asphalt, asphalt_g) = steady_steering(false, 14.0, 0.6);
+    let (grass, grass_g) = steady_steering(true, 14.0, 0.6);
+    let per_g = |torque: f64, g: f64| (torque / g).abs();
+    assert!(
+        per_g(grass, grass_g) < 0.8 * per_g(asphalt, asphalt_g),
+        "grass {grass:.2} N·m at {grass_g:.2} g, asphalt {asphalt:.2} N·m at {asphalt_g:.2} g"
+    );
+}
+
+#[test]
+fn reversing_leaves_the_steering_light() {
+    let (forward, _) = steady_steering(false, 5.0, 0.5);
+    let (reverse, _) = steady_steering(false, -5.0, 0.5);
+    assert!(forward < -1.0, "forward {forward:.2} N·m does not centre");
+    assert!(
+        reverse.abs() < 0.3 * forward.abs(),
+        "reverse {reverse:.2} N·m, forward {forward:.2} N·m"
+    );
+}
+
+/// Steering torque of the parked GT3 on an open field of asphalt or grass, sampled
+/// every 0.1 s while the wheel winds to 90° over a second and back by 30° over the next.
+fn parked_twist(grass: bool) -> Vec<f64> {
+    let (track, d) = if grass {
+        (circle_of_width(5000.0, 1.0), -200.0)
+    } else {
+        (circle_of_width(5000.0, 1000.0), 0.0)
+    };
+    let mut car = Car::new(gt3(), &track, 0.0, d, 0.0, 0);
+    let mut torque = Vec::new();
+    for k in 0..3000 {
+        let degrees = match k {
+            0..1000 => 0.0,
+            1000..2000 => (k - 1000) as f64 * 0.09,
+            _ => 90.0 - (k - 2000) as f64 * 0.03,
+        };
+        car.step(
+            &track,
+            &Controls {
+                brake: 0.3,
+                steer_wheel_angle: degrees.to_radians(),
+                ..Default::default()
+            },
+        );
+        if k >= 1000 && k % 100 == 0 {
+            torque.push(car.telemetry.steering_torque);
+        }
+    }
+    torque
+}
+
+#[test]
+fn a_parked_tyre_winds_up_like_rubber_and_springs_back() {
+    let asphalt = parked_twist(false);
+    // Winding up: resists at once, then ever more softly as the patch slips round.
+    let (first, wound) = (asphalt[1] - asphalt[0], asphalt[10] - asphalt[9]);
+    assert!(first < -1.0, "barely resists at first: {first:.2} N·m");
+    assert!(
+        wound < 0.0 && wound.abs() < 0.5 * first.abs(),
+        "no softening: {first:.2} then {wound:.2} N·m per 9°"
+    );
+    // Turning back is stiff again: a few degrees give most of it back.
+    let back = asphalt[13] - asphalt[10];
+    assert!(
+        back > 3.0 * wound.abs(),
+        "no spring back: {back:.2} N·m over 9° back, {wound:.2} per 9° winding"
+    );
+    // Loose ground holds the patch less.
+    let grass = parked_twist(true);
+    assert!(
+        grass[10].abs() < 0.7 * asphalt[10].abs(),
+        "grass {:.2} N·m, asphalt {:.2} N·m",
+        grass[10],
+        asphalt[10]
     );
 }

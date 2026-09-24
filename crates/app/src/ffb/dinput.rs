@@ -12,14 +12,23 @@ use windows::core::{BOOL, GUID, Interface};
 const DIPROP_AUTOCENTER_ID: usize = 9;
 const INFINITE: u32 = u32::MAX;
 
-/// An acquired force-feedback wheel playing one constant force on its X axis.
-/// Dropping it stops the force and releases the device.
+/// An acquired force-feedback wheel playing one constant force on its X axis, and
+/// sine vibrations on top of it where the device can play them.
+/// Dropping it stops the forces and releases the device.
 pub struct Wheel {
     _di: IDirectInput8W,
     device: IDirectInputDevice8W,
     effect: IDirectInputEffect,
+    vibrations: Vec<Vibration>,
     pub name: String,
     magnitude: i32,
+}
+
+/// A sine effect and the magnitude and period (µs) it plays.
+struct Vibration {
+    effect: IDirectInputEffect,
+    magnitude: u32,
+    period: u32,
 }
 
 impl Wheel {
@@ -107,10 +116,20 @@ impl Wheel {
                 .map_err(|e| format!("{name}: {e}"))?;
             let effect = effect.ok_or("CreateEffect returned no effect")?;
             effect.Start(1, 0).map_err(|e| format!("{name}: {e}"))?;
+            // Optional: a wheel that cannot play them still gets the steering torque.
+            let vibrations = (0..super::VIBRATIONS)
+                .map_while(|_| create_sine(&device))
+                .map(|effect| Vibration {
+                    effect,
+                    magnitude: 0,
+                    period: 0,
+                })
+                .collect();
             Ok(Self {
                 _di: di,
                 device,
                 effect,
+                vibrations,
                 name,
                 magnitude: 0,
             })
@@ -151,6 +170,38 @@ impl Wheel {
         Ok(())
     }
 
+    /// Plays vibration `i` with `magnitude` in 0..1 of the motor's maximum at `hz`.
+    /// Does nothing where the device has no such vibration.
+    pub fn vibrate(&mut self, i: usize, magnitude: f64, hz: f64) -> Result<(), String> {
+        let Some(v) = self.vibrations.get_mut(i) else {
+            return Ok(());
+        };
+        let magnitude = (magnitude.clamp(0.0, 1.0) * DI_FFNOMINALMAX as f64).round() as u32;
+        // Whole hertz: each change of period may restart the wave on some drivers.
+        let period = (1e6 / hz.round().max(1.0)) as u32;
+        if magnitude == v.magnitude && (period == v.period || magnitude == 0) {
+            return Ok(());
+        }
+        let mut periodic = DIPERIODIC {
+            dwMagnitude: magnitude,
+            lOffset: 0,
+            dwPhase: 0,
+            dwPeriod: period,
+        };
+        let mut params = DIEFFECT {
+            dwSize: size_of::<DIEFFECT>() as u32,
+            cbTypeSpecificParams: size_of::<DIPERIODIC>() as u32,
+            lpvTypeSpecificParams: (&raw mut periodic).cast(),
+            ..Default::default()
+        };
+        // SAFETY: `params` and `periodic` outlive the call.
+        unsafe { v.effect.SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS) }
+            .map_err(|e| e.to_string())?;
+        v.magnitude = magnitude;
+        v.period = period;
+        Ok(())
+    }
+
     /// Restarts the effect if the device stopped it (MOZA's hands-off protection, a
     /// driver reset, ...), which updating its force alone does not undo. Returns
     /// whether it had stopped.
@@ -163,6 +214,9 @@ impl Wheel {
             }
             let _ = self.device.Acquire();
             self.effect.Start(1, 0).map_err(|e| e.to_string())?;
+            for v in &self.vibrations {
+                let _ = v.effect.Start(1, 0);
+            }
         }
         Ok(true)
     }
@@ -181,6 +235,10 @@ impl Drop for Wheel {
         };
         // SAFETY: plain COM calls on live interfaces; `params` outlives them.
         unsafe {
+            for v in &self.vibrations {
+                let _ = v.effect.Stop();
+                let _ = v.effect.Unload();
+            }
             let _ = self
                 .effect
                 .SetParameters(&mut params, DIEP_TYPESPECIFICPARAMS);
@@ -189,6 +247,41 @@ impl Drop for Wheel {
             let _ = self.effect.Unload();
             let _ = self.device.Unacquire();
         }
+    }
+}
+
+/// A silent sine effect on the X axis, started; `None` if the device cannot play one.
+fn create_sine(device: &IDirectInputDevice8W) -> Option<IDirectInputEffect> {
+    let mut axes = [0u32]; // DIJOFS_X
+    let mut direction = [0i32];
+    let mut periodic = DIPERIODIC {
+        dwMagnitude: 0,
+        lOffset: 0,
+        dwPhase: 0,
+        dwPeriod: 20_000,
+    };
+    let mut params = DIEFFECT {
+        dwSize: size_of::<DIEFFECT>() as u32,
+        dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
+        dwDuration: INFINITE,
+        dwGain: DI_FFNOMINALMAX,
+        dwTriggerButton: DIEB_NOTRIGGER,
+        cAxes: 1,
+        rgdwAxes: axes.as_mut_ptr(),
+        rglDirection: direction.as_mut_ptr(),
+        cbTypeSpecificParams: size_of::<DIPERIODIC>() as u32,
+        lpvTypeSpecificParams: (&raw mut periodic).cast(),
+        ..Default::default()
+    };
+    let mut effect = None;
+    // SAFETY: plain COM calls; every pointer passed outlives the call it is passed to.
+    unsafe {
+        device
+            .CreateEffect(&GUID_Sine, &mut params, &mut effect, None)
+            .ok()?;
+        let effect = effect?;
+        effect.Start(1, 0).ok()?;
+        Some(effect)
     }
 }
 

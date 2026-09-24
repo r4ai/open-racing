@@ -7,9 +7,15 @@
 //! including the torque dropping away as the fronts reach their grip limit and the
 //! kicks of bumps and kerbs, which the road detail setting can bring out further.
 //!
-//! The base's peak torque, strength, maximum output, road detail, damping and
+//! On top of it the wheel plays two vibrations, as most sims do for what the physics
+//! cannot carry: the grain of the surface under the front tyres (the simulated road
+//! is smooth below a few centimetres), rougher off the track, and the scrub of front
+//! tyres sliding. Both grow with speed and with the load on the tyres.
+//!
+//! The base's peak torque, strength, maximum output, road detail, effects, damping and
 //! direction are set on the settings screen and saved to `ffb.ron`, since wheels
-//! differ in torque and in which way they push. Knowing the peak torque lets the force be set in N·m at the rim.
+//! differ in torque and in which way they push. Knowing the peak torque lets the
+//! force be set in N·m at the rim.
 //! Only Windows (DirectInput) is supported; elsewhere the plugin reports that.
 
 #[cfg(windows)]
@@ -20,8 +26,11 @@ use bevy::window::{PrimaryWindow, RawHandleWrapper, WindowCloseRequested};
 
 use serde::{Deserialize, Serialize};
 
+use open_racing_sim::{Car, FL, FR, GRAVITY, Surface};
+
 use crate::bindings::{self, Bindings};
 use crate::driving::{self, Mode, Simulation};
+use crate::effects::{slide, smoothstep};
 use crate::input::{self, InputSelection};
 use crate::settings::SettingsOpen;
 
@@ -37,6 +46,20 @@ const RATE_SMOOTHING: f64 = 0.03;
 /// Time constant separating road detail (bumps, kerbs) from the steady steering
 /// torque, s: changes faster than this count as detail.
 const DETAIL_SMOOTHING: f64 = 0.02;
+/// Vibrations the wheel plays on top of the torque: road texture and tyre scrub.
+pub const VIBRATIONS: usize = 2;
+/// Speeds over which the vibrations fade in from a standstill, m/s.
+const VIBRATION_SPEED: (f64, f64) = (0.5, 8.0);
+/// Frequency range of the road texture, Hz.
+const TEXTURE_HZ: (f64, f64) = (5.0, 80.0);
+/// Tyre scrub: rim torque with both front tyres fully sliding, N·m, and its frequency
+/// at the start of sliding and per m/s of sliding speed, Hz.
+const SCRUB_TORQUE: f64 = 0.4;
+const SCRUB_HZ: f64 = 28.0;
+const SCRUB_HZ_PER_SPEED: f64 = 2.0;
+const SCRUB_MAX_HZ: f64 = 60.0;
+/// Frame-to-frame spread of the vibrations' strength, so the grain is not a tone.
+const JITTER: f64 = 0.3;
 /// Runaway guard: the wheel held at the car's lock for this long while the tyres
 /// pull back towards centre with at least this torque (N·m) pauses the force until
 /// the wheel leaves lock. A driver can turn a 900° wheel past the car's lock, but a
@@ -67,6 +90,8 @@ pub struct FfbSettings {
     /// Share of the fast changes in the torque (bumps, kerbs) reproduced, percent;
     /// 100 plays them as simulated.
     pub detail: f64,
+    /// Strength of the road texture and tyre scrub vibrations, percent.
+    pub effects: f64,
     /// Resistance to turning the wheel quickly, percent; steadies strong bases.
     pub damping: f64,
     /// Reverses the force for wheels that push the other way.
@@ -81,6 +106,7 @@ impl Default for FfbSettings {
             strength: 40.0,
             max_torque: 8.0,
             detail: 150.0,
+            effects: 100.0,
             damping: 20.0,
             invert: false,
         }
@@ -102,6 +128,12 @@ impl FfbSettings {
     pub fn force(&self, torque: f64, detail: f64, rate: f64) -> f64 {
         let torque = torque + detail * (self.detail / 100.0 - 1.0);
         self.motor(torque * self.strength / 100.0 - rate * DAMPING_FULL * self.damping / 100.0)
+    }
+
+    /// Vibration amplitude at the rim in N·m → magnitude in 0..1 of the motor, scaled by
+    /// the effects setting and within the maximum output.
+    fn vibration(&self, rim: f64) -> f64 {
+        self.motor(rim * self.effects / 100.0).abs()
     }
 
     /// Torque wanted at the rim in N·m → motor force in -1..1, within the maximum output.
@@ -143,9 +175,60 @@ impl Wheel {
         Ok(())
     }
 
+    fn vibrate(&mut self, _i: usize, _magnitude: f64, _hz: f64) -> Result<(), String> {
+        Ok(())
+    }
+
     fn keep_playing(&mut self) -> Result<bool, String> {
         Ok(false)
     }
+}
+
+/// Grain of a surface: rim torque with both front tyres on it at their static load and
+/// speed, N·m, and the distance between its bumps, m.
+fn texture(surface: Surface) -> (f64, f64) {
+    match surface {
+        Surface::Asphalt => (0.07, 0.4),
+        Surface::Kerb | Surface::Runoff => (0.1, 0.35),
+        Surface::Turf => (0.26, 0.45),
+        Surface::Grass => (0.45, 0.6),
+        Surface::Dirt => (0.5, 0.5),
+        Surface::Gravel => (0.75, 0.3),
+    }
+}
+
+/// Road texture and tyre scrub under the front tyres: (rim torque amplitude in N·m,
+/// frequency in Hz) of each.
+fn vibrations(car: &Car) -> [(f64, f64); VIBRATIONS] {
+    let p = &car.model.params;
+    let static_load = 0.5 * p.mass * GRAVITY * p.front_weight;
+    let speed = car.speed();
+    let moving = smoothstep(VIBRATION_SPEED.0, VIBRATION_SPEED.1, speed);
+    let (mut grain, mut wavelength, mut roughest) = (0.0, 1.0, 0.0);
+    let (mut scrub, mut slide_speed) = (0.0, 0.0);
+    for i in [FL, FR] {
+        let w = &car.telemetry.wheels[i];
+        let load = (w.load / static_load).min(1.5);
+        let (amplitude, length) = texture(w.surface);
+        if amplitude * load > roughest {
+            (roughest, wavelength) = (amplitude * load, length);
+        }
+        grain += 0.5 * amplitude * load;
+        if w.surface.paved() {
+            scrub += 0.5 * SCRUB_TORQUE * slide(w) * load;
+        }
+        slide_speed += 0.5 * w.slide_speed;
+    }
+    [
+        (
+            grain * moving,
+            (speed / wavelength).clamp(TEXTURE_HZ.0, TEXTURE_HZ.1),
+        ),
+        (
+            scrub * moving,
+            (SCRUB_HZ + SCRUB_HZ_PER_SPEED * slide_speed).min(SCRUB_MAX_HZ),
+        ),
+    ]
 }
 
 /// The opened wheel. DirectInput objects belong to the thread that made them, so
@@ -162,6 +245,8 @@ struct Ffb {
     rate: f64,
     /// Steering torque without its fast changes, N·m.
     steady: f64,
+    /// State of the random spread of the vibrations.
+    noise: u32,
     next_watchdog: f64,
     /// Runaway guard: since when the wheel has been pinned at lock, whether the force
     /// is paused for it, the pauses in a row and when the last began.
@@ -315,11 +400,16 @@ fn update(
     } else {
         ""
     };
+    let mut shake = [(0.0, 1.0); VIBRATIONS];
     let left = if test.0 > 0.0 {
         test.0 -= dt;
         ffb_settings.motor(TEST_TORQUE)
     } else if !settings.0 && !ffb.tripped && !ffb.paused && sim.mode == Mode::Human {
         ffb.fade = (ffb.fade + dt / FADE_IN).min(1.0);
+        for ((amplitude, hz), s) in vibrations(&sim.car).into_iter().zip(&mut shake) {
+            let spread = 1.0 - JITTER * next_noise(&mut ffb.noise);
+            *s = (ffb_settings.vibration(amplitude * spread) * ffb.fade, hz);
+        }
         ffb_settings.force(torque, torque - ffb.steady, ffb.rate) * ffb.fade
     } else {
         ffb.fade = 0.0;
@@ -327,13 +417,28 @@ fn update(
     };
     // A positive DirectInput force turns a MOZA R12 left; other bases may differ.
     let out = if ffb_settings.invert { -left } else { left };
-    if let Some(wheel) = &mut ffb.wheel
-        && let Err(e) = wheel.set(out)
-    {
+    let played = ffb.wheel.as_mut().map(|wheel| {
+        wheel.set(out)?;
+        for (i, (magnitude, hz)) in shake.into_iter().enumerate() {
+            wheel.vibrate(i, magnitude, hz)?;
+        }
+        Ok::<_, String>(())
+    });
+    if let Some(Err(e)) = played {
         status.device = e;
         ffb.wheel = None;
         ffb.retry_at = now + RETRY_INTERVAL;
     }
+}
+
+/// Uniform random number in 0..1 (xorshift).
+fn next_noise(state: &mut u32) -> f64 {
+    let mut x = if *state == 0 { 0x9e37_79b9 } else { *state };
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x as f64 / u32::MAX as f64
 }
 
 /// With the direction inverted, the aligning torque drives the wheel into lock
@@ -476,6 +581,39 @@ mod tests {
         // 2 N·m steady plus a 1 N·m kick: the kick is doubled, the rest kept.
         assert!((s.force(3.0, 1.0, 0.0) - 0.4).abs() < 1e-12);
         assert!((FfbSettings { detail: 0.0, ..s }.force(3.0, 1.0, 0.0) - 0.2).abs() < 1e-12);
+    }
+
+    /// The GT3 rolling at `speed` with both front tyres on `surface` at their static
+    /// load, sliding at `slip_angle`.
+    fn car_on(surface: Surface, speed: f64, slip_angle: f64) -> Car {
+        let model = std::sync::Arc::new(open_racing_sim::CarModel::gt3());
+        let track = open_racing_sim::Track::default_circuit();
+        let mut car = Car::new(model, &track, 0.0, 0.0, speed, 3);
+        let p = &car.model.params;
+        let load = 0.5 * p.mass * GRAVITY * p.front_weight;
+        for i in [FL, FR] {
+            let w = &mut car.telemetry.wheels[i];
+            (w.surface, w.load, w.slip_angle) = (surface, load, slip_angle);
+        }
+        car
+    }
+
+    #[test]
+    fn vibrations_follow_speed_surface_and_sliding() {
+        let [grain, scrub] = vibrations(&car_on(Surface::Asphalt, 30.0, 0.0));
+        assert!(grain.0 > 0.0 && scrub.0 == 0.0);
+        assert!(vibrations(&car_on(Surface::Asphalt, 0.0, 0.0))[0].0 == 0.0);
+        let [gravel, _] = vibrations(&car_on(Surface::Gravel, 30.0, 0.0));
+        assert!(gravel.0 > 5.0 * grain.0);
+        let slow = vibrations(&car_on(Surface::Asphalt, 10.0, 0.0))[0];
+        assert!(
+            slow.1 < grain.1,
+            "texture at {} Hz slow, {} Hz fast",
+            slow.1,
+            grain.1
+        );
+        let [_, sliding] = vibrations(&car_on(Surface::Asphalt, 30.0, 0.2));
+        assert!(sliding.0 > 0.0);
     }
 
     #[test]

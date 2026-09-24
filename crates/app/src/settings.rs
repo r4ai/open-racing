@@ -3,7 +3,7 @@
 //!   check the result on live values. Axes are calibrated while they are assigned,
 //!   so inverted pedals and any axis layout work.
 //! - Force feedback: the base's peak torque, strength, maximum output in N·m, road
-//!   detail, damping and direction, with a test push.
+//!   detail, effects, damping and direction, with a test push.
 //! - Track: the rubber on the racing line to start from and how fast it builds up.
 //!
 //! The simulation is paused while the screen is open.
@@ -31,6 +31,7 @@ const FFB_WHEEL_TORQUE_RANGE: (f64, f64) = (1.0, 40.0);
 const FFB_PERCENT_STEP: f64 = 5.0;
 const FFB_STRENGTH_RANGE: (f64, f64) = (0.0, 200.0);
 const FFB_DETAIL_RANGE: (f64, f64) = (0.0, 300.0);
+const FFB_EFFECTS_RANGE: (f64, f64) = (0.0, 200.0);
 const FFB_DAMPING_RANGE: (f64, f64) = (0.0, 100.0);
 /// Track evolution: step and range of the grip the racing line gains per lap.
 const GRIP_GAIN_STEP: f64 = 0.0005;
@@ -67,17 +68,19 @@ enum FfbRow {
     Strength,
     MaxTorque,
     Detail,
+    Effects,
     Damping,
     Direction,
     Test,
 }
 
-const FFB_ROWS: [FfbRow; 8] = [
+const FFB_ROWS: [FfbRow; 9] = [
     FfbRow::Enabled,
     FfbRow::WheelTorque,
     FfbRow::Strength,
     FfbRow::MaxTorque,
     FfbRow::Detail,
+    FfbRow::Effects,
     FfbRow::Damping,
     FfbRow::Direction,
     FfbRow::Test,
@@ -248,6 +251,7 @@ fn navigate_ffb(
             (FFB_TORQUE_STEP, s.wheel_torque),
         ),
         FfbRow::Detail => step(&mut s.detail, FFB_PERCENT_STEP, FFB_DETAIL_RANGE),
+        FfbRow::Effects => step(&mut s.effects, FFB_PERCENT_STEP, FFB_EFFECTS_RANGE),
         FfbRow::Damping => step(&mut s.damping, FFB_PERCENT_STEP, FFB_DAMPING_RANGE),
         FfbRow::Direction if left || right || enter => {
             s.invert = !s.invert;
@@ -563,6 +567,10 @@ fn render_ffb(s: &mut String, screen: &Screen, settings: &FfbSettings, status: &
             FfbRow::Detail => format!(
                 "{:<12} {:.0} %   (Left/Right; bumps and kerbs, 100 % = as simulated)",
                 "Road detail", settings.detail
+            ),
+            FfbRow::Effects => format!(
+                "{:<12} {:.0} %   (Left/Right; road texture and tyre scrub vibration)",
+                "Effects", settings.effects
             ),
             FfbRow::Damping => format!(
                 "{:<12} {:.0} %   (Left/Right; steadies strong bases)",
