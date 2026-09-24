@@ -140,7 +140,6 @@ impl Simulation {
     fn start_replay(&mut self) {
         self.car.state = self.recording.start;
         self.evolution = self.recording.track.clone();
-        self.evolution.mark_all_changed();
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
         self.recording.cursor = 0;

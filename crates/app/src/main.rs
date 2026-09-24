@@ -13,7 +13,7 @@ mod input;
 mod scene;
 mod settings;
 mod track_model;
-mod track_surface;
+mod tyre_dirt;
 
 use std::path::PathBuf;
 
@@ -82,7 +82,7 @@ fn main() {
         effects::EffectsPlugin,
         settings::SettingsPlugin,
         ffb::FfbPlugin,
-        track_surface::TrackSurfacePlugin,
+        tyre_dirt::TyreDirtPlugin,
     ));
     driving::install_policy(&mut app, &args);
     app.run();

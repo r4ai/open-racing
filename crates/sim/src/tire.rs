@@ -180,7 +180,7 @@ const COAT_GRIP_LOSS: [f64; 3] = [0.3, 0.25, 0.2];
 const DIRT_PICKUP_LENGTH: f64 = 8.0;
 /// Distance rolled on paved surfaces over which the tread sheds most of its coat, m,
 /// per kind of coat: loose grit flies off quickly, sticky soil takes longest.
-const COAT_SHED_LENGTH: [f64; 3] = [250.0, 350.0, 120.0];
+const COAT_SHED_LENGTH: [f64; 3] = [80.0, 100.0, 40.0];
 /// How much faster sliding scrubs the coat off than rolling, per metre.
 const DIRT_SCRUB: f64 = 4.0;
 
@@ -487,7 +487,7 @@ mod tests {
             .sum();
         assert!((shed + c.dirt() - coated).abs() < 1e-12);
         assert!(
-            (0.3..0.8).contains(&c.dirt()),
+            (0.15..0.45).contains(&c.dirt()),
             "dirt after 100 m {}",
             c.dirt()
         );

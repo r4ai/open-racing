@@ -50,8 +50,8 @@ Use `--features ndarray` or `--features flex` for a CPU backend.
 
 Rubber builds up on the racing line as cars drive, as in other sims. The road is a grid of patches in track coordinates (4 m along × 0.5 m across), each with its own rubber level:
 
-- **Rubber:** grip runs from 90 % on dusty asphalt to 100 % where the line is fully rubbered in. Tyres lay rubber in proportion to their frictional work (the square of how much of their grip they use), so braking zones, apexes and corner exits rubber in fastest and straights least. Starting conditions put rubber on a racing line estimated from the track (the minimum-curvature line, driven at an estimated speed); off the line the asphalt stays at 94 %, and outside the line in corners marbles cost up to a further 8 %.
-- **Dirt:** tyres rolling on grass, earth or gravel pick up a coat (grass clippings, earth, grit) that costs them up to 20–30 % grip. On paved ground they shed it over a few hundred metres (faster when sliding; grit flies off quickest) and it lands on the asphalt, where it costs grip until tyres rolling over it sweep it away again. The HUD shows the grip under the car and each tyre's coat.
+- **Rubber:** grip runs from 90 % on dusty asphalt to 100 % where the line is fully rubbered in. Tyres lay rubber in proportion to their frictional work (the square of how much of their grip they use), so braking zones, apexes and corner exits rubber in fastest and straights least. Starting conditions put rubber on a racing line estimated from the track (the minimum-curvature line, driven at an estimated speed); off the line the asphalt stays at 94 %.
+- **Dirt:** tyres rolling on grass, earth or gravel pick up a coat (grass clippings, earth, grit) that costs them up to 20–30 % grip. On paved ground they shed it within about 100 m (faster when sliding; grit flies off quickest), and what lands on the asphalt costs grip until tyres rolling over it sweep it away a few dozen metres later. The HUD shows the grip under the car and each tyre's coat.
 - **Levels:** `dusty` (90 %), `green` (94 %), `fast` (97 %), `optimum` (100 %), or any number such as `0.96`, is the grip where the line is worked hardest. Kerbs, run-off and grass keep their own grip.
 
 ```bash
@@ -65,7 +65,7 @@ cargo run --release -p open-racing-train-burn -- train --track-grip green..optim
 cargo run --release -p open-racing-train-burn -- eval --model runs/evolving --track-grip dusty
 ```
 
-Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app draws the rubber, marbles and dirt over the road and the coat on the tyres.
+Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app shows the coat on the tyres; the rubber and the dirt on the road are not drawn.
 
 ### Controls
 

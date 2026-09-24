@@ -1,12 +1,11 @@
-//! Track evolution: rubber the cars lay on the racing surface, marbles beside it, and
-//! dirt dragged onto it from off the track.
+//! Track evolution: rubber the cars lay on the racing surface, and dirt dragged onto
+//! it from off the track.
 //!
 //! An unused track is dusty. Cars clean the asphalt where they drive and lay rubber
 //! into it, so grip builds up along the racing line while the rest of the road stays
 //! dirty. Rubber comes from the tread's frictional work, so most of it goes down in
 //! braking zones, through corners and where cars accelerate out of them; straights
-//! gain little. The worn-off rubber that does not stick rolls up into marbles that
-//! collect just outside the line in corners.
+//! gain little.
 //!
 //! The state is a grid in track coordinates (distance along the centreline × lateral
 //! offset) holding the rubber level of each patch: 0 is dusty ([`DUSTY_GRIP`]), 1 fully
@@ -16,7 +15,8 @@
 //! Only asphalt carries rubber: kerbs and run-off keep their own grip.
 //!
 //! Tyres coated with grass, soil or grit off the track shed it where they rejoin, and
-//! it costs grip on the road until tyres rolling over it have swept it away again.
+//! it costs grip on the road until tyres rolling over it have swept it away, within a
+//! few dozen metres of rolling.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -31,8 +31,6 @@ pub const DUSTY_GRIP: f64 = 0.90;
 /// Grip off the racing line once a line is rubbered in: dust collects where cars do
 /// not drive.
 pub const OFF_LINE_GRIP: f64 = 0.94;
-/// Grip lost on the thickest marbles of a rubbered-in track.
-const MARBLE_GRIP_LOSS: f64 = 0.08;
 
 /// Grip lost on asphalt fully covered, per kind of coat ([`crate::Coat`] order).
 const ROAD_COAT_GRIP_LOSS: [f64; 3] = [0.3, 0.3, 0.35];
@@ -40,7 +38,7 @@ const ROAD_COAT_GRIP_LOSS: [f64; 3] = [0.3, 0.3, 0.35];
 const DIRT_PER_COAT: f64 = 6.0;
 /// Tyre rolling over which the cover on the asphalt is mostly swept away, m, per kind
 /// of coat: grass and soil smear into the surface, grit is flung aside.
-const COAT_SWEEP_LENGTH: [f64; 3] = [80.0, 100.0, 30.0];
+const COAT_SWEEP_LENGTH: [f64; 3] = [25.0, 30.0, 10.0];
 /// Share of the swept cover that sticks to the tyre sweeping it.
 const SWEEP_PICKUP: f64 = 0.5;
 /// Cover below which a cell counts as clean again.
@@ -53,8 +51,8 @@ const RUBBER_ROLLING: f64 = 0.2;
 const RUBBER_LAP_MEAN: f64 = 0.45;
 
 /// Grid cell along the centreline and across it, m.
-pub const CELL_S: f64 = 4.0;
-pub const CELL_D: f64 = 0.5;
+const CELL_S: f64 = 4.0;
+const CELL_D: f64 = 0.5;
 /// Spacing of the points of the estimated racing line, m.
 const LINE_SPACING: f64 = 10.0;
 /// Distance the racing line keeps from the track edges (half a car and a little), m.
@@ -63,8 +61,6 @@ const LINE_MARGIN: f64 = 1.3;
 /// outer one, m. Cars do not all drive the same line, so the band is wider than a car.
 const BAND_INNER: f64 = 1.0;
 const BAND_OUTER: f64 = 2.5;
-/// Where marbles lie outside the line in corners: from and to this distance, m.
-const MARBLES: (f64, f64) = (2.0, 6.0);
 /// Share of the line's rubber on straights, where tyres do little work.
 const STRAIGHT_RUBBER: f64 = 0.35;
 /// Speed profile of the estimated line: lateral grip, braking and acceleration in
@@ -163,8 +159,6 @@ pub struct RubberMap {
     /// Rubber share of each cell when the line is rubbered in, 0..1, row-major
     /// (row = cell along the centreline).
     band: Vec<f32>,
-    /// Marbles on each cell of a rubbered-in track, 0..1.
-    marbles: Vec<f32>,
     /// Lateral offset of the racing line at the centre of each row, m (positive = left).
     line: Vec<f32>,
 }
@@ -187,16 +181,11 @@ impl RubberMap {
             values[i % n] * (1.0 - u) + values[(i + 1) % n] * u
         };
         let mut band = vec![0.0; rows * cols];
-        let mut marbles = vec![0.0; rows * cols];
         let mut offsets = vec![0.0; rows];
         for r in 0..rows {
             let s = (r as f64 + 0.5) * CELL_S;
             let d_line = at(&line.offset, s);
             let work = at(&line.work, s);
-            let curvature = at(&line.curvature, s);
-            // Marbles collect on the outside of the corner.
-            let outside = -curvature.signum();
-            let bend = smoothstep(0.004, 0.02, curvature.abs());
             let strength = STRAIGHT_RUBBER + (1.0 - STRAIGHT_RUBBER) * work;
             offsets[r] = d_line as f32;
             for c in 0..cols {
@@ -204,12 +193,6 @@ impl RubberMap {
                 let from_line = d - d_line;
                 band[r * cols + c] =
                     (strength * (1.0 - smoothstep(BAND_INNER, BAND_OUTER, from_line.abs()))) as f32;
-                let beyond = from_line * outside;
-                marbles[r * cols + c] = (work
-                    * bend
-                    * smoothstep(MARBLES.0, MARBLES.0 + 1.0, beyond)
-                    * (1.0 - smoothstep(MARBLES.1 - 2.0, MARBLES.1, beyond)))
-                    as f32;
             }
         }
         Self {
@@ -217,20 +200,8 @@ impl RubberMap {
             cols,
             d0,
             band,
-            marbles,
             line: offsets,
         }
-    }
-
-    /// Cells along the centreline (rows, each [`CELL_S`] long) and across it (columns,
-    /// each [`CELL_D`] wide). Cell `(row, col)` has index `row * cols + col`.
-    pub fn size(&self) -> (usize, usize) {
-        (self.rows, self.cols)
-    }
-
-    /// Lateral offset of the right edge of column 0, m (positive = left).
-    pub fn lateral_start(&self) -> f64 {
-        self.d0
     }
 
     /// Lateral offset of the estimated racing line at distance `s`, m (positive = left).
@@ -257,8 +228,6 @@ impl RubberMap {
 struct RacingLine {
     /// Lateral offset from the centreline, m.
     offset: Vec<f64>,
-    /// Signed horizontal curvature, 1/m.
-    curvature: Vec<f64>,
     /// Share of the tyres' grip used, squared, 0..1.
     work: Vec<f64>,
 }
@@ -318,11 +287,7 @@ impl RacingLine {
         let work = (0..n)
             .map(|i| (raw[(i + n - 1) % n] + 2.0 * raw[i] + raw[(i + 1) % n]) / 4.0)
             .collect();
-        Self {
-            offset,
-            curvature,
-            work,
-        }
+        Self { offset, work }
     }
 
     /// Projected gradient descent on the squared second differences of the line, kept
@@ -385,17 +350,6 @@ impl Hasher for CellHasher {
 
 type CellMap<V> = HashMap<u32, V, BuildHasherDefault<CellHasher>>;
 
-/// What lies on one patch of asphalt.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Cell {
-    /// Rubber level, 0 dusty .. 1 rubbered in.
-    pub rubber: f64,
-    /// Marbles, 0..1.
-    pub marbles: f64,
-    /// Cover of loose material by kind ([`crate::Coat`] order); 1 covers the asphalt.
-    pub cover: [f32; 3],
-}
-
 /// Rubber on a track: how much lies on each patch of asphalt, and how fast the cars
 /// add to it; and the dirt they drag onto it.
 #[derive(Clone, Debug)]
@@ -407,12 +361,11 @@ pub struct TrackEvolution {
     off: f64,
     /// Rubber laid by the cars since the start, per cell (empty without evolution).
     laid: Vec<f32>,
-    /// Loose material on the asphalt, only where there is some.
+    /// Loose material on the asphalt by kind ([`crate::Coat`] order; 1 covers the
+    /// asphalt), only where there is some.
     cover: CellMap<[f32; 3]>,
     /// Rubber level one tyre at the grip limit adds per metre it rolls over a cell.
     rate: f64,
-    /// Rows changed since the last [`Self::drain_changed_rows`], one bit each.
-    changed: Vec<u64>,
 }
 
 impl TrackEvolution {
@@ -427,7 +380,6 @@ impl TrackEvolution {
         laid: Vec::new(),
         cover: HashMap::with_hasher(BuildHasherDefault::new()),
         rate: 0.0,
-        changed: Vec::new(),
     };
 
     /// Rubber on the racing line of `map` giving `line_grip` where it is worked
@@ -439,7 +391,6 @@ impl TrackEvolution {
             off: 0.0,
             laid: Vec::new(),
             cover: CellMap::default(),
-            changed: vec![0; map.rows.div_ceil(64)],
             map: Some(map),
             rate: 0.0,
         };
@@ -466,7 +417,6 @@ impl TrackEvolution {
         self.off = rubber_of(line_grip.min(OFF_LINE_GRIP));
         self.laid.fill(0.0);
         self.cover.clear();
-        self.changed.fill(u64::MAX);
     }
 
     pub fn map(&self) -> Option<&RubberMap> {
@@ -479,38 +429,19 @@ impl TrackEvolution {
         (grip(self.line), grip(self.off))
     }
 
-    /// What lies on cell `i` of the map.
-    pub fn cell(&self, i: usize) -> Cell {
-        let Some(map) = self.map.as_deref() else {
-            return Cell {
-                rubber: self.line,
-                ..Cell::default()
-            };
-        };
+    /// Grip of cell `i` of `map` from its rubber and cover.
+    #[inline]
+    fn cell_grip(&self, map: &RubberMap, i: usize) -> f64 {
         let laid = self.laid.get(i).copied().unwrap_or(0.0);
         let band = f64::from(map.band[i]);
-        Cell {
-            rubber: (self.off + (self.line - self.off) * band + f64::from(laid)).min(1.0),
-            // Marbles come off the rubber the line gets.
-            marbles: f64::from(map.marbles[i]) * self.line,
-            cover: if self.cover.is_empty() {
-                [0.0; 3]
-            } else {
-                self.cover.get(&(i as u32)).copied().unwrap_or_default()
-            },
-        }
-    }
-
-    /// Grip of one cell from its rubber, marbles and cover.
-    #[inline]
-    fn cell_grip(&self, i: usize) -> f64 {
-        let c = self.cell(i);
-        let covered: f64 = (0..3)
-            .map(|k| ROAD_COAT_GRIP_LOSS[k] * f64::from(c.cover[k]))
-            .sum();
-        (DUSTY_GRIP + (1.0 - DUSTY_GRIP) * c.rubber)
-            * (1.0 - MARBLE_GRIP_LOSS * c.marbles)
-            * (1.0 - covered.min(0.6))
+        let rubber = (self.off + (self.line - self.off) * band + f64::from(laid)).min(1.0);
+        let covered: f64 = match self.cover.get(&(i as u32)) {
+            Some(cover) => (0..3)
+                .map(|k| ROAD_COAT_GRIP_LOSS[k] * f64::from(cover[k]))
+                .sum(),
+            None => 0.0,
+        };
+        (DUSTY_GRIP + (1.0 - DUSTY_GRIP) * rubber) * (1.0 - covered.min(0.6))
     }
 
     /// Grip multiplier the rubber and dirt give the surface at track coordinates (s, d).
@@ -524,7 +455,7 @@ impl TrackEvolution {
         };
         let base = map.row(s) * map.cols;
         let (a, b, t) = map.columns(d);
-        self.cell_grip(base + a) * (1.0 - t) + self.cell_grip(base + b) * t
+        self.cell_grip(map, base + a) * (1.0 - t) + self.cell_grip(map, base + b) * t
     }
 
     /// A tyre rolls `distance` metres over the asphalt at (s, d), using `grip_use`
@@ -543,15 +474,13 @@ impl TrackEvolution {
         let Some(map) = self.map.as_deref() else {
             return [0.0; 3];
         };
-        let row = map.row(s);
-        let base = row * map.cols;
+        let base = map.row(s) * map.cols;
         let (a, b, t) = map.columns(d);
         let mut picked = [0.0; 3];
         let shedding = shed.iter().any(|&x| x > 0.0);
         let rubber = self.rate
             * distance
             * (RUBBER_ROLLING + (1.0 - RUBBER_ROLLING) * grip_use.min(1.0).powi(2));
-        let mut changed = rubber > 0.0;
         for (i, w) in [(base + a, 1.0 - t), (base + b, t)] {
             if let Some(laid) = self.laid.get_mut(i) {
                 *laid += (rubber * w) as f32;
@@ -571,32 +500,8 @@ impl TrackEvolution {
             if left < CLEAN {
                 self.cover.remove(&key);
             }
-            changed = true;
-        }
-        if changed {
-            self.changed[row / 64] |= 1 << (row % 64);
         }
         picked
-    }
-
-    /// Reports every row as changed, e.g. after restoring a saved state.
-    pub fn mark_all_changed(&mut self) {
-        self.changed.fill(u64::MAX);
-    }
-
-    /// Calls `f` with each row whose cells changed since the last call.
-    pub fn drain_changed_rows(&mut self, mut f: impl FnMut(usize)) {
-        let rows = self.map.as_ref().map_or(0, |m| m.rows);
-        for (w, bits) in self.changed.iter_mut().enumerate() {
-            let mut b = std::mem::take(bits);
-            while b != 0 {
-                let row = w * 64 + b.trailing_zeros() as usize;
-                if row < rows {
-                    f(row);
-                }
-                b &= b - 1;
-            }
-        }
     }
 }
 
@@ -641,9 +546,9 @@ mod tests {
             } else {
                 corner = corner.max(on_line);
             }
-            // Far off the line: dust (and marbles outside corners).
+            // Far off the line: dust.
             let off = if line > 0.0 { line - 4.0 } else { line + 4.0 };
-            assert!(e.grip_at(Surface::Asphalt, s, off) <= OFF_LINE_GRIP + 1e-9);
+            assert_close(e.grip_at(Surface::Asphalt, s, off), OFF_LINE_GRIP);
             assert_close(e.grip_at(Surface::Kerb, s, off), 1.0);
             // The line cuts to the inside of corners.
             if smp.curvature.abs() > 0.01 && line * smp.curvature.signum() > 1.0 {
@@ -676,13 +581,6 @@ mod tests {
         assert!(hard > 0.03, "gained {hard}");
         assert!(cruising < hard * 0.3, "cruising {cruising} vs {hard}");
         assert_close(e.grip_at(Surface::Asphalt, s, d + 4.0), green);
-        let mut rows = Vec::new();
-        e.drain_changed_rows(|r| rows.push(r));
-        assert_eq!(rows.len(), e.map().unwrap().rows, "reset marks every row");
-        e.roll(s, d, 1.0, 0.0, [0.0; 3]);
-        rows.clear();
-        e.drain_changed_rows(|r| rows.push(r));
-        assert_eq!(rows, [25]);
     }
 
     #[test]

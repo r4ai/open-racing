@@ -371,7 +371,7 @@ fn update_smoke(
                 if DEBRIS_RATE * debris > SMOKE_RATE * s {
                     (
                         DEBRIS_RATE * debris,
-                        crate::track_surface::coat_color(&tire.coat),
+                        crate::tyre_dirt::coat_color(&tire.coat),
                         0.3 * debris.sqrt(),
                         1.0,
                         (0.3, 1.4),
