@@ -32,6 +32,8 @@ const LOW_SPEED_DAMPING: f64 = 3.0;
 const BARRIER_RESTITUTION: f64 = 0.2;
 /// Coulomb friction coefficient between the car and the run-off barrier.
 const BARRIER_FRICTION: f64 = 0.3;
+/// Wheels this far inside the run-off barrier cannot reach it within one step, m.
+const BARRIER_SKIN: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelState {
@@ -260,6 +262,8 @@ impl Car {
         let mut contact_body = [DVec3::ZERO; 4];
         let mut road_torque = [0.0; 4];
         let mut steering_torque = 0.0;
+        // Closest any wheel comes to the run-off barrier, m.
+        let mut barrier_clearance = f64::INFINITY;
 
         for i in 0..4 {
             let corner = &model.corners[i];
@@ -275,6 +279,7 @@ impl Car {
 
             let q = track.query(center, w.hint);
             w.hint = q.index;
+            barrier_clearance = barrier_clearance.min(-q.beyond_barrier(track));
             let n = q.normal;
             let height = (center - q.surface_point).dot(n);
             let penetration = tp.radius - height;
@@ -530,7 +535,11 @@ impl Car {
             let center = st.position
                 + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
             let contacts = [
-                track.barrier_contact(center, st.wheels[i].hint),
+                if barrier_clearance < BARRIER_SKIN {
+                    track.barrier_contact(center, st.wheels[i].hint)
+                } else {
+                    None
+                },
                 track.wall_contact(center, model.tire(i).p.radius),
             ];
             for (dir, excess) in contacts.into_iter().flatten() {

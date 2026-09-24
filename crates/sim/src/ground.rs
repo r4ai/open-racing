@@ -278,11 +278,7 @@ struct Grid {
 impl Grid {
     /// Bins items by their XY bounds grown by `margin`, so a sphere query of radius up
     /// to `margin` only needs the cell containing its centre.
-    fn build(
-        bounds: impl Iterator<Item = (DVec2, DVec2)> + Clone,
-        cell: f64,
-        margin: f64,
-    ) -> Self {
+    fn build(bounds: impl Iterator<Item = (DVec2, DVec2)> + Clone, cell: f64, margin: f64) -> Self {
         let pad = DVec2::splat(cell);
         let (lo, hi) = bounds.clone().fold(
             (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),

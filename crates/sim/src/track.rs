@@ -318,9 +318,24 @@ impl Track {
         self.ground.as_ref()?.wall_contact(center, radius)
     }
 
+    /// Index of the sample after `i`, wrapping round the loop.
     #[inline]
-    fn wrap(&self, i: isize) -> usize {
-        i.rem_euclid(self.samples.len() as isize) as usize
+    fn next(&self, i: usize) -> usize {
+        if i + 1 == self.samples.len() {
+            0
+        } else {
+            i + 1
+        }
+    }
+
+    /// Index of the sample before `i`, wrapping round the loop.
+    #[inline]
+    fn prev(&self, i: usize) -> usize {
+        if i == 0 {
+            self.samples.len() - 1
+        } else {
+            i - 1
+        }
     }
 
     /// Wraps a distance into [0, length).
@@ -345,11 +360,7 @@ impl Track {
         let x = self.wrap_s(s) / self.spacing;
         let i = x.floor() as usize % self.samples.len();
         let u = x - x.floor();
-        lerp_sample(
-            &self.samples[i],
-            &self.samples[self.wrap(i as isize + 1)],
-            u,
-        )
+        lerp_sample(&self.samples[i], &self.samples[self.next(i)], u)
     }
 
     /// Index of the closest sample, by brute force. Use to seed a hint.
@@ -375,7 +386,7 @@ impl Track {
         let mut steps = 0;
         loop {
             let a = &self.samples[i];
-            let b = &self.samples[self.wrap(i as isize + 1)];
+            let b = &self.samples[self.next(i)];
             let seg = (b.pos - a.pos).truncate();
             u = (p - a.pos).truncate().dot(seg) / seg.length_squared();
             let step = if u < 0.0 {
@@ -391,7 +402,7 @@ impl Track {
                 break;
             }
             last_step = step;
-            i = self.wrap(i as isize + step);
+            i = if step > 0 { self.next(i) } else { self.prev(i) };
             steps += 1;
             if steps == 64 {
                 // Far from the hint: restart from the global nearest sample.
@@ -400,11 +411,7 @@ impl Track {
             }
         }
         let u = u.clamp(0.0, 1.0);
-        let sample = lerp_sample(
-            &self.samples[i],
-            &self.samples[self.wrap(i as isize + 1)],
-            u,
-        );
+        let sample = lerp_sample(&self.samples[i], &self.samples[self.next(i)], u);
         TrackCoords {
             index: i,
             s: self.wrap_s((i as f64 + u) * self.spacing),
