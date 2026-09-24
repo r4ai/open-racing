@@ -187,11 +187,6 @@ pub struct TrackQuery {
 }
 
 impl TrackQuery {
-    /// True when the point is between the track edges (kerbs count as off track).
-    pub fn on_track(&self) -> bool {
-        self.d <= self.width_left && -self.d <= self.width_right
-    }
-
     /// Signed distance from the edge of the drivable area (track + kerbs + run-off)
     /// towards the outside; positive means beyond the barrier.
     pub fn beyond_barrier(&self, track: &Track) -> f64 {
