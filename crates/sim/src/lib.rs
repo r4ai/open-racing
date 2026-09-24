@@ -21,7 +21,7 @@ pub use assist::AutoShift;
 pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
 pub use controls::{Controls, Shift};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
-pub use params::{CarModel, CarParams, ParamsError};
+pub use params::{CarModel, CarParams, Drive, ParamsError};
 pub use tire::TireCondition;
 pub use track::{Surface, Track, TrackDef, TrackError, TrackPoint, TrackQuery};
 

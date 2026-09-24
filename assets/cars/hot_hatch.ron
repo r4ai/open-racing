@@ -1,0 +1,97 @@
+// Generic front-wheel-drive hot hatch (transverse 2.0 l turbo, front limited-slip
+// differential) on road tyres. Values are representative of the class, not of any
+// particular model.
+// Units: SI (m, kg, N, s). Angles in radians.
+(
+    name: "Hot hatch",
+    mass: 1420.0,                 // incl. driver and ~half fuel
+    inertia: (450.0, 1950.0, 2150.0),
+    cg_height: 0.52,
+    front_weight: 0.61,
+    wheelbase: 2.63,
+    track_front: 1.55,
+    track_rear: 1.52,
+
+    front: (
+        tire: "velloni_strada_r",
+        pressure: 2.3,               // cold; ~2.6 bar hot
+        unsprung_mass: 42.0,
+        wheel_inertia: 0.9,
+        spring_rate: 38000.0,
+        bump_damping: 2800.0,
+        rebound_damping: 4000.0,
+        anti_roll_rate: 22000.0,
+        bump_travel: 0.070,
+        droop_travel: 0.090,
+        bump_stop_rate: 400000.0,
+        static_camber: -0.017,       // -1.0 deg
+    ),
+
+    rear: (
+        tire: "velloni_strada_r",
+        pressure: 2.2,
+        unsprung_mass: 35.0,
+        wheel_inertia: 0.9,
+        spring_rate: 32000.0,
+        bump_damping: 2400.0,
+        rebound_damping: 3600.0,
+        anti_roll_rate: 28000.0,     // a stiff rear bar keeps the nose turning in
+        bump_travel: 0.070,
+        droop_travel: 0.100,
+        bump_stop_rate: 400000.0,
+        static_camber: -0.026,       // -1.5 deg
+    ),
+
+    steering: (
+        ratio: 14.0,
+        lock: 7.33,                  // 420 deg each way
+        ackermann: 0.6,
+    ),
+
+    brakes: (
+        max_torque: 6500.0,
+        front_bias: 0.70,
+    ),
+
+    engine: (
+        torque_curve: [
+            (1000.0, 200.0), (1800.0, 380.0), (5000.0, 380.0), (6000.0, 365.0),
+            (6800.0, 310.0),
+        ],
+        drag_curve: [
+            (0.0, 12.0), (1000.0, 15.0), (3000.0, 25.0), (5000.0, 40.0), (6800.0, 55.0),
+        ],
+        inertia: 0.18,
+        idle_rpm: 850.0,
+        limiter_rpm: 6700.0,
+        stall_rpm: 500.0,
+    ),
+
+    clutch: (
+        max_torque: 600.0,
+        anti_stall_rpm: 1100.0,
+    ),
+
+    gearbox: (
+        ratios: [3.36, 2.09, 1.47, 1.13, 0.92, 0.78],
+        reverse: 3.2,
+        final_drive: 4.1,
+        shift_time: 0.10,
+        efficiency: 0.92,
+    ),
+
+    drive: Front,
+
+    differential: (
+        preload: 30.0,
+        power_ramp: 0.25,
+        coast_ramp: 0.05,
+    ),
+
+    aero: (
+        drag_area: 0.72,
+        downforce_area_front: 0.03,
+        downforce_area_rear: 0.05,
+        drag_height: 0.15,
+    ),
+)

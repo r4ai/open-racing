@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use open_racing_ac::car::{self, CarOptions};
-use open_racing_sim::{AutoShift, Car, CarModel, Controls, Surface, Track, TrackDef, TrackPoint};
+use open_racing_sim::{
+    AutoShift, Car, CarModel, Controls, Drive, Surface, Track, TrackDef, TrackPoint,
+};
 
 #[derive(Parser)]
 #[command(
@@ -136,8 +138,15 @@ fn report_car(model: &CarModel) {
         .fold((0.0f64, 0.0f64), |(t, w), &(rpm, nm)| {
             (t.max(nm), w.max(nm * rpm * std::f64::consts::PI / 30.0))
         });
+    let drive = match p.drive {
+        Drive::Rear => "rear-wheel drive".to_string(),
+        Drive::Front => "front-wheel drive".to_string(),
+        Drive::All { front_share, .. } => {
+            format!("all-wheel drive ({:.0} % front)", 100.0 * front_share)
+        }
+    };
     println!(
-        "car: {:.0} kg, {:.0} % front, wheelbase {:.2} m, tracks {:.2} / {:.2} m, CG {:.2} m high",
+        "car: {:.0} kg, {:.0} % front, {drive}, wheelbase {:.2} m, tracks {:.2} / {:.2} m, CG {:.2} m high",
         p.mass,
         100.0 * p.front_weight,
         p.wheelbase,

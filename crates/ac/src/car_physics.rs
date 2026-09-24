@@ -13,8 +13,9 @@
 use std::f64::consts::PI;
 use std::path::Path;
 
-use open_racing_sim::CarParams;
+use open_racing_sim::params::DifferentialParams;
 use open_racing_sim::tire::TireParams;
+use open_racing_sim::{CarParams, Drive};
 
 use crate::ini::{self, Section};
 use crate::json::Value;
@@ -23,7 +24,19 @@ use crate::{Error, lut};
 const PSI: f64 = 0.0689476;
 /// Density of fuel, kg/l.
 const FUEL_DENSITY: f64 = 0.745;
-const NOT_RWD: &str = "drive: the car is not rear-wheel drive, which open-racing does not                        simulate yet; it drives the rear wheels";
+/// All-wheel drive where the files do not say more: the torque split, a moderately
+/// locking centre differential and a light front one.
+const AWD_FRONT_SHARE: f64 = 0.4;
+const AWD_CENTRE_DIFFERENTIAL: DifferentialParams = DifferentialParams {
+    preload: 50.0,
+    power_ramp: 0.2,
+    coast_ramp: 0.1,
+};
+const AWD_FRONT_DIFFERENTIAL: DifferentialParams = DifferentialParams {
+    preload: 20.0,
+    power_ramp: 0.1,
+    coast_ramp: 0.05,
+};
 /// Margin of the limiter-limited top speed in top gear over the car's stated top speed.
 const TOP_SPEED_MARGIN: f64 = 1.03;
 
@@ -160,6 +173,34 @@ impl Physics {
             self.set_torque_curve(curve);
             used.push("engine torque curve and rev limit");
         }
+        // Before the gearing, which follows the driven wheels' size.
+        let tags: Vec<String> = ui
+            .get("tags")
+            .map(Value::as_array)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| Some(t.as_str()?.to_ascii_lowercase()))
+            .collect();
+        let tagged = |names: &[&str]| tags.iter().any(|t| names.contains(&t.as_str()));
+        if tagged(&["fwd"]) {
+            self.params.drive = Drive::Front;
+            used.push("front-wheel drive");
+        } else if tagged(&["awd", "4wd"]) {
+            if !matches!(self.params.drive, Drive::All { .. }) {
+                self.params.drive = Drive::All {
+                    front_share: AWD_FRONT_SHARE,
+                    centre_differential: AWD_CENTRE_DIFFERENTIAL,
+                    front_differential: AWD_FRONT_DIFFERENTIAL,
+                };
+                self.note(format!(
+                    "drive: all-wheel from ui/ui_car.json; {:.0} % of the torque to the front and \
+                     the differentials assumed",
+                    100.0 * AWD_FRONT_SHARE
+                ));
+            }
+        } else if tagged(&["rwd"]) {
+            self.params.drive = Drive::Rear;
+        }
         if let Some(kmh) = spec("topspeed").and_then(|s| quantity(s, &[("mph", 1.609)]))
             && (60.0..500.0).contains(&kmh)
         {
@@ -169,15 +210,13 @@ impl Physics {
         if !used.is_empty() {
             self.note(format!("{}: from ui/ui_car.json", used.join(", ")));
         }
-        let tags: Vec<String> = ui
-            .get("tags")
-            .map(Value::as_array)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|t| Some(t.as_str()?.to_ascii_lowercase()))
-            .collect();
-        if tags.iter().any(|t| t == "fwd" || t == "awd" || t == "4wd") {
-            self.note(NOT_RWD);
+    }
+
+    /// Radius of the driven wheels (the rear ones of an all-wheel-drive car).
+    fn driven_radius(&self) -> f64 {
+        match self.params.drive {
+            Drive::Front => self.front.radius,
+            Drive::Rear | Drive::All { .. } => self.rear.radius,
         }
     }
 
@@ -203,11 +242,11 @@ impl Physics {
     /// Sets the final drive so that the car reaches `speed` (m/s) at the rev limit in top
     /// gear, with a small margin.
     fn gear_for_top_speed(&mut self, speed: f64) {
+        let radius = self.driven_radius();
         let p = &mut self.params;
         let omega = p.engine.limiter_rpm * PI / 30.0;
         let top = p.gearbox.ratios[p.gearbox.ratios.len() - 1];
-        p.gearbox.final_drive =
-            (omega * self.rear.radius / (top * speed * TOP_SPEED_MARGIN)).clamp(1.5, 8.0);
+        p.gearbox.final_drive = (omega * radius / (top * speed * TOP_SPEED_MARGIN)).clamp(1.5, 8.0);
     }
 
     /// Reads the physics files in `dir`.
@@ -472,19 +511,59 @@ impl Physics {
         if let Some(v) = get("CLUTCH", "MAX_TORQUE").filter(|v| *v > 0.0) {
             self.params.clutch.max_torque = v;
         }
-        let d = &mut self.params.differential;
-        if let Some(v) = get("DIFFERENTIAL", "POWER").filter(|v| *v >= 0.0) {
-            d.power_ramp = v;
-        }
-        if let Some(v) = get("DIFFERENTIAL", "COAST").filter(|v| *v >= 0.0) {
-            d.coast_ramp = v;
-        }
-        if let Some(v) = get("DIFFERENTIAL", "PRELOAD").filter(|v| *v >= 0.0) {
-            d.preload = v;
-        }
-        let drive = ini::section(s, "TRACTION").and_then(|t| t.get("TYPE"));
-        if drive.is_some_and(|t| !t.eq_ignore_ascii_case("RWD")) {
-            self.note(NOT_RWD);
+        // A differential's values from `<prefix>POWER`, `<prefix>COAST` and `<prefix>PRELOAD`
+        // in `section`, over `d`.
+        let read_diff = |d: &mut DifferentialParams, section: &str, prefix: &str| {
+            let get = |key: &str| get(section, &format!("{prefix}{key}")).filter(|v| *v >= 0.0);
+            if let Some(v) = get("POWER") {
+                d.power_ramp = v;
+            }
+            if let Some(v) = get("COAST") {
+                d.coast_ramp = v;
+            }
+            if let Some(v) = get("PRELOAD") {
+                d.preload = v;
+            }
+        };
+        read_diff(&mut self.params.differential, "DIFFERENTIAL", "");
+        let drive = ini::section(s, "TRACTION")
+            .and_then(|t| t.get("TYPE"))
+            .map(str::to_ascii_uppercase);
+        match drive.as_deref() {
+            Some("RWD") => self.params.drive = Drive::Rear,
+            Some("FWD") => self.params.drive = Drive::Front,
+            Some(awd) if awd.starts_with("AWD") => {
+                // The game's all-wheel drive: the torque split and three differentials in
+                // `[AWD]`; the rear one replaces `[DIFFERENTIAL]`.
+                let (mut front_share, mut centre_differential, mut front_differential) = (
+                    AWD_FRONT_SHARE,
+                    AWD_CENTRE_DIFFERENTIAL,
+                    AWD_FRONT_DIFFERENTIAL,
+                );
+                let share = get("AWD", "FRONT_SHARE").filter(|v| (0.0..=100.0).contains(v));
+                if let Some(percent) = share {
+                    front_share = percent / 100.0;
+                }
+                read_diff(&mut centre_differential, "AWD", "CENTRE_DIFF_");
+                read_diff(&mut front_differential, "AWD", "FRONT_DIFF_");
+                read_diff(&mut self.params.differential, "AWD", "REAR_DIFF_");
+                self.params.drive = Drive::All {
+                    front_share,
+                    centre_differential,
+                    front_differential,
+                };
+                if share.is_none() || awd != "AWD" {
+                    self.note(format!(
+                        "drive: {awd} is simulated as all-wheel drive through a limited-slip \
+                         centre differential, {:.0} % of the torque to the front",
+                        100.0 * front_share
+                    ));
+                }
+            }
+            Some(other) => self.note(format!(
+                "drive: unknown type {other}; the base car's drive is kept"
+            )),
+            None => {}
         }
     }
 
@@ -688,5 +767,84 @@ pub(crate) mod tests {
         assert!((c.aero.downforce_area_rear - (body * (1.0 - share) + 0.72)).abs() < 1e-9);
         CarModel::new(p.params.clone(), p.front.clone(), p.rear.clone()).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Converts the made-up car with `drivetrain` as its `drivetrain.ini`.
+    fn with_drivetrain(tag: &str, drivetrain: &str) -> Physics {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-ac-drive-{tag}-{}", std::process::id()));
+        write_data(&dir);
+        std::fs::write(dir.join("drivetrain.ini"), drivetrain).unwrap();
+        let mut p = base();
+        p.apply_data(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        CarModel::new(p.params.clone(), p.front.clone(), p.rear.clone()).unwrap();
+        p
+    }
+
+    #[test]
+    fn front_wheel_drive_drives_the_front_through_its_differential() {
+        let p = with_drivetrain(
+            "fwd",
+            "[TRACTION]\nTYPE=FWD\n[DIFFERENTIAL]\nPOWER=0.25\nCOAST=0.05\nPRELOAD=30\n",
+        );
+        assert_eq!(p.params.drive, Drive::Front);
+        assert_eq!(p.params.differential.power_ramp, 0.25);
+        assert!(
+            p.notes.iter().all(|n| !n.starts_with("drive")),
+            "{:?}",
+            p.notes
+        );
+    }
+
+    #[test]
+    fn all_wheel_drive_reads_the_split_and_three_differentials() {
+        let p = with_drivetrain(
+            "awd",
+            "[TRACTION]\nTYPE=AWD\n[DIFFERENTIAL]\nPOWER=0.9\n[AWD]\nFRONT_SHARE=35\n\
+             FRONT_DIFF_POWER=0.1\nFRONT_DIFF_COAST=0.05\nFRONT_DIFF_PRELOAD=10\n\
+             CENTRE_DIFF_POWER=0.6\nCENTRE_DIFF_COAST=0.3\nCENTRE_DIFF_PRELOAD=80\n\
+             REAR_DIFF_POWER=0.4\nREAR_DIFF_COAST=0.2\nREAR_DIFF_PRELOAD=50\n",
+        );
+        let diff = |preload, power_ramp, coast_ramp| DifferentialParams {
+            preload,
+            power_ramp,
+            coast_ramp,
+        };
+        assert_eq!(
+            p.params.drive,
+            Drive::All {
+                front_share: 0.35,
+                centre_differential: diff(80.0, 0.6, 0.3),
+                front_differential: diff(10.0, 0.1, 0.05),
+            }
+        );
+        assert_eq!(p.params.differential, diff(50.0, 0.4, 0.2));
+        assert!(
+            p.notes.iter().all(|n| !n.starts_with("drive")),
+            "{:?}",
+            p.notes
+        );
+
+        // The newer model: all-wheel drive with what the files give, and a note.
+        let p = with_drivetrain("awd2", "[TRACTION]\nTYPE=AWD2\n");
+        assert!(matches!(p.params.drive, Drive::All { front_share, .. } if front_share == 0.4));
+        assert!(
+            p.notes.iter().any(|n| n.starts_with("drive: AWD2")),
+            "{:?}",
+            p.notes
+        );
+    }
+
+    #[test]
+    fn ui_tags_set_the_drive_and_gear_the_driven_wheels() {
+        let mut p = base();
+        p.front.radius = 0.30;
+        let ui = json::parse(r#"{"specs": {"topspeed": "200km/h"}, "tags": ["FWD"]}"#).unwrap();
+        p.apply_ui(&ui);
+        assert_eq!(p.params.drive, Drive::Front);
+        let g = &p.params.gearbox;
+        let v = p.params.engine.limiter_rpm * PI / 30.0 * 0.30 / (g.ratios[5] * g.final_drive);
+        assert!((v * 3.6 - 200.0 * TOP_SPEED_MARGIN).abs() < 0.5, "{v}");
     }
 }

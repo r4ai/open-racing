@@ -20,7 +20,7 @@ use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::params::CarModel;
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
-use crate::{AIR_DENSITY, DT, GRAVITY, RL, RR};
+use crate::{AIR_DENSITY, DT, FL, GRAVITY, RL};
 
 /// Below this speed a slip-velocity damping term is blended in so the relaxation
 /// length model does not oscillate at standstill.
@@ -181,7 +181,8 @@ impl Car {
         }
         let mut drivetrain = DrivetrainState::new(&m.params, gear);
         let ratio = drivetrain.ratio(&m.params);
-        let wheel_spin = wheels[RL].spin;
+        let share = m.params.drive.front_share();
+        let wheel_spin = share * wheels[FL].spin + (1.0 - share) * wheels[RL].spin;
         drivetrain.engine_speed = drivetrain.engine_speed.max(wheel_spin * ratio);
 
         self.state = CarState {
@@ -369,9 +370,9 @@ impl Car {
             &DriveInput {
                 throttle: c.throttle,
                 clutch_pedal: c.clutch,
-                wheel_speed: [st.wheels[RL].spin, st.wheels[RR].spin],
-                wheel_torque: [road_torque[RL], road_torque[RR]],
-                wheel_inertia: p.rear.wheel_inertia,
+                wheel_speed: st.wheels.map(|w| w.spin),
+                wheel_torque: road_torque,
+                wheel_inertia: [0, 1, 2, 3].map(|i| model.axle(i).wheel_inertia),
                 dt,
             },
         );
@@ -379,11 +380,7 @@ impl Car {
         for (i, &road_torque) in road_torque.iter().enumerate() {
             let axle = model.axle(i);
             let w = &mut st.wheels[i];
-            let drive_torque = match i {
-                RL => drive[0],
-                RR => drive[1],
-                _ => 0.0,
-            };
+            let drive_torque = drive[i];
             let share = if i < 2 {
                 p.brakes.front_bias
             } else {
