@@ -14,7 +14,7 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 
 | crate               | role                                                                                                                                                                                         |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber, tread temperature and wear), engine / clutch / sequential gearbox / LSD, aero, tracks |
+| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber, tread temperature and wear), engine / clutch / sequential gearbox, front / rear / all-wheel drive through limited-slip differentials, aero, tracks |
 | `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
 | `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
 | `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |
@@ -75,6 +75,9 @@ Force feedback (Windows, DirectInput) plays the simulated steering torque from t
 
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
 - Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template, or convert a car into a car package (below). Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
+  `drive` picks the driven wheels: `Rear` (the default), `Front`, or `All(front_share: …, centre_differential: (…), front_differential: (…))`, where a centre differential splits the torque between the axles; `differential` is the driven axle's, the rear one's for all-wheel drive. Keep the front and rear tyres the same size on an all-wheel-drive car with a locking centre differential: like a real one, it fights a difference in wheel speed.
+  Where the engine sits shows in `front_weight` and in `inertia`: masses near the centre lower the pitch and yaw inertia. With the same parts, a mid-engined car puts more power down, turns in quicker, understeers less and rotates more when the driver lifts mid-corner than a front-engined one, and a nose-heavy front-drive car understeers most (tests in `crates/sim/tests/physics.rs`).
+- Bundled cars (`--car <name>`), all fictional and representative of their class: `gt3` (mid-engined GT3 racer on slicks, the default), `hot_hatch` (front-wheel drive, 61 % front), `awd_sedan` (all-wheel drive, 40 % of the torque to the front), `fr_coupe` and `mr_coupe` (the same 3.0 l coupé with the engine in front, 52 % front, and in the middle, 42 % front). The road cars run on the Velloni Strada R road tyre.
 - Tyres: add `assets/tires/<name>.ron` using `velloni_zeta_gt_front.ron` as a template. A tyre file holds the size, the force curves, how pressure changes stiffness, peak slip, rolling resistance and grip, and the thermal model (inner / middle / outer tread zones and carcass, cooling, operating window, wear). Hot pressure follows the carcass temperature (gas law), so the cold pressure, camber and driving style show up in the tread temperatures on the HUD as they would on a real car. The bundled GT3 runs on the fictional Velloni Zeta GT, modelled on public figures for GT3 slicks (30/68-18 front, 31/71-18 rear).
 
 ### Track packages
@@ -148,11 +151,12 @@ How the folder is converted:
 
 - **Model:** `<folder>.kn5` (or the largest KN5 file), with the chosen skin's textures replacing those of the same name. Parts move by node name, as in the game: `WHEEL_LF`/`RF`/`LR`/`RR` spin, steer and follow the suspension; `SUSP_<corner>`, and whatever shares a parent node with a single wheel, steer and follow the suspension without spinning; `STEER_HR` turns with the steering input. Low-detail copies (`COCKPIT_LR`, `STEER_LR`), motion-blurred wheels, damaged parts and unfastened belts are left out. Materials are converted as for tracks.
 - **Geometry:** wheelbase, tracks and tyre sizes come from the wheels in the model, so the model and the simulated wheels line up.
-- **Physics:** read from the physics files (`car.ini`, `suspensions.ini`, `tyres.ini`, `engine.ini`, `drivetrain.ini`, `brakes.ini`, `aero.ini` and the tables they name) in the folder's `data/` or in `--data`. Physics packed into `data.acd` are **not** read: open-racing does not unpack them. Without physics files, the mass, the engine's torque curve and rev limit, and the final drive (for the stated top speed) come from `ui/ui_car.json`, and everything else from the base car. The converter lists where each group of values came from.
+- **Physics:** read from the physics files (`car.ini`, `suspensions.ini`, `tyres.ini`, `engine.ini`, `drivetrain.ini`, `brakes.ini`, `aero.ini` and the tables they name) in the folder's `data/` or in `--data`. Physics packed into `data.acd` are **not** read: open-racing does not unpack them. Without physics files, the mass, the engine's torque curve and rev limit, the driven wheels (the `fwd`, `rwd`, `awd` or `4wd` tag) and the final drive (for the stated top speed) come from `ui/ui_car.json`, and everything else from the base car. The converter lists where each group of values came from.
+- **Drive:** `[TRACTION] TYPE` sets the driven wheels. An `AWD` car takes its torque split and front, centre and rear differentials from `[AWD]`. The newer `AWD2` model is simulated as all-wheel drive through a limited-slip centre differential.
 
 Limitations:
 
-- The simulation drives the rear wheels only; front- and all-wheel-drive cars are converted as rear-wheel drive.
+- The game's electronic and viscous centre couplings (`AWD2`) and active differentials become limited-slip differentials.
 - The game's tyre model, aero maps (ride height sensitivity, per-wing damage) and turbo dynamics are reduced to open-racing's parameters: peak grip and slip, load sensitivity, pressures, operating temperature; drag and downforce areas; the torque curve at full boost.
 - Skinned meshes (the driver, animated belts), animations (doors, wipers), lights and Custom Shaders Patch extensions are not converted.
 
@@ -170,6 +174,7 @@ cargo test -p open-racing-api --test content_cars -- --ignored
 
 Reference results (Apple M5, 10 cores): 1 physics step ≈ 0.4 µs; `BatchEnv` ≈ 9.8M physics steps/s (≈ 9,800× real time).
 GT3 car: 0–100 km/h 3.2 s, top speed ≈ 274 km/h, 100–0 km/h ≈ 34 m, steady-state skidpad ≈ 1.43 g.
+Road cars, launched with the throttle eased off as the driven wheels spin (`crates/sim/tests/physics.rs`): hot hatch 0–100 km/h 5.8 s, skidpad ≈ 0.96 g; AWD sedan 4.9 s, ≈ 0.92 g; FR coupé 4.8 s, MR coupé 4.4 s.
 
 ## Development
 

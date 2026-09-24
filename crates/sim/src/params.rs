@@ -89,13 +89,54 @@ pub struct GearboxParams {
     pub efficiency: f64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A limited-slip differential: it splits its input torque and moves up to its locking
+/// torque from the faster output to the slower one. An open differential has no locking
+/// torque.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DifferentialParams {
     /// Locking torque with no input torque, N·m.
     pub preload: f64,
     /// Locking torque per N·m of input torque on power / on overrun.
     pub power_ramp: f64,
     pub coast_ramp: f64,
+}
+
+/// Which wheels the engine drives.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Drive {
+    /// The rear wheels, through `CarParams::differential`.
+    #[default]
+    Rear,
+    /// The front wheels, through `CarParams::differential`.
+    Front,
+    /// All four wheels. A centre differential splits the torque between the axles; the
+    /// rear axle's differential is `CarParams::differential`.
+    All {
+        /// Share of the torque sent to the front axle, 0..1.
+        front_share: f64,
+        centre_differential: DifferentialParams,
+        front_differential: DifferentialParams,
+    },
+}
+
+impl Drive {
+    /// Whether the engine drives the front (`true`) or rear axle.
+    pub fn drives(&self, front: bool) -> bool {
+        match self {
+            Self::Rear => !front,
+            Self::Front => front,
+            Self::All { .. } => true,
+        }
+    }
+
+    /// Share of the torque sent to the front axle.
+    pub fn front_share(&self) -> f64 {
+        match self {
+            Self::Rear => 0.0,
+            Self::Front => 1.0,
+            Self::All { front_share, .. } => *front_share,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,6 +172,10 @@ pub struct CarParams {
     pub engine: EngineParams,
     pub clutch: ClutchParams,
     pub gearbox: GearboxParams,
+    /// Driven wheels; rear-wheel drive when left out.
+    #[serde(default)]
+    pub drive: Drive,
+    /// Differential of the driven axle; for all-wheel drive, of the rear axle.
     pub differential: DifferentialParams,
     pub aero: AeroParams,
 }
@@ -210,6 +255,10 @@ impl CarParams {
             self.front.pressure > 0.0 && self.rear.pressure > 0.0,
             "tyre pressure must be positive",
         )?;
+        check(
+            (0.0..=1.0).contains(&self.drive.front_share()),
+            "drive: front_share must be in 0..1",
+        )?;
         let sprung = self.mass - 2.0 * (self.front.unsprung_mass + self.rear.unsprung_mass);
         check(sprung > 0.0, "unsprung mass exceeds total mass")
     }
@@ -281,7 +330,7 @@ impl CarModel {
                 ),
                 side,
                 front,
-                driven: !front,
+                driven: p.drive.drives(front),
                 static_extension,
                 spring_free_extension: static_extension + spring_load / axle.spring_rate,
                 min_extension: static_extension - axle.bump_travel,

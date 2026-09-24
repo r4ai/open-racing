@@ -1,0 +1,102 @@
+// Generic all-wheel-drive sports sedan (2.0 l turbo, limited-slip centre and rear
+// differentials, rear-biased torque split) on road tyres. Values are representative of the
+// class, not of any particular model.
+// Units: SI (m, kg, N, s). Angles in radians.
+(
+    name: "AWD sedan",
+    mass: 1560.0,                 // incl. driver and ~half fuel
+    inertia: (520.0, 2300.0, 2500.0),
+    cg_height: 0.50,
+    front_weight: 0.59,
+    wheelbase: 2.65,
+    track_front: 1.55,
+    track_rear: 1.55,
+
+    front: (
+        tire: "velloni_strada_r",
+        pressure: 2.3,               // cold; ~2.6 bar hot
+        unsprung_mass: 45.0,
+        wheel_inertia: 0.95,
+        spring_rate: 45000.0,
+        bump_damping: 3200.0,
+        rebound_damping: 4500.0,
+        anti_roll_rate: 26000.0,
+        bump_travel: 0.070,
+        droop_travel: 0.090,
+        bump_stop_rate: 400000.0,
+        static_camber: -0.017,       // -1.0 deg
+    ),
+
+    rear: (
+        tire: "velloni_strada_r",
+        pressure: 2.2,
+        unsprung_mass: 42.0,
+        wheel_inertia: 0.95,
+        spring_rate: 40000.0,
+        bump_damping: 3000.0,
+        rebound_damping: 4200.0,
+        anti_roll_rate: 20000.0,
+        bump_travel: 0.070,
+        droop_travel: 0.100,
+        bump_stop_rate: 400000.0,
+        static_camber: -0.026,       // -1.5 deg
+    ),
+
+    steering: (
+        ratio: 13.5,
+        lock: 7.0,                   // 400 deg each way
+        ackermann: 0.5,
+    ),
+
+    brakes: (
+        max_torque: 7500.0,
+        front_bias: 0.66,
+    ),
+
+    engine: (
+        torque_curve: [
+            (1000.0, 220.0), (2500.0, 400.0), (3000.0, 420.0), (4500.0, 420.0),
+            (6500.0, 370.0), (7200.0, 320.0),
+        ],
+        drag_curve: [
+            (0.0, 12.0), (1000.0, 16.0), (3000.0, 27.0), (5000.0, 42.0), (7200.0, 60.0),
+        ],
+        inertia: 0.20,
+        idle_rpm: 850.0,
+        limiter_rpm: 7000.0,
+        stall_rpm: 500.0,
+    ),
+
+    clutch: (
+        max_torque: 650.0,
+        anti_stall_rpm: 1100.0,
+    ),
+
+    gearbox: (
+        ratios: [3.25, 2.05, 1.48, 1.16, 0.95, 0.79],
+        reverse: 3.2,
+        final_drive: 4.0,
+        shift_time: 0.10,
+        efficiency: 0.88,             // three differentials and a transfer case
+    ),
+
+    drive: All(
+        front_share: 0.40,
+        centre_differential: (preload: 60.0, power_ramp: 0.30, coast_ramp: 0.15),
+        front_differential: (preload: 20.0, power_ramp: 0.15, coast_ramp: 0.05),
+    ),
+
+    // Rear differential.
+    differential: (
+        preload: 50.0,
+        power_ramp: 0.30,
+        coast_ramp: 0.15,
+    ),
+
+    aero: (
+        drag_area: 0.78,
+        downforce_area_front: 0.05,
+        downforce_area_rear: 0.10,
+        drag_height: 0.15,
+    ),
+)

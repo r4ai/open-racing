@@ -1,0 +1,99 @@
+// Generic front-engined rear-wheel-drive (FR) sports coupé: a 3.0 l engine behind the front
+// axle, 52 % of the weight on the front. It shares engine, gearbox, tyres and wheelbase with
+// `mr_coupe.ron`, so the two differ where the engine sits: weight distribution, the moments
+// of inertia that follow from it, and the suspension and brakes tuned to it.
+// Values are representative of the class, not of any particular model.
+// Units: SI (m, kg, N, s). Angles in radians.
+(
+    name: "FR coupe",
+    mass: 1450.0,                 // incl. driver and ~half fuel
+    inertia: (480.0, 2150.0, 2300.0),
+    cg_height: 0.47,
+    front_weight: 0.52,
+    wheelbase: 2.50,
+    track_front: 1.58,
+    track_rear: 1.60,
+
+    front: (
+        tire: "velloni_strada_r",
+        pressure: 2.3,
+        unsprung_mass: 40.0,
+        wheel_inertia: 0.9,
+        spring_rate: 43000.0,
+        bump_damping: 3000.0,
+        rebound_damping: 4300.0,
+        anti_roll_rate: 30000.0,
+        bump_travel: 0.060,
+        droop_travel: 0.090,
+        bump_stop_rate: 500000.0,
+        static_camber: -0.026,       // -1.5 deg
+    ),
+
+    rear: (
+        tire: "velloni_strada_r_265",
+        pressure: 2.2,
+        unsprung_mass: 42.0,
+        wheel_inertia: 1.0,
+        spring_rate: 44000.0,
+        bump_damping: 3000.0,
+        rebound_damping: 4300.0,
+        anti_roll_rate: 18000.0,
+        bump_travel: 0.060,
+        droop_travel: 0.090,
+        bump_stop_rate: 500000.0,
+        static_camber: -0.026,       // -1.5 deg
+    ),
+
+    steering: (
+        ratio: 13.0,
+        lock: 6.28,                  // 360 deg each way
+        ackermann: 0.5,
+    ),
+
+    brakes: (
+        max_torque: 7500.0,
+        front_bias: 0.62,
+    ),
+
+    engine: (
+        torque_curve: [
+            (1000.0, 250.0), (2000.0, 380.0), (3000.0, 430.0), (4500.0, 450.0),
+            (6500.0, 430.0), (7500.0, 380.0),
+        ],
+        drag_curve: [
+            (0.0, 14.0), (1000.0, 18.0), (3000.0, 30.0), (5000.0, 45.0), (7500.0, 70.0),
+        ],
+        inertia: 0.20,
+        idle_rpm: 850.0,
+        limiter_rpm: 7400.0,
+        stall_rpm: 500.0,
+    ),
+
+    clutch: (
+        max_torque: 700.0,
+        anti_stall_rpm: 1100.0,
+    ),
+
+    gearbox: (
+        ratios: [3.13, 2.10, 1.55, 1.23, 1.00, 0.83],
+        reverse: 3.2,
+        final_drive: 3.73,
+        shift_time: 0.10,
+        efficiency: 0.92,
+    ),
+
+    drive: Rear,
+
+    differential: (
+        preload: 60.0,
+        power_ramp: 0.30,
+        coast_ramp: 0.15,
+    ),
+
+    aero: (
+        drag_area: 0.68,
+        downforce_area_front: 0.05,
+        downforce_area_rear: 0.08,
+        drag_height: 0.12,
+    ),
+)

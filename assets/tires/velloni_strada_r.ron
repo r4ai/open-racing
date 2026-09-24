@@ -1,0 +1,55 @@
+// Velloni Strada R, a fictional ultra-high-performance road tyre, size 235/40 R18.
+// Size and behaviour follow public figures for road tyres of the class (pressures, a wide
+// operating temperature range, softer carcass than a slick); not the data of any real tyre.
+// Units: SI (m, N, s), angles in radians, temperatures in °C, pressures in bar (gauge).
+(
+    name: "Velloni Strada R 235/40 R18",
+    radius: 0.323,
+    width: 0.235,
+    vertical_stiffness: 230000.0,    // at the optimal hot pressure
+    vertical_damping: 300.0,
+    mu_x: 1.20,
+    mu_y: 1.15,
+    nominal_load: 3500.0,
+    load_sensitivity: -0.10,
+    longitudinal: (peak_slip: 0.12, shape: 1.5, curvature: 0.2),
+    lateral: (peak_slip: 0.14, shape: 1.35, curvature: 0.2),    // ~8 deg
+    relaxation_x: 0.25,
+    relaxation_y: 0.50,
+    camber_thrust: 0.10,
+    optimal_camber: -0.020,
+    camber_grip_loss: 12.0,
+    pneumatic_trail: 0.040,
+    rolling_resistance: 0.011,
+
+    pressure: (
+        optimal: 2.6,                    // hot, ~38 psi
+        window: 0.4,
+        grip_loss: 0.10,
+        stiffness_per_bar: 60000.0,
+        peak_slip_per_bar: -0.12,
+        rolling_resistance_per_bar: -0.25,
+        crown_load_per_bar: 0.6,
+    ),
+
+    thermal: (
+        optimal_temperature: 70.0,
+        cold_window: 80.0,               // a road compound grips from cold
+        hot_window: 40.0,
+        window_grip_loss: 0.12,
+        start_temperature: 30.0,         // no tyre blankets
+        surface_capacity: 1300.0,
+        core_capacity: 13000.0,
+        core_conductance: 110.0,
+        zone_conductance: 25.0,
+        air_cooling: 5.0,
+        air_cooling_per_speed: 1.0,
+        road_cooling: 30.0,
+        slide_heat_share: 0.5,
+        rolling_heat_share: 0.5,
+        camber_load_shift: 5.0,
+        carcass_roll: 0.04,
+        wear_rate: 0.005,                // a road compound wears slowly
+        wear_grip_loss: 0.1,
+    ),
+)
