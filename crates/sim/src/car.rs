@@ -343,12 +343,15 @@ impl Car {
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
             }
 
+            // Speed at which the contact patch slides over the road.
+            let slide_speed = (slip_vel * slip_vel + vy * vy).sqrt();
             if fz > 0.0 {
                 let shed = w
                     .tire
-                    .roll_dirt(q.surface, q.dirt, speed * dt, slip_vel.hypot(vy) * dt);
+                    .roll_dirt(q.surface, q.dirt, speed * dt, slide_speed * dt);
                 if q.surface == Surface::Asphalt {
-                    let grip_use = f.fx.hypot(f.fy) / (tp.mu_y * mu * fz).max(1e-9);
+                    let grip_use =
+                        (f.fx * f.fx + f.fy * f.fy).sqrt() / (tp.mu_y * mu * fz).max(1e-9);
                     let picked = evolution.roll(q.s, q.d, speed * dt, grip_use, shed);
                     w.tire.add_coat(picked);
                 }
@@ -382,7 +385,7 @@ impl Car {
                 load: fz,
                 slip_ratio: w.kappa,
                 slip_angle: w.alpha.atan(),
-                slide_speed: slip_vel.hypot(vy),
+                slide_speed,
                 pressure,
                 tread_load,
                 fx: f.fx,

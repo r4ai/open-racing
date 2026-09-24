@@ -119,7 +119,13 @@ impl GroundMeshBuilder {
             GROUND_MARGIN,
         );
         let walls = Grid::build(self.walls.iter().map(tri_bounds), WALL_CELL, WALL_MARGIN);
+        let footprints = self
+            .ground
+            .iter()
+            .map(|(t, _)| Footprint::new(t.map(|i| self.verts[i as usize])))
+            .collect();
         GroundMesh {
+            footprints,
             verts: self.verts,
             normals: self.normals,
             ground_tris: self.ground,
@@ -144,6 +150,8 @@ pub struct GroundMesh {
     verts: Vec<DVec3>,
     normals: Vec<DVec3>,
     ground_tris: Vec<([u32; 3], u16)>,
+    /// Vertical projection of each ground triangle, in `ground_tris` order.
+    footprints: Vec<Footprint>,
     wall_tris: Vec<[u32; 3]>,
     surfaces: Vec<SurfaceProps>,
     ground_grid: Grid,
@@ -162,12 +170,11 @@ impl GroundMesh {
         let xy = p.truncate();
         let mut best: Option<(f64, usize, DVec3)> = None;
         for &ti in self.ground_grid.cell(xy) {
-            let (t, _) = &self.ground_tris[ti as usize];
-            let [a, b, c] = t.map(|i| self.verts[i as usize]);
-            let Some(w) = barycentric(xy, a.truncate(), b.truncate(), c.truncate()) else {
+            let f = &self.footprints[ti as usize];
+            let Some(w) = f.weights(xy) else {
                 continue;
             };
-            let z = w.x * a.z + w.y * b.z + w.z * c.z;
+            let z = w.dot(f.z);
             if z <= top && best.is_none_or(|(bz, _, _)| z > bz) {
                 best = Some((z, ti as usize, w));
             }
@@ -218,17 +225,45 @@ impl GroundMesh {
     }
 }
 
-/// Barycentric weights of `p` in the 2D triangle, or `None` when outside or degenerate.
-fn barycentric(p: DVec2, a: DVec2, b: DVec2, c: DVec2) -> Option<DVec3> {
-    let det = (b - a).perp_dot(c - a);
-    if det.abs() < 1e-12 {
-        return None;
+/// A triangle seen from above, set up for point-in-triangle tests without divisions.
+#[derive(Debug)]
+struct Footprint {
+    a: DVec2,
+    /// Map `p − a` to the barycentric weights of the second and third corner.
+    to_b: DVec2,
+    to_c: DVec2,
+    /// Heights of the corners.
+    z: DVec3,
+}
+
+impl Footprint {
+    fn new([a, b, c]: [DVec3; 3]) -> Self {
+        let (ab, ac) = ((b - a).truncate(), (c - a).truncate());
+        let det = ab.perp_dot(ac);
+        // A degenerate footprint gets NaN weights, which no point passes.
+        let inv = if det.abs() < 1e-12 {
+            f64::NAN
+        } else {
+            1.0 / det
+        };
+        Self {
+            a: a.truncate(),
+            to_b: DVec2::new(ac.y, -ac.x) * inv,
+            to_c: DVec2::new(-ab.y, ab.x) * inv,
+            z: DVec3::new(a.z, b.z, c.z),
+        }
     }
-    let wb = (p - a).perp_dot(c - a) / det;
-    let wc = (b - a).perp_dot(p - a) / det;
-    let wa = 1.0 - wb - wc;
-    const EPS: f64 = -1e-9;
-    (wa >= EPS && wb >= EPS && wc >= EPS).then_some(DVec3::new(wa, wb, wc))
+
+    /// Barycentric weights of `p`, or `None` when outside or degenerate.
+    #[inline]
+    fn weights(&self, p: DVec2) -> Option<DVec3> {
+        let rel = p - self.a;
+        let wb = rel.dot(self.to_b);
+        let wc = rel.dot(self.to_c);
+        let wa = 1.0 - wb - wc;
+        const EPS: f64 = -1e-9;
+        (wa >= EPS && wb >= EPS && wc >= EPS).then_some(DVec3::new(wa, wb, wc))
+    }
 }
 
 /// Closest point on a triangle (Ericson, Real-Time Collision Detection 5.1.5).
