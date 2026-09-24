@@ -6,8 +6,10 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use glam::{DQuat, DVec3};
 use open_racing_api::{AgentDriver, EnvSpec, LapTimer, Policy};
+use open_racing_sim::weather::{OccluderBuilder, Occluders};
 use open_racing_sim::{
-    AutoShift, Car, CarState, Controls, DT, RubberMap, Shift, Track, TrackEvolution,
+    AutoShift, Car, CarState, Controls, DT, RubberMap, Shift, Track, TrackEvolution, Weather,
+    WeatherSettings,
 };
 
 use crate::Args;
@@ -17,6 +19,10 @@ use crate::settings::settings_closed;
 /// Physics steps allowed per frame; beyond this the sim runs slower than real time
 /// instead of spiralling.
 const MAX_STEPS_PER_FRAME: usize = 250;
+/// Scenery farther than this from the centreline does not shade the road, m.
+const SHADE_REACH: f64 = 150.0;
+/// Share of the light let through by alpha-tested or blended scenery: foliage, fences.
+const SEE_THROUGH: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -29,17 +35,19 @@ pub enum Mode {
 /// because the simulation is deterministic.
 pub struct Recording {
     start: CarState,
-    /// Rubber and dirt on the track at the start.
+    /// Rubber and dirt on the track, and the weather, at the start.
     track: TrackEvolution,
+    weather: Weather,
     controls: Vec<Controls>,
     cursor: usize,
 }
 
 impl Recording {
-    fn new(start: CarState, track: TrackEvolution) -> Self {
+    fn new(start: CarState, track: TrackEvolution, weather: Weather) -> Self {
         Self {
             start,
             track,
+            weather,
             controls: Vec::new(),
             cursor: 0,
         }
@@ -60,6 +68,8 @@ pub struct Simulation {
     pub car: Car,
     /// Rubber and dirt on the track.
     pub evolution: TrackEvolution,
+    /// Sun, air, wind, clouds and road temperature.
+    pub weather: Weather,
     /// Racing-line grip the track starts from, and what it gains per lap.
     pub track_grip: f64,
     pub grip_gain: f64,
@@ -81,7 +91,10 @@ pub struct Simulation {
 impl Simulation {
     /// Also returns the track's and the car's 3D models, where they have one, for the
     /// scene to spawn.
-    pub fn new(args: &Args) -> Result<(Self, TrackModel, CarModelVisual), open_racing_api::Error> {
+    pub fn new(
+        args: &Args,
+        weather: WeatherSettings,
+    ) -> Result<(Self, TrackModel, CarModelVisual), open_racing_api::Error> {
         let (track, model) =
             open_racing_api::load_track_with_visual(args.track.as_deref().unwrap_or("lakeside"))?;
         let (car_model, car_visual) = open_racing_api::load_car_with_visual(&args.car)?;
@@ -89,11 +102,14 @@ impl Simulation {
         let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
         let rubber = Arc::new(RubberMap::new(&spec.track));
         let evolution = TrackEvolution::new(rubber, args.track_grip, args.grip_gain);
+        let scenery = model.as_ref().map(|m| Arc::new(scenery(&spec.track, m)));
+        let weather = Weather::new(&spec.track, scenery, weather);
         let sim = Self {
             lap: LapTimer::new(&spec.track, car.state.position),
             previous: car.state,
-            recording: Recording::new(car.state, evolution.clone()),
+            recording: Recording::new(car.state, evolution.clone(), weather.clone()),
             evolution,
+            weather,
             track_grip: args.track_grip,
             grip_gain: args.grip_gain,
             track: spec.track.clone(),
@@ -127,7 +143,20 @@ impl Simulation {
         self.car.reset(&self.track, s, 0.0, 0.0, 1);
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
-        self.recording = Recording::new(self.car.state, self.evolution.clone());
+        self.recording = self.new_recording();
+    }
+
+    fn new_recording(&self) -> Recording {
+        Recording::new(self.car.state, self.evolution.clone(), self.weather.clone())
+    }
+
+    /// Starts the weather over from `settings`.
+    pub fn restart_weather(&mut self, settings: WeatherSettings) {
+        self.weather.restart(settings);
+        if self.mode == Mode::Replay {
+            self.mode = Mode::Human;
+        }
+        self.recording = self.new_recording();
     }
 
     /// Starts the track over from `track_grip` and `grip_gain`: the rubber and dirt the
@@ -137,17 +166,34 @@ impl Simulation {
         if self.mode == Mode::Replay {
             self.mode = Mode::Human;
         }
-        self.recording = Recording::new(self.car.state, self.evolution.clone());
+        self.recording = self.new_recording();
     }
 
     fn start_replay(&mut self) {
         self.car.state = self.recording.start;
         self.evolution = self.recording.track.clone();
+        self.weather = self.recording.weather.clone();
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
         self.recording.cursor = 0;
         self.mode = Mode::Replay;
     }
+}
+
+/// The scenery of a track's model that shades its road: meshes that cast shadows, the
+/// see-through ones letting part of the light through.
+fn scenery(track: &Track, model: &open_racing_track::Visual) -> Occluders {
+    let road: Vec<DVec3> = track.samples.iter().map(|s| s.pos).collect();
+    let mut builder = OccluderBuilder::new(&road, SHADE_REACH);
+    for mesh in model.meshes.iter().filter(|m| m.cast_shadows) {
+        let see_through = model
+            .materials
+            .get(mesh.material as usize)
+            .is_some_and(|m| !matches!(m.alpha_mode, open_racing_track::AlphaMode::Opaque));
+        let transmission = if see_through { SEE_THROUGH } else { 0.0 };
+        builder.add(&mesh.positions, &mesh.indices, transmission);
+    }
+    builder.build()
 }
 
 /// AI driver, kept on the main thread since inference backends may not be `Send`.
@@ -290,8 +336,9 @@ pub fn step_simulation(
         }
         sim.controls = controls;
         sim.previous = sim.car.state;
+        sim.weather.step(DT);
         sim.car
-            .step_evolving(&sim.track, &mut sim.evolution, &controls);
+            .step_in(&sim.track, &mut sim.evolution, &sim.weather, &controls);
         torque += sim.car.telemetry.steering_torque;
         let (pos, t) = (sim.car.state.position, sim.car.state.time);
         sim.lap.update(&sim.track, pos, t);

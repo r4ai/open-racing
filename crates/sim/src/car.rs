@@ -21,7 +21,8 @@ use crate::evolution::TrackEvolution;
 use crate::params::{CarModel, SteeringParams};
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
-use crate::{AIR_DENSITY, DT, FL, GRAVITY, RL};
+use crate::weather::Weather;
+use crate::{DT, FL, GRAVITY, RL};
 
 /// Below this speed a slip-velocity damping term is blended in so the relaxation
 /// length model does not oscillate at standstill.
@@ -36,6 +37,12 @@ const BARRIER_FRICTION: f64 = 0.3;
 const BARRIER_SKIN: f64 = 1.0;
 /// Rolling speed over which the pneumatic trail swaps ends when the wheel reverses, m/s.
 const TRAIL_REVERSAL_SPEED: f64 = 0.5;
+/// How far the air around a tyre is from the air temperature towards the road's: the
+/// air in the first centimetres over sunlit asphalt is well above the air temperature.
+const NEAR_ROAD_AIR: f64 = 0.2;
+/// Standard weather for [`Car::step_evolving`], a static so that no step builds and
+/// drops a copy of it.
+static STANDARD_WEATHER: Weather = Weather::STANDARD;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelState {
@@ -238,12 +245,26 @@ impl Car {
     }
 
     /// Advances the simulation by one fixed step of `DT` on a track with the rubber and
-    /// dirt of `evolution`. The tyres lay rubber where they roll on the asphalt, pick up
-    /// dirt off the road and leave it where they rejoin.
+    /// dirt of `evolution`, in standard weather (see [`Self::step_in`]).
     pub fn step_evolving(
         &mut self,
         track: &Track,
         evolution: &mut TrackEvolution,
+        controls: &Controls,
+    ) {
+        self.step_in(track, evolution, &STANDARD_WEATHER, controls);
+    }
+
+    /// Advances the simulation by one fixed step of `DT` on a track with the rubber and
+    /// dirt of `evolution`, in `weather`. The tyres lay rubber where they roll on the
+    /// asphalt, pick up dirt off the road and leave it where they rejoin. The air's
+    /// density sets the aerodynamic forces and the engine's power, the wind adds to the
+    /// airspeed, and the air and the road under each tyre heat or cool its tread.
+    pub fn step_in(
+        &mut self,
+        track: &Track,
+        evolution: &mut TrackEvolution,
+        weather: &Weather,
         controls: &Controls,
     ) {
         let model = &*self.model;
@@ -263,6 +284,7 @@ impl Car {
         let rot_t = rot.transpose();
         let omega = st.angular_velocity;
         let steer = steer_angles(model, c.steer_wheel_angle);
+        let air = weather.air_at(st.position);
 
         // ---- Tyres ---------------------------------------------------------------
         // Per wheel: tyre force in body coordinates, application point, road torque.
@@ -381,6 +403,7 @@ impl Car {
 
             let rolling_resistance = tire.rolling_resistance(pressure);
             let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
+            let road = weather.road_temperature(q.s, q.d);
             tire.update_condition(
                 &mut w.tire,
                 &tread_load,
@@ -388,6 +411,8 @@ impl Car {
                 rolling_resistance * fz * speed,
                 speed,
                 fz > 0.0,
+                air.temperature + NEAR_ROAD_AIR * (road - air.temperature),
+                road,
                 dt,
             );
 
@@ -430,6 +455,7 @@ impl Car {
             &DriveInput {
                 throttle: c.throttle,
                 clutch_pedal: c.clutch,
+                power: air.engine,
                 wheel_speed: st.wheels.map(|w| w.spin),
                 wheel_torque: road_torque,
                 wheel_inertia: [0, 1, 2, 3].map(|i| model.axle(i).wheel_inertia),
@@ -497,13 +523,14 @@ impl Car {
             torque += model.corners[i].hardpoint.cross(f_susp);
         }
 
-        let v_body = rot_t * st.velocity;
-        let q_dyn = 0.5 * AIR_DENSITY * v_body.x * v_body.x;
+        // Airspeed: the car's velocity through the moving air.
+        let v_body = rot_t * (st.velocity - air.wind);
+        let q_dyn = 0.5 * air.density * v_body.x * v_body.x;
         let downforce = [
             q_dyn * p.aero.downforce_area_front,
             q_dyn * p.aero.downforce_area_rear,
         ];
-        let drag = -0.5 * AIR_DENSITY * p.aero.drag_area * v_body.length() * v_body;
+        let drag = -0.5 * air.density * p.aero.drag_area * v_body.length() * v_body;
         let drag_point = DVec3::new(0.0, 0.0, p.aero.drag_height);
         force += drag;
         torque += drag_point.cross(drag);

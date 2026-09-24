@@ -1,21 +1,10 @@
 //! Track geometry and car visuals generated from the simulation data.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats};
-use bevy::light::{GeneratedEnvironmentMapLight, NotShadowCaster};
+use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::generate::{
-    GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
-};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureViewDescriptor,
-    TextureViewDimension,
-};
-use bevy::render::{Render, RenderApp};
 use glam::{DQuat, DVec3};
 use open_racing_car::{CarVisual, Part};
 use open_racing_sim::Track;
@@ -49,15 +38,7 @@ impl Plugin for ScenePlugin {
                     spawn_lights,
                 ),
             )
-            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate))
-            .add_systems(Update, freeze_sky_light);
-        let filtered = SkyFiltered::default();
-        app.insert_resource(filtered.clone());
-        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app
-                .insert_resource(filtered)
-                .add_systems(Render, note_sky_filtered.after(filtering_system));
-        }
+            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
     }
 }
 
@@ -94,124 +75,9 @@ pub struct CarNose(pub f64);
 #[derive(Component)]
 pub struct CarVisualRoot;
 
-/// Edge of the sky cube map's faces, in texels. The sky is a smooth gradient.
-const SKY_MAP_SIZE: u32 = 64;
-/// Luminance scale of the sky light, cd/m². Shade gets about the light that ambient light
-/// of 400 cd/m² gives, which Bevy scales by its diffuse BRDF term (≈ 0.45).
-const SKY_BRIGHTNESS: f32 = 400.0;
-
-/// Environment light for cameras: a sky from blue at the zenith to haze at the horizon,
-/// over sunlit ground. It fills shadows as ambient light would, and gives glossy surfaces
-/// something to reflect. Its colours are muted so that shade stays close to neutral.
-pub fn sky_light(images: &mut Assets<Image>) -> GeneratedEnvironmentMapLight {
-    let zenith = LinearRgba::from(Color::srgb(0.5, 0.64, 0.85));
-    let horizon = LinearRgba::from(Color::srgb(0.88, 0.9, 0.92));
-    let ground = LinearRgba::from(Color::srgb(0.55, 0.5, 0.43));
-    let n = SKY_MAP_SIZE as usize;
-    let mut data = Vec::with_capacity(6 * n * n * 4);
-    // Faces +X, −X, +Y, −Y, +Z, −Z; rows run down on the side faces.
-    for face in 0..6 {
-        for row in 0..n {
-            for col in 0..n {
-                let [u, v] = [col, row].map(|i| (i as f32 + 0.5) / n as f32 * 2.0 - 1.0);
-                let up = match face {
-                    2 => 1.0,
-                    3 => -1.0,
-                    _ => -v,
-                } / (1.0 + u * u + v * v).sqrt();
-                let c = if up >= 0.0 {
-                    horizon.mix(&zenith, up.sqrt())
-                } else {
-                    horizon.mix(&ground, (-4.0 * up).min(1.0))
-                };
-                data.extend(Color::from(c).to_srgba().to_u8_array());
-            }
-        }
-    }
-    let size = Extent3d {
-        width: SKY_MAP_SIZE,
-        height: SKY_MAP_SIZE,
-        depth_or_array_layers: 6,
-    };
-    let mut image = Image::new(
-        size,
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::Cube),
-        ..default()
-    });
-    GeneratedEnvironmentMapLight {
-        environment_map: images.add(image),
-        intensity: SKY_BRIGHTNESS,
-        ..default()
-    }
-}
-
-/// Set by the render world once it has filtered the sky light into the camera's diffuse
-/// and specular maps.
-#[derive(Resource, Clone, Default)]
-struct SkyFiltered(Arc<AtomicBool>);
-
-/// Notes that the sky light's filter passes ran this frame: their pipelines are compiled
-/// and a map had its bind groups.
-fn note_sky_filtered(
-    filtered: Res<SkyFiltered>,
-    pipelines: Option<Res<GeneratorPipelines>>,
-    cache: Res<PipelineCache>,
-    maps: Query<(), (With<GeneratorBindGroups>, With<RenderEnvironmentMap>)>,
-) {
-    let Some(p) = pipelines else { return };
-    let ready = [
-        p.copy,
-        p.downsample_first,
-        p.downsample_second,
-        p.radiance,
-        p.irradiance,
-    ]
-    .into_iter()
-    .all(|id| cache.get_compute_pipeline(id).is_some());
-    if ready && !maps.is_empty() {
-        filtered.0.store(true, Ordering::Relaxed);
-    }
-}
-
-/// The sky never changes, but Bevy filters a `GeneratedEnvironmentMapLight` again every
-/// frame. Once it has been filtered, keep the maps it made and stop filtering.
-fn freeze_sky_light(
-    mut commands: Commands,
-    filtered: Res<SkyFiltered>,
-    cameras: Query<
-        Entity,
-        (
-            With<GeneratedEnvironmentMapLight>,
-            With<EnvironmentMapLight>,
-        ),
-    >,
-) {
-    if filtered.0.load(Ordering::Relaxed) {
-        for camera in &cameras {
-            commands
-                .entity(camera)
-                .remove::<GeneratedEnvironmentMapLight>();
-        }
-    }
-}
-
 fn spawn_lights(mut commands: Commands) {
-    // The sky light (see `sky_light`) replaces ambient light.
+    // The weather's sky light replaces ambient light, and it places the sun.
     commands.insert_resource(GlobalAmbientLight::NONE);
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 12_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(100.0, 300.0, 150.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }
 
 /// Triangle mesh built from ribbons that follow the track.

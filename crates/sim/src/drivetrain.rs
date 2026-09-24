@@ -76,6 +76,8 @@ fn gear_ratio(p: &CarParams, gear: i32) -> f64 {
 pub struct DriveInput {
     pub throttle: f64,
     pub clutch_pedal: f64,
+    /// Full-throttle torque relative to the engine's curve: the air's density.
+    pub power: f64,
     /// Spin rates of the wheels, rad/s.
     pub wheel_speed: [f64; 4],
     /// Net torque on each wheel from the road, excluding the drivetrain, N·m.
@@ -136,7 +138,7 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
         if rpm >= e.limiter_rpm {
             throttle = 0.0;
         }
-        let full = lookup(&e.torque_curve, rpm);
+        let full = lookup(&e.torque_curve, rpm) * input.power;
         let drag = lookup(&e.drag_curve, rpm);
         throttle * full - (1.0 - throttle) * drag
     };

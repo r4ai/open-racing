@@ -39,7 +39,7 @@ T                toggle AI driver (with --ai)
 M                mute / unmute sound
 R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
-Esc              settings: input, force feedback, track, graphics (Tab)
+Esc              settings: input, force feedback, track, weather, graphics (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
 Wheel and pedals: assign them in the Esc settings (input \"custom\")";
@@ -207,6 +207,19 @@ fn update(
             .map(|w| format!("{:3.0}", w.tire.dirt() * 100.0))
             .collect::<Vec<_>>()
             .join(" ")
+    );
+    let w = &sim.weather;
+    let (wind, from) = w.wind();
+    let _ = writeln!(
+        s,
+        "{} {}   air {:.1} C   road here {:.1} C   wind {:.1} m/s {}   cloud {:.0} %",
+        w.regime().name(),
+        crate::settings::clock(w.hour()),
+        w.air_temperature(),
+        w.road_temperature(q.s, q.d),
+        wind,
+        crate::settings::compass(from),
+        w.cloud_cover() * 100.0
     );
     let a = car.telemetry.acceleration;
     let _ = write!(

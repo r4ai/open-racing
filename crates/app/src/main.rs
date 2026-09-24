@@ -5,6 +5,7 @@ mod audio;
 mod bindings;
 mod camera;
 mod capture;
+mod clouds;
 mod driving;
 mod effects;
 mod ffb;
@@ -16,6 +17,7 @@ mod settings;
 mod track_model;
 mod tyre_dirt;
 mod vr;
+mod weather;
 
 use std::path::PathBuf;
 
@@ -51,6 +53,13 @@ pub struct Args {
     /// R recenters the view.
     #[arg(long)]
     pub vr: bool,
+    /// Weather at the start: clear, fair, partly-cloudy, cloudy or overcast. Also set in
+    /// the settings screen (Esc, Tab to "weather"), which keeps it for the next run.
+    #[arg(long, value_parser = weather::parse_sky)]
+    pub weather: Option<String>,
+    /// Time of day at the start, e.g. 14:30.
+    #[arg(long, value_parser = weather::parse_time)]
+    pub time: Option<f64>,
 }
 
 fn main() {
@@ -58,10 +67,12 @@ fn main() {
     if args.track.is_none() {
         args.track = driving::policy_track(&args);
     }
-    let (sim, track_model, car_model) = driving::Simulation::new(&args).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    });
+    let weather = weather::WeatherConfig::load(&args);
+    let (sim, track_model, car_model) =
+        driving::Simulation::new(&args, weather.0).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
 
     let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -84,6 +95,7 @@ fn main() {
     }
     app.insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
         .insert_resource(sim)
+        .insert_resource(weather)
         .insert_resource(track_model)
         .insert_resource(car_model)
         .insert_resource(args.clone())
@@ -100,6 +112,7 @@ fn main() {
             ffb::FfbPlugin,
             graphics::GraphicsPlugin,
             tyre_dirt::TyreDirtPlugin,
+            weather::WeatherPlugin,
         ));
     driving::install_policy(&mut app, &args);
     app.run();

@@ -14,7 +14,8 @@ use bevy_mod_xr::session::XrTrackingRoot;
 use crate::camera::{CameraMode, MainCamera, PrimaryView, body_view, driver_eye};
 use crate::driving::Simulation;
 use crate::input::AppRequests;
-use crate::scene::{DriverEye, sky_light};
+use crate::scene::DriverEye;
+use crate::weather::{self, SkyLight};
 
 /// Replaces the renderer in `default` with the OpenXR one.
 pub fn plugins(default: PluginGroupBuilder) -> PluginGroupBuilder {
@@ -49,16 +50,17 @@ impl Plugin for VrPlugin {
     }
 }
 
-/// Gives a new eye camera the sky light, and makes the left eye the primary view.
+/// Gives a new eye camera the atmosphere and the sky light, and makes the left eye the
+/// primary view.
 fn setup_eye(
     add: On<Add, XrCamera>,
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
+    sky: Res<SkyLight>,
     eyes: Query<&XrCamera>,
     primary: Query<Entity, With<PrimaryView>>,
 ) {
     let mut eye = commands.entity(add.entity);
-    eye.insert(sky_light(&mut images));
+    eye.insert(weather::camera_components(&sky));
     if eyes.get(add.entity).is_ok_and(|e| e.0 == 0) {
         eye.insert(PrimaryView);
         for e in &primary {

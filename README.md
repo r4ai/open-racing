@@ -67,6 +67,22 @@ cargo run --release -p open-racing-train-burn -- eval --model runs/evolving --tr
 
 Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app shows the coat on the tyres; the rubber and the dirt on the road are not drawn.
 
+### Weather
+
+The app simulates the weather with the car, so a drive replays exactly. Rain is not modelled yet.
+
+- **Sky:** clear, fair, partly cloudy, cloudy or overcast, set on the Esc settings (page "weather") or with `--weather`. With changes on, the sky drifts between neighbouring states every hour or so of weather time, and time can run up to 120× faster than real time.
+- **Clouds** come in four layers, as a meteorologist reports them: cumulus from daytime convection (none at night, building through the day, their flat bases at the condensation level, 125 m per kelvin of dew-point spread), a stratus or stratocumulus deck, an altostratus or altocumulus sheet at about 3 km, and cirrus at about 9 km. Each drifts with its own wind, veering and strengthening with height. They are drawn as ray-marched volumetric clouds in the manner of *Horizon Zero Dawn* (Schneider) and *Frostbite* (Hillaire), with a physical atmosphere, and the cloud shadows sweep over the track.
+- **Air:** the temperature follows the month's climate and a daily cycle damped by cloud, and falls with height; humidity and pressure follow the sky. The air's density (temperature, pressure, humidity) scales drag, downforce and engine power (SAE J1349), and the wind, with gusts, adds to or takes from the airspeed.
+- **Road temperature:** each 8 m patch of the road, in three lanes, balances sunshine on its slope, diffuse daylight from the part of the sky it sees, long-wave radiation to and from the sky, convection and conduction into the ground. On tracks with a 3D model the scenery shades the road (rays cast once per half hour of the sun's path), so a stretch under a grandstand stays cool while open asphalt gets 20–30 °C above the air on a summer afternoon. Tyres are heated or cooled by the road under them and by the air around them.
+
+```bash
+# A partly cloudy afternoon
+cargo run --release -p open-racing-app -- --weather partly-cloudy --time 15:30
+```
+
+Training (`open-racing-env`) keeps fixed standard conditions (25 °C air and road, 1.225 kg/m³, no wind), as before, and runs as fast as before.
+
 ### Controls
 
 | key       | action                                                     |
@@ -82,7 +98,7 @@ Without `--track-grip` training keeps the whole asphalt at the tyres' nominal gr
 | T         | switch to the AI driver                                    |
 | M         | mute / unmute sound                                        |
 | Tab       | choose the input device                                    |
-| Esc       | settings: input devices, force feedback, track condition   |
+| Esc       | settings: input, force feedback, track, weather, graphics  |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
 

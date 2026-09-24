@@ -5,7 +5,8 @@ use glam::DVec3;
 
 use crate::driving::Simulation;
 use crate::input::AppRequests;
-use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, sky_light, to_bevy};
+use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, to_bevy};
+use crate::weather::{self, SkyLight};
 
 #[derive(Component)]
 pub struct MainCamera;
@@ -77,12 +78,12 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn spawn_camera(mut commands: Commands, sky: Res<SkyLight>) {
     commands.spawn((
         MainCamera,
         PrimaryView,
         Camera3d::default(),
-        sky_light(&mut images),
+        weather::camera_components(&sky),
         Projection::Perspective(PerspectiveProjection {
             fov: 60f32.to_radians(),
             near: 0.05,

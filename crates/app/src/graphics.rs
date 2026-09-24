@@ -31,7 +31,8 @@ use crate::camera::MainCamera;
 
 const SETTINGS_FILE: &str = "graphics.ron";
 /// Distance at which the haze hides objects, m, and its colour: the sky at the horizon.
-const FOG_VISIBILITY: f32 = 6000.0;
+/// The weather sets both each frame.
+const FOG_VISIBILITY: f32 = 20000.0;
 const FOG_COLOR: Color = Color::srgb(0.62, 0.74, 0.86);
 /// A camera that moves farther than this in a frame (m) cut to a new view, and TAA
 /// drops the old frames instead of smearing them over the new one.
@@ -152,6 +153,18 @@ impl Level {
         }
     }
 
+    /// Ray-march steps through the clouds and towards the sun, and the strength of the
+    /// fine erosion of their edges; no steps draws no clouds.
+    pub fn march(self) -> (u32, u32, f32) {
+        match self {
+            Self::Off => (0, 0, 0.0),
+            Self::Low => (32, 3, 0.0),
+            Self::Medium => (48, 4, 1.0),
+            Self::High => (64, 5, 1.0),
+            Self::Ultra => (96, 6, 1.0),
+        }
+    }
+
     fn motion_blur(self) -> Option<MotionBlur> {
         let (shutter_angle, samples) = match self {
             Self::Off => return None,
@@ -201,6 +214,7 @@ impl Preset {
                 contact_shadows: false,
                 ambient_occlusion: Level::Off,
                 haze: false,
+                clouds: Level::Low,
                 ..prefs
             },
             Self::Medium => GraphicsSettings {
@@ -215,6 +229,7 @@ impl Preset {
                 contact_shadows: false,
                 ambient_occlusion: Level::Off,
                 haze: true,
+                clouds: Level::Medium,
                 ..prefs
             },
             Self::High => GraphicsSettings {
@@ -229,6 +244,7 @@ impl Preset {
                 contact_shadows: true,
                 ambient_occlusion: Level::Off,
                 haze: true,
+                clouds: Level::High,
                 ..prefs
             },
             Self::Ultra => GraphicsSettings {
@@ -243,6 +259,7 @@ impl Preset {
                 contact_shadows: true,
                 ambient_occlusion: Level::High,
                 haze: true,
+                clouds: Level::Ultra,
                 ..prefs
             },
         }
@@ -270,6 +287,8 @@ pub struct GraphicsSettings {
     pub ambient_occlusion: Level,
     /// Haze that fades distant scenery into the sky.
     pub haze: bool,
+    /// Volumetric clouds.
+    pub clouds: Level,
     pub motion_blur: Level,
     pub vsync: bool,
 }
@@ -288,6 +307,7 @@ impl Default for GraphicsSettings {
             contact_shadows: false,
             ambient_occlusion: Level::Off,
             haze: false,
+            clouds: Level::Off,
             motion_blur: Level::Off,
             vsync: true,
         })
@@ -308,12 +328,13 @@ pub enum Setting {
     ContactShadows,
     AmbientOcclusion,
     Haze,
+    Clouds,
     MotionBlur,
     VSync,
 }
 
 impl Setting {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::AntiAliasing,
         Self::Sharpening,
         Self::Textures,
@@ -325,6 +346,7 @@ impl Setting {
         Self::ContactShadows,
         Self::AmbientOcclusion,
         Self::Haze,
+        Self::Clouds,
         Self::MotionBlur,
         Self::VSync,
     ];
@@ -342,6 +364,7 @@ impl Setting {
             Self::ContactShadows => "Contact shadows",
             Self::AmbientOcclusion => "Ambient occl.",
             Self::Haze => "Haze",
+            Self::Clouds => "Clouds",
             Self::MotionBlur => "Motion blur",
             Self::VSync => "VSync",
         }
@@ -360,6 +383,7 @@ impl Setting {
             Self::ContactShadows => "fine shadows where objects touch",
             Self::AmbientOcclusion => "shade in creases; not with MSAA",
             Self::Haze => "fades distant scenery into the sky",
+            Self::Clouds => "volumetric clouds; costly on slow GPUs",
             Self::MotionBlur => "not set by the presets",
             Self::VSync => "no tearing; not set by the presets",
         }
@@ -393,7 +417,16 @@ fn on_off(on: bool) -> &'static str {
 
 impl GraphicsSettings {
     pub fn load() -> Self {
-        bindings::load_config(SETTINGS_FILE)
+        let mut s: Self = bindings::load_config(SETTINGS_FILE);
+        // A file saved before the clouds setting existed keeps the preset it was on.
+        if s.preset().is_none()
+            && let Some(clouds) = Level::ALL
+                .into_iter()
+                .find(|&clouds| Self { clouds, ..s }.preset().is_some())
+        {
+            s.clouds = clouds;
+        }
+        s
     }
 
     pub fn save(&self) {
@@ -447,6 +480,7 @@ impl GraphicsSettings {
                 level => level.name().into(),
             },
             Setting::Haze => on_off(self.haze).into(),
+            Setting::Clouds => self.clouds.name().into(),
             Setting::MotionBlur => self.motion_blur.name().into(),
             Setting::VSync => on_off(self.vsync).into(),
         }
@@ -484,6 +518,7 @@ impl GraphicsSettings {
                 self.ambient_occlusion = step(&Level::ALL, self.ambient_occlusion, up);
             }
             Setting::Haze => self.haze = !self.haze,
+            Setting::Clouds => self.clouds = step(&Level::ALL, self.clouds, up),
             Setting::MotionBlur => self.motion_blur = step(&Level::TO_HIGH, self.motion_blur, up),
             Setting::VSync => self.vsync = !self.vsync,
         }

@@ -1,10 +1,12 @@
-//! Settings screen (Esc), with three pages switched by Tab:
+//! Settings screen (Esc), with pages switched by Tab:
 //! - Input: assign steering, pedals and shift buttons from any connected device and
 //!   check the result on live values. Axes are calibrated while they are assigned,
 //!   so inverted pedals and any axis layout work.
 //! - Force feedback: the base's peak torque, strength, maximum output in N·m, road
 //!   detail, effects, damping and direction, with a test push.
 //! - Track: the rubber on the racing line to start from and how fast it builds up.
+//! - Weather: the sky, whether it changes, the time of day and how fast it passes, the
+//!   month, the temperature and the latitude, with the conditions now.
 //! - Graphics: a quality preset, and the details it sets (anti-aliasing, textures,
 //!   shadows, ambient occlusion, ...) tuned one by one, with motion blur and VSync.
 //!
@@ -16,13 +18,14 @@ use std::fmt::Write;
 use bevy::input::gamepad::GamepadInput;
 use bevy::prelude::*;
 
-use open_racing_sim::TrackCondition;
+use open_racing_sim::{Sky, TrackCondition};
 
 use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, Reported, Source};
 use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::graphics::{GraphicsSettings, GraphicsSupport, Preset, Setting};
 use crate::input::InputSelection;
+use crate::weather::WeatherConfig;
 
 /// Smallest movement over which an axis counts as moved when it is assigned.
 const MIN_TRAVEL: f32 = 0.3;
@@ -39,6 +42,27 @@ const FFB_DAMPING_RANGE: (f64, f64) = (0.0, 100.0);
 /// Track evolution: step and range of the grip the racing line gains per lap.
 const GRIP_GAIN_STEP: f64 = 0.0005;
 const GRIP_GAIN_RANGE: (f64, f64) = (0.0, 0.01);
+/// Weather: steps of the time of day (h), the speeds time can pass at, and the ranges of
+/// the temperature offset (K) and latitude (degrees).
+const HOUR_STEP: f64 = 0.5;
+const TIME_SCALES: [f64; 7] = [1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0];
+const TEMPERATURE_RANGE: (f64, f64) = (-15.0, 15.0);
+const LATITUDE_STEP: f64 = 5.0;
+const LATITUDE_RANGE: (f64, f64) = (-60.0, 60.0);
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 #[derive(Resource, Default)]
 pub struct SettingsOpen(pub bool);
@@ -53,8 +77,32 @@ enum Page {
     Input,
     ForceFeedback,
     Track,
+    Weather,
     Graphics,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum WeatherRow {
+    Sky,
+    Changes,
+    Time,
+    Speed,
+    Month,
+    Temperature,
+    Latitude,
+    NewClouds,
+}
+
+const WEATHER_ROWS: [WeatherRow; 8] = [
+    WeatherRow::Sky,
+    WeatherRow::Changes,
+    WeatherRow::Time,
+    WeatherRow::Speed,
+    WeatherRow::Month,
+    WeatherRow::Temperature,
+    WeatherRow::Latitude,
+    WeatherRow::NewClouds,
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum TrackRow {
@@ -151,6 +199,7 @@ impl Plugin for SettingsPlugin {
                         navigate,
                         navigate_ffb,
                         navigate_track,
+                        navigate_weather,
                         navigate_graphics,
                     )
                         .chain()
@@ -209,7 +258,8 @@ fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
         screen.page = match screen.page {
             Page::Input => Page::ForceFeedback,
             Page::ForceFeedback => Page::Track,
-            Page::Track => Page::Graphics,
+            Page::Track => Page::Weather,
+            Page::Weather => Page::Graphics,
             Page::Graphics => Page::Input,
         };
         screen.row = 0;
@@ -364,6 +414,69 @@ fn navigate_track(
     }
     sim.restart_track();
     screen.message = "Track restarted.".into();
+}
+
+fn navigate_weather(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut config: ResMut<WeatherConfig>,
+    mut sim: ResMut<Simulation>,
+) {
+    if screen.page != Page::Weather {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, WEATHER_ROWS.len());
+    let (left, right, enter) = (
+        keys.just_pressed(KeyCode::ArrowLeft),
+        keys.just_pressed(KeyCode::ArrowRight),
+        keys.just_pressed(KeyCode::Enter),
+    );
+    let dir: isize = match (left, right) {
+        (true, false) => -1,
+        (false, true) => 1,
+        _ => 0,
+    };
+    let mut s = config.0;
+    let index = |i: usize, n: usize| (i as isize + dir).clamp(0, n as isize - 1) as usize;
+    match WEATHER_ROWS[screen.row] {
+        WeatherRow::Sky if dir != 0 => {
+            let i = Sky::ALL.iter().position(|&k| k == s.sky).unwrap_or(0);
+            s.sky = Sky::ALL[index(i, Sky::ALL.len())];
+        }
+        WeatherRow::Changes if dir != 0 || enter => s.dynamic = !s.dynamic,
+        WeatherRow::Time if dir != 0 => {
+            s.hour = (s.hour + HOUR_STEP * dir as f64).rem_euclid(24.0);
+        }
+        WeatherRow::Speed if dir != 0 => {
+            let i = TIME_SCALES
+                .iter()
+                .position(|&x| x >= s.time_scale)
+                .unwrap_or(0);
+            s.time_scale = TIME_SCALES[index(i, TIME_SCALES.len())];
+            // Only the pace changes; the weather carries on.
+            config.0 = s;
+            config.save();
+            sim.weather.settings.time_scale = s.time_scale;
+            return;
+        }
+        WeatherRow::Month if dir != 0 => {
+            s.month = ((s.month as isize - 1 + dir).rem_euclid(12) + 1) as u32;
+        }
+        WeatherRow::Temperature if dir != 0 => {
+            s.temperature_offset =
+                (s.temperature_offset + dir as f64).clamp(TEMPERATURE_RANGE.0, TEMPERATURE_RANGE.1);
+        }
+        WeatherRow::Latitude if dir != 0 => {
+            s.latitude =
+                (s.latitude + LATITUDE_STEP * dir as f64).clamp(LATITUDE_RANGE.0, LATITUDE_RANGE.1);
+        }
+        WeatherRow::NewClouds if enter => s.seed = s.seed.wrapping_add(0x9E37_79B9),
+        _ => return,
+    }
+    config.0 = s;
+    config.save();
+    sim.restart_weather(s);
+    screen.message = "Weather restarted.".into();
 }
 
 fn navigate(
@@ -521,6 +634,7 @@ fn render(
     ffb_status: Res<FfbStatus>,
     graphics: Res<GraphicsSettings>,
     graphics_support: Res<GraphicsSupport>,
+    weather: Res<WeatherConfig>,
     sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
@@ -538,16 +652,18 @@ fn render(
         return;
     }
     let tabs = match screen.page {
-        Page::Input => "[INPUT]  force feedback   track   graphics ",
-        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   graphics ",
-        Page::Track => " input   force feedback  [TRACK]  graphics ",
-        Page::Graphics => " input   force feedback   track  [GRAPHICS]",
+        Page::Input => "[INPUT]  force feedback   track   weather   graphics ",
+        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   weather   graphics ",
+        Page::Track => " input   force feedback  [TRACK]  weather   graphics ",
+        Page::Weather => " input   force feedback   track  [WEATHER]  graphics ",
+        Page::Graphics => " input   force feedback   track   weather  [GRAPHICS]",
     };
     let mut s = format!("{tabs}   (Tab page, paused)   Esc close\n\n");
     match screen.page {
         Page::Input => render_input(&mut s, &screen, &bindings, &reported, *selection, &pads),
         Page::ForceFeedback => render_ffb(&mut s, &screen, &ffb_settings, &ffb_status),
         Page::Track => render_track(&mut s, &screen, &sim),
+        Page::Weather => render_weather(&mut s, &screen, &weather, &sim),
         Page::Graphics => render_graphics(&mut s, &screen, &graphics, *graphics_support),
     }
     text.0 = s;
@@ -580,6 +696,93 @@ fn render_graphics(
     let _ = writeln!(
         s,
         "\nLeft/Right change, Enter on/off. Lower settings run faster."
+    );
+}
+
+/// "14:05" for 14.08 h.
+pub fn clock(hour: f64) -> String {
+    let minutes = (hour.rem_euclid(24.0) * 60.0).round() as u32 % (24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// Compass point of a direction in degrees.
+pub fn compass(degrees: f64) -> &'static str {
+    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    POINTS[((degrees.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]
+}
+
+fn render_weather(s: &mut String, screen: &Screen, config: &WeatherConfig, sim: &Simulation) {
+    let c = &config.0;
+    for (i, row) in WEATHER_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let (name, value, hint) = match row {
+            WeatherRow::Sky => ("Weather", c.sky.name().to_string(), "(Left/Right)"),
+            WeatherRow::Changes => (
+                "Changes",
+                if c.dynamic { "on" } else { "off" }.to_string(),
+                "(Enter; the sky drifts between states by itself)",
+            ),
+            WeatherRow::Time => ("Time", clock(c.hour), "(Left/Right; time at the start)"),
+            WeatherRow::Speed => (
+                "Time speed",
+                format!("{}x", c.time_scale),
+                "(Left/Right; how fast the day passes)",
+            ),
+            WeatherRow::Month => (
+                "Month",
+                MONTHS[c.month.clamp(1, 12) as usize - 1].to_string(),
+                "(Left/Right; season and path of the sun)",
+            ),
+            WeatherRow::Temperature => (
+                "Temperature",
+                format!("{:+.0} K", c.temperature_offset),
+                "(Left/Right; warmer or colder than usual)",
+            ),
+            WeatherRow::Latitude => (
+                "Latitude",
+                format!("{:.0} deg", c.latitude),
+                "(Left/Right; of the circuit)",
+            ),
+            WeatherRow::NewClouds => ("New clouds", String::new(), "Enter: other clouds"),
+        };
+        let _ = writeln!(s, "{cursor} {name:<12} {value:<14} {hint}");
+    }
+    let w = &sim.weather;
+    let (wind, from) = w.wind();
+    let _ = writeln!(
+        s,
+        "\nNow {}   cloud {:.0} %, heading for {}",
+        clock(w.hour()),
+        w.cloud_cover() * 100.0,
+        w.regime().name(),
+    );
+    let _ = writeln!(
+        s,
+        "Air {:.1} C, humidity {:.0} %, {:.0} hPa, density {:.3} kg/m3, wind {:.1} m/s from {}",
+        w.air_temperature(),
+        w.relative_humidity() * 100.0,
+        w.pressure(),
+        w.air_density(),
+        wind,
+        compass(from)
+    );
+    if let Some((mean, lo, hi)) = w.road().map(|r| r.stats()) {
+        let _ = writeln!(
+            s,
+            "Road {mean:.1} C on average, {lo:.1} C in the coolest shade, {hi:.1} C in the sun"
+        );
+    }
+    let _ = writeln!(s);
+    if !screen.message.is_empty() {
+        let _ = writeln!(s, "{}", screen.message);
+    }
+    let _ = writeln!(
+        s,
+        "Sun and cloud heat the road where they reach it; hot air thins, costing downforce"
+    );
+    let _ = writeln!(
+        s,
+        "and power. Changing a setting other than the time speed restarts the weather."
     );
 }
 

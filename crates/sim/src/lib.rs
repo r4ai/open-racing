@@ -17,6 +17,7 @@ pub mod ground;
 pub mod params;
 pub mod tire;
 pub mod track;
+pub mod weather;
 
 pub use assist::AutoShift;
 pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
@@ -26,6 +27,7 @@ pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{CarModel, CarParams, Drive, ParamsError};
 pub use tire::TireCondition;
 pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};
+pub use weather::{Air, Sky, Weather, WeatherSettings};
 
 /// Fixed physics time step in seconds (1 kHz).
 pub const DT: f64 = 1.0 / 1000.0;

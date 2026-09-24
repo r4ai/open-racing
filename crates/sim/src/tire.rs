@@ -454,6 +454,8 @@ impl TireModel {
     /// * `rolling_power` – power lost to rolling resistance, W
     /// * `speed` – rolling speed, m/s
     /// * `on_road` – whether the tyre touches the road
+    /// * `air`, `road` – temperature of the air around the tyre and of the road under
+    ///   it, °C
     #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn update_condition(
@@ -464,6 +466,8 @@ impl TireModel {
         rolling_power: f64,
         speed: f64,
         on_road: bool,
+        air: f64,
+        road: f64,
         dt: f64,
     ) {
         let t = &self.p.thermal;
@@ -472,10 +476,8 @@ impl TireModel {
         c.wear = (c.wear + t.wear_rate * 1e-6 * slide_power * (1.0 + overheat) * dt).min(1.0);
 
         let old = c.tread_temperature;
-        let cooling = (t.air_cooling
-            + t.air_cooling_per_speed * speed
-            + if on_road { t.road_cooling } else { 0.0 })
-            / 3.0;
+        let air_cooling = (t.air_cooling + t.air_cooling_per_speed * speed) / 3.0;
+        let road_cooling = if on_road { t.road_cooling / 3.0 } else { 0.0 };
         let mut to_core = 0.0;
         for k in 0..3 {
             let core = t.core_conductance / 3.0 * (old[k] - c.core_temperature);
@@ -484,7 +486,7 @@ impl TireModel {
                 .filter_map(|&j| old.get(j))
                 .map(|&tj| t.zone_conductance * (old[k] - tj))
                 .sum();
-            let cooling = cooling * (old[k] - AMBIENT_TEMPERATURE);
+            let cooling = air_cooling * (old[k] - air) + road_cooling * (old[k] - road);
             let heat =
                 (t.slide_heat_share * slide_power + t.rolling_heat_share * rolling_power) * load[k];
             c.tread_temperature[k] +=
@@ -681,7 +683,17 @@ mod tests {
         let mut c = tire.fresh();
         let load = [0.5, 0.3, 0.2];
         for _ in 0..3000 {
-            tire.update_condition(&mut c, &load, 50_000.0, 0.0, 30.0, true, 1e-3);
+            tire.update_condition(
+                &mut c,
+                &load,
+                50_000.0,
+                0.0,
+                30.0,
+                true,
+                AMBIENT_TEMPERATURE,
+                AMBIENT_TEMPERATURE,
+                1e-3,
+            );
         }
         let [inner, middle, outer] = c.tread_temperature;
         assert!(inner > middle && middle > outer, "{c:?}");
@@ -690,7 +702,17 @@ mod tests {
         assert!(c.wear > 0.0);
         let (hot, wear) = (c.surface_temperature(&load), c.wear);
         for _ in 0..20_000 {
-            tire.update_condition(&mut c, &load, 0.0, 0.0, 30.0, true, 1e-3);
+            tire.update_condition(
+                &mut c,
+                &load,
+                0.0,
+                0.0,
+                30.0,
+                true,
+                AMBIENT_TEMPERATURE,
+                AMBIENT_TEMPERATURE,
+                1e-3,
+            );
         }
         assert!(c.surface_temperature(&load) < hot - 20.0, "{c:?}");
         assert_eq!(c.wear, wear);

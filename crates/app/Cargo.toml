@@ -18,7 +18,7 @@ open-racing-api.workspace = true
 open-racing-track.workspace = true
 open-racing-car.workspace = true
 open-racing-train-burn = { path = "../train-burn", optional = true }
-bevy = { version = "0.19", features = ["serialize", "dds"] }
+bevy = { version = "0.19", features = ["serialize", "dds", "pbr_light_textures"] }
 serde.workspace = true
 ron.workspace = true
 glam.workspace = true
