@@ -529,17 +529,15 @@ impl Car {
         for i in 0..4 {
             let center = st.position
                 + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
-            let q = track.query(center, st.wheels[i].hint);
-            let excess = q.beyond_barrier(track);
-            if excess > depth {
-                depth = excess;
-                push = q.lateral * -q.d.signum();
-            }
-            if let Some((dir, excess)) = track.wall_contact(center, model.tire(i).p.radius)
-                && excess > depth
-            {
-                depth = excess;
-                push = dir;
+            let contacts = [
+                track.barrier_contact(center, st.wheels[i].hint),
+                track.wall_contact(center, model.tire(i).p.radius),
+            ];
+            for (dir, excess) in contacts.into_iter().flatten() {
+                if excess > depth {
+                    depth = excess;
+                    push = dir;
+                }
             }
         }
         tel.barrier_impact = 0.0;

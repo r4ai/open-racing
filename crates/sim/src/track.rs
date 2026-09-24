@@ -195,12 +195,28 @@ impl TrackQuery {
     /// Signed distance from the edge of the drivable area (track + kerbs + run-off)
     /// towards the outside; positive means beyond the barrier.
     pub fn beyond_barrier(&self, track: &Track) -> f64 {
-        let edge = track.kerb_width + track.runoff_width;
-        if self.d >= 0.0 {
-            self.d - self.width_left - edge
-        } else {
-            -self.d - self.width_right - edge
-        }
+        track.beyond_barrier(self.d, self.width_left, self.width_right)
+    }
+}
+
+/// Position of a point relative to the centreline.
+#[derive(Clone, Copy, Debug)]
+pub struct TrackCoords {
+    /// Segment index; feed back as the hint of the next query.
+    pub index: usize,
+    /// Distance along the centreline from the start line, in [0, length).
+    pub s: f64,
+    /// Signed lateral offset from the centreline, positive = left.
+    pub d: f64,
+    /// Centreline sample at `s`.
+    pub sample: Sample,
+}
+
+impl TrackCoords {
+    /// Signed distance from the edge of the drivable area (track + kerbs + run-off)
+    /// towards the outside; positive means beyond the barrier.
+    pub fn beyond_barrier(&self, track: &Track) -> f64 {
+        track.beyond_barrier(self.d, self.sample.width_left, self.sample.width_right)
     }
 }
 
@@ -348,9 +364,10 @@ impl Track {
         best.0
     }
 
-    /// Surface information under `p`. `hint` should be the `index` of a recent
-    /// query near `p`; the search walks from there so the cost is O(1) while tracking.
-    pub fn query(&self, p: DVec3, hint: usize) -> TrackQuery {
+    /// Where `p` lies relative to the centreline, without looking at the ground.
+    /// `hint` should be the `index` of a recent query near `p`; the search walks from
+    /// there so the cost is O(1) while tracking.
+    pub fn locate(&self, p: DVec3, hint: usize) -> TrackCoords {
         let n = self.samples.len();
         let mut i = hint % n;
         let mut last_step = 0isize;
@@ -383,14 +400,35 @@ impl Track {
             }
         }
         let u = u.clamp(0.0, 1.0);
-        let smp = lerp_sample(
+        let sample = lerp_sample(
             &self.samples[i],
             &self.samples[self.wrap(i as isize + 1)],
             u,
         );
+        TrackCoords {
+            index: i,
+            s: self.wrap_s((i as f64 + u) * self.spacing),
+            d: (p - sample.pos).dot(sample.lateral),
+            sample,
+        }
+    }
 
-        let rel = p - smp.pos;
-        let d = rel.dot(smp.lateral);
+    /// How far `p` lies beyond the barrier at the edge of the run-off: (unit direction
+    /// back towards the track, depth). See [`Self::locate`] for `hint`.
+    pub fn barrier_contact(&self, p: DVec3, hint: usize) -> Option<(DVec3, f64)> {
+        let c = self.locate(p, hint);
+        let excess = c.beyond_barrier(self);
+        (excess > 0.0).then(|| (c.sample.lateral * -c.d.signum(), excess))
+    }
+
+    /// Surface information under `p`. See [`Self::locate`] for `hint`.
+    pub fn query(&self, p: DVec3, hint: usize) -> TrackQuery {
+        let TrackCoords {
+            index,
+            s,
+            d,
+            sample: smp,
+        } = self.locate(p, hint);
         let hit = self.ground.as_ref().and_then(|g| g.raycast_down(p, RAY_UP));
         let (surface_point, normal, props) = match hit {
             Some(hit) => (hit.point, hit.normal, hit.surface),
@@ -401,7 +439,7 @@ impl Track {
                     surface = Surface::Grass;
                 }
                 // Surface plane through the centreline point, offset by the kerb profile.
-                let height_along_normal = rel.dot(smp.normal);
+                let height_along_normal = (p - smp.pos).dot(smp.normal);
                 (
                     p - smp.normal * (height_along_normal - kerb_rise),
                     smp.normal,
@@ -411,8 +449,8 @@ impl Track {
         };
 
         TrackQuery {
-            index: i,
-            s: self.wrap_s((i as f64 + u) * self.spacing),
+            index,
+            s,
             d,
             surface_point,
             normal,
@@ -424,6 +462,16 @@ impl Track {
             dirt: props.dirt(),
             width_left: smp.width_left,
             width_right: smp.width_right,
+        }
+    }
+
+    #[inline]
+    fn beyond_barrier(&self, d: f64, width_left: f64, width_right: f64) -> f64 {
+        let edge = self.kerb_width + self.runoff_width;
+        if d >= 0.0 {
+            d - width_left - edge
+        } else {
+            -d - width_right - edge
         }
     }
 

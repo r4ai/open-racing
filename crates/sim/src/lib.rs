@@ -25,7 +25,7 @@ pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{CarModel, CarParams, Drive, ParamsError};
 pub use tire::TireCondition;
-pub use track::{Coat, Surface, Track, TrackDef, TrackError, TrackPoint, TrackQuery};
+pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};
 
 /// Fixed physics time step in seconds (1 kHz).
 pub const DT: f64 = 1.0 / 1000.0;

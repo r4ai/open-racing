@@ -113,8 +113,12 @@ impl GroundMeshBuilder {
             let p = t.map(|i| self.verts[i as usize].truncate());
             (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]))
         };
-        let ground = Grid::build(self.ground.iter().map(|(t, _)| tri_bounds(t)), GROUND_CELL);
-        let walls = Grid::build(self.walls.iter().map(tri_bounds), WALL_CELL);
+        let ground = Grid::build(
+            self.ground.iter().map(|(t, _)| tri_bounds(t)),
+            GROUND_CELL,
+            GROUND_MARGIN,
+        );
+        let walls = Grid::build(self.walls.iter().map(tri_bounds), WALL_CELL, WALL_MARGIN);
         GroundMesh {
             verts: self.verts,
             normals: self.normals,
@@ -129,6 +133,10 @@ impl GroundMeshBuilder {
 
 const GROUND_CELL: f64 = 4.0;
 const WALL_CELL: f64 = 4.0;
+/// How far beyond its bounds a triangle is binned, m. Ground queries are points, so
+/// only rounding needs covering; wall queries are spheres of up to this radius.
+const GROUND_MARGIN: f64 = 1e-3;
+const WALL_MARGIN: f64 = 1.0;
 
 /// Road surface and walls of a track, ready for queries.
 #[derive(Debug)]
@@ -268,9 +276,13 @@ struct Grid {
 }
 
 impl Grid {
-    /// Bins items by their XY bounds. Walls are padded by the cell size so a sphere
-    /// query only needs the cell containing its centre (radius < cell).
-    fn build(bounds: impl Iterator<Item = (DVec2, DVec2)> + Clone, cell: f64) -> Self {
+    /// Bins items by their XY bounds grown by `margin`, so a sphere query of radius up
+    /// to `margin` only needs the cell containing its centre.
+    fn build(
+        bounds: impl Iterator<Item = (DVec2, DVec2)> + Clone,
+        cell: f64,
+        margin: f64,
+    ) -> Self {
         let pad = DVec2::splat(cell);
         let (lo, hi) = bounds.clone().fold(
             (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
@@ -299,8 +311,8 @@ impl Grid {
         };
 
         let cells = |g: &Self, a: DVec2, b: DVec2| {
-            let (x0, y0) = g.coords(a - pad * 0.25);
-            let (x1, y1) = g.coords(b + pad * 0.25);
+            let (x0, y0) = g.coords(a - DVec2::splat(margin));
+            let (x1, y1) = g.coords(b + DVec2::splat(margin));
             (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| y * nx + x))
         };
         // Two passes: count, then fill.
