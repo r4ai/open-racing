@@ -38,6 +38,8 @@ const NORMAL_MAP: u32 = 4;
 const SURFACE: u32 = 8;
 /// The base colour's alpha masks the R detail layer instead of the mask texture.
 const BASE_ALPHA_MASK: u32 = 16;
+/// The detail normal map is present.
+const DETAIL_NORMAL_MAP: u32 = 32;
 
 #[derive(ShaderType, Clone, Debug, Default, Reflect)]
 pub struct TrackParams {
@@ -46,6 +48,8 @@ pub struct TrackParams {
     multiplier: f32,
     reflection: f32,
     flags: u32,
+    detail_normal_scale: f32,
+    detail_normal_strength: f32,
 }
 
 /// The package's surface texture, normal map, reflection of the surroundings and detail
@@ -57,7 +61,7 @@ pub struct TrackParams {
 /// in few calls: the index table is at binding 120 and the parameters at 121.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[data(100, TrackParams, binding_array(121))]
-#[bindless(index_table(range(100..115), binding(120)))]
+#[bindless(index_table(range(100..117), binding(120)))]
 pub struct TrackExtension {
     params: TrackParams,
     #[texture(101)]
@@ -81,6 +85,9 @@ pub struct TrackExtension {
     #[texture(113)]
     #[sampler(114)]
     surface: Option<Handle<Image>>,
+    #[texture(115)]
+    #[sampler(116)]
+    detail_normal: Option<Handle<Image>>,
 }
 
 impl From<&TrackExtension> for TrackParams {
@@ -220,6 +227,14 @@ pub fn add_materials(
                 match d.mask {
                     DetailMask::Texture(t) => extension.mask = images.get(t, false),
                     DetailMask::BaseAlpha => extension.params.flags |= BASE_ALPHA_MASK,
+                }
+                if let Some(n) = d.normal {
+                    extension.detail_normal = images.get(n.texture, false);
+                    extension.params.detail_normal_scale = n.scale;
+                    extension.params.detail_normal_strength = n.strength;
+                    if extension.detail_normal.is_some() {
+                        extension.params.flags |= DETAIL_NORMAL_MAP;
+                    }
                 }
                 [
                     extension.layer_r,

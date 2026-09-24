@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
 pub use visual::{
-    AlphaMode, Detail, DetailLayer, DetailMask, Material, Mesh, Texture, Visual, VisualBuilder,
+    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Material, Mesh, Texture, Visual,
+    VisualBuilder,
 };
 
 /// Version of the package layout and of `track.ron`.
@@ -254,6 +255,7 @@ mod tests {
             ],
             multiplier: 2.0,
             world_uv: true,
+            normal: None,
         };
         let m = v.add_material(Material {
             base_color: [0.5, 0.5, 0.5, 1.0],
@@ -271,6 +273,11 @@ mod tests {
             detail: Some(Detail {
                 mask: DetailMask::BaseAlpha,
                 world_uv: false,
+                normal: Some(DetailNormal {
+                    texture: normal,
+                    scale: 40.0,
+                    strength: 2.0,
+                }),
                 ..detail
             }),
             ..Default::default()

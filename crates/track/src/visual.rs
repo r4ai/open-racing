@@ -12,7 +12,8 @@ use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
 const VERSION: u32 = 4;
-/// Oldest version still read: version 4 only added `DetailMask::BaseAlpha`.
+/// Oldest version still read: version 4 only added `DetailMask::BaseAlpha` and
+/// `Detail::normal`.
 const OLDEST_VERSION: u32 = 3;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
@@ -96,6 +97,19 @@ pub struct Detail {
     pub layers: [Option<DetailLayer>; 4],
     pub multiplier: f32,
     pub world_uv: bool,
+    /// A tiled normal map weighed like the R layer, which adds its bumps to the surface's:
+    /// the tangent-space normal's (x, y) gains `strength` · weight · (x, y) of this map.
+    pub normal: Option<DetailNormal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetailNormal {
+    /// Index into `Visual::textures`; a linear tangent-space normal map, in the frame of
+    /// `Material::normal_texture`.
+    pub texture: u32,
+    /// Repetitions per UV unit (or per metre with `world_uv`).
+    pub scale: f32,
+    pub strength: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -241,6 +255,7 @@ impl Visual {
                 };
                 mask.into_iter()
                     .chain(d.layers.iter().flatten().map(|l| l.texture))
+                    .chain(d.normal.map(|n| n.texture))
             });
             let own = [m.base_color_texture, m.surface_texture, m.normal_texture];
             if own.into_iter().flatten().chain(detail).any(missing) {
@@ -296,6 +311,9 @@ impl Visual {
                     }
                     w.f32(d.multiplier);
                     w.u8(d.world_uv.into());
+                    w.u32(d.normal.map_or(NONE, |n| n.texture));
+                    w.f32(d.normal.map_or(0.0, |n| n.scale));
+                    w.f32(d.normal.map_or(0.0, |n| n.strength));
                 }
             }
         }
@@ -344,11 +362,24 @@ impl Visual {
                         let (texture, scale) = (r.u32()?, r.f32()?);
                         *layer = (texture != NONE).then_some(DetailLayer { texture, scale });
                     }
+                    let (multiplier, world_uv) = (r.f32()?, r.u8()? != 0);
+                    let normal = match r.version {
+                        3 => None,
+                        _ => {
+                            let (texture, scale, strength) = (r.u32()?, r.f32()?, r.f32()?);
+                            (texture != NONE).then_some(DetailNormal {
+                                texture,
+                                scale,
+                                strength,
+                            })
+                        }
+                    };
                     Some(Detail {
                         mask,
                         layers,
-                        multiplier: r.f32()?,
-                        world_uv: r.u8()? != 0,
+                        multiplier,
+                        world_uv,
+                        normal,
                     })
                 }
             };

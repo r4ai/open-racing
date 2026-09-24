@@ -9,7 +9,8 @@
 //! The per-pixel shaders with `useDetail` multiply the diffuse texture by `txDetail`,
 //! tiled `detailUVMultiplier` times over the UVs, where the diffuse texture's alpha is
 //! low: cars paint carbon weave, fabric and paint flakes this way. Packages keep this as a
-//! detail layer masked by the base colour's alpha.
+//! detail layer masked by the base colour's alpha. `txNormalDetail`, tiled alike, adds its
+//! bumps there, scaled by `detailNormalBlend`.
 //!
 //! Normal maps carry over unchanged. The files store tangents that make normal × tangent
 //! point along +V, down the image, and the game's normal maps are authored for that
@@ -20,7 +21,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use open_racing_track::texture::{self, Image, Mips};
 use open_racing_track::{
-    AlphaMode, Detail, DetailLayer, DetailMask, Material, Texture, VisualBuilder,
+    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Material, Texture, VisualBuilder,
 };
 use rayon::prelude::*;
 
@@ -78,6 +79,11 @@ fn masked_detail(m: &kn5::Material) -> Option<&str> {
         && m.property("useDetail").unwrap_or(0.0) > 0.0)
         .then(|| m.texture("txDetail"))
         .flatten()
+}
+
+/// The normal map of the detail texture that the diffuse texture's alpha masks.
+fn masked_detail_normal(m: &kn5::Material) -> Option<&str> {
+    masked_detail(m).and(m.texture("txNormalDetail"))
 }
 
 /// The tangent-space normal map. Object-space ones (`nmObjectSpace`) are not supported.
@@ -227,7 +233,12 @@ fn texture_uses(m: &kn5::Material) -> Vec<(&str, Job)> {
         m.texture("txMaps")
             .map(|t| (t, Job::Surface(Shading::of(m)))),
     );
-    uses.extend(masked_detail(m).map(|t| (t, Job::Prepare(Mips::Complete))));
+    uses.extend(
+        [masked_detail(m), masked_detail_normal(m)]
+            .into_iter()
+            .flatten()
+            .map(|t| (t, Job::Prepare(Mips::Complete))),
+    );
     if is_multilayer(m) {
         let detail = std::iter::once("txMask").chain(DETAIL_LAYERS.iter().map(|(s, _)| *s));
         uses.extend(
@@ -391,19 +402,21 @@ impl<'a> Materials<'a> {
         let detail = if is_multilayer(m) {
             detail(m, &mut |s, mips| texture(m.texture(s), Job::Prepare(mips)))
         } else {
+            let scale = tiling(m, "detailUVMultiplier");
+            let normal =
+                texture(masked_detail_normal(m), Job::Prepare(Mips::Complete)).map(|texture| {
+                    DetailNormal {
+                        texture,
+                        scale,
+                        strength: m.property("detailNormalBlend").unwrap_or(1.0).max(0.0),
+                    }
+                });
             texture(masked_detail(m), Job::Prepare(Mips::Complete)).map(|t| Detail {
                 mask: DetailMask::BaseAlpha,
-                layers: [
-                    Some(DetailLayer {
-                        texture: t,
-                        scale: tiling(m, "detailUVMultiplier"),
-                    }),
-                    None,
-                    None,
-                    None,
-                ],
+                layers: [Some(DetailLayer { texture: t, scale }), None, None, None],
                 multiplier: 1.0,
                 world_uv: false,
+                normal,
             })
         };
         let tint = if is_multilayer(m) && detail.is_none() {
@@ -458,6 +471,7 @@ fn detail(
         layers,
         multiplier,
         world_uv: true,
+        normal: None,
     })
 }
 
@@ -574,6 +588,11 @@ mod tests {
         multimap.properties.push(("useDetail".into(), 1.0));
         assert_eq!(masked_detail(&multimap), Some("txDetail.dds"));
         assert_eq!(texture_uses(&multimap).len(), 3);
+        multimap
+            .samplers
+            .push(("txNormalDetail".into(), "weave_nm.dds".into()));
+        assert_eq!(masked_detail_normal(&multimap), Some("weave_nm.dds"));
+        assert_eq!(texture_uses(&multimap).len(), 4);
         multimap.blend_mode = 1;
         assert!(masked_detail(&multimap).is_none());
     }

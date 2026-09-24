@@ -55,11 +55,13 @@ impl Writer {
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// The file's format version.
+    pub version: u32,
 }
 
 impl<'a> Reader<'a> {
-    /// Checks the magic and version; `what` names the file in errors.
-    /// Starts reading a file of one of the `versions`.
+    /// Starts reading a file of one of the `versions`, checking the magic; `what` names
+    /// the file in errors.
     pub fn new(
         buf: &'a [u8],
         magic: &[u8; 4],
@@ -74,8 +76,10 @@ impl<'a> Reader<'a> {
         let mut r = Self {
             buf,
             pos: magic.len(),
+            version: 0,
         };
         let found = r.u32()?;
+        r.version = found;
         if !versions.contains(&found) {
             return Err(Error::Format(format!(
                 "{what}: format version {found}, expected {}; convert it again",
