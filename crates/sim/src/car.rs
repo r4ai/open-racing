@@ -530,42 +530,49 @@ impl Car {
         st.time += dt;
 
         // ---- Walls and the barrier at the edge of the run-off --------------------------
-        // Push the car back so no wheel is inside them and remove the outward velocity.
-        let rot = DMat3::from_quat(st.orientation);
-        let mut push = DVec3::ZERO;
-        let mut depth = 0.0;
-        for i in 0..4 {
-            let center = st.position
-                + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
-            let contacts = [
-                if barrier_clearance < BARRIER_SKIN {
-                    track.barrier_contact(center, st.wheels[i].hint)
-                } else {
-                    None
-                },
-                track.wall_contact(center, model.tire(i).p.radius),
-            ];
-            for (dir, excess) in contacts.into_iter().flatten() {
-                if excess > depth {
-                    depth = excess;
-                    push = dir;
-                }
-            }
-        }
-        tel.barrier_impact = 0.0;
-        if depth > 0.0 {
-            st.position += push * depth;
-            let outward = -st.velocity.dot(push);
-            if outward > 0.0 {
-                tel.barrier_impact = outward;
-                // Inelastic hit; friction against the barrier scrubs speed along it.
-                let impulse = (1.0 + BARRIER_RESTITUTION) * outward;
-                let along = st.velocity + push * outward;
-                let scrub = (BARRIER_FRICTION * impulse / along.length().max(1e-9)).min(1.0);
-                st.velocity = push * (BARRIER_RESTITUTION * outward) + along * (1.0 - scrub);
+        tel.barrier_impact = collide(model, track, st, barrier_clearance);
+    }
+}
+
+/// Pushes the car back so no wheel is inside a wall or beyond the run-off barrier, and
+/// takes away the speed into it. Returns that speed, m/s (0 without an impact).
+/// `barrier_clearance` is how far inside the barrier the wheels were before the step.
+fn collide(model: &CarModel, track: &Track, st: &mut CarState, barrier_clearance: f64) -> f64 {
+    let rot = DMat3::from_quat(st.orientation);
+    let mut push = DVec3::ZERO;
+    let mut depth = 0.0;
+    for i in 0..4 {
+        let center =
+            st.position + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
+        let contacts = [
+            if barrier_clearance < BARRIER_SKIN {
+                track.barrier_contact(center, st.wheels[i].hint)
+            } else {
+                None
+            },
+            track.wall_contact(center, model.tire(i).p.radius),
+        ];
+        for (dir, excess) in contacts.into_iter().flatten() {
+            if excess > depth {
+                depth = excess;
+                push = dir;
             }
         }
     }
+    if depth <= 0.0 {
+        return 0.0;
+    }
+    st.position += push * depth;
+    let outward = -st.velocity.dot(push);
+    if outward <= 0.0 {
+        return 0.0;
+    }
+    // Inelastic hit; friction against the barrier scrubs speed along it.
+    let impulse = (1.0 + BARRIER_RESTITUTION) * outward;
+    let along = st.velocity + push * outward;
+    let scrub = (BARRIER_FRICTION * impulse / along.length().max(1e-9)).min(1.0);
+    st.velocity = push * (BARRIER_RESTITUTION * outward) + along * (1.0 - scrub);
+    outward
 }
 
 /// Road wheel angles for a steering wheel angle, with partial Ackermann.
