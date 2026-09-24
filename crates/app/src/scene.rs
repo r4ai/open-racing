@@ -21,6 +21,7 @@ use open_racing_car::{CarVisual, Part};
 use open_racing_sim::Track;
 
 use crate::driving::{CarModelVisual, Simulation, TrackModel};
+use crate::graphics::GraphicsSettings;
 use crate::track_model::{self, TrackMaterial, TrackModelPlugin};
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
@@ -388,6 +389,7 @@ fn spawn_car(
     sim: Res<Simulation>,
     mut model: ResMut<CarModelVisual>,
     formats: Option<Res<CompressedImageFormatSupport>>,
+    graphics: Res<GraphicsSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut model_materials: ResMut<Assets<TrackMaterial>>,
@@ -395,8 +397,13 @@ fn spawn_car(
 ) {
     if let Some(visual) = model.0.take() {
         let formats = formats.map_or(CompressedImageFormats::BC, |f| f.0);
-        let mats =
-            track_model::add_materials(&visual.visual, formats, &mut model_materials, &mut images);
+        let mats = track_model::add_materials(
+            &visual.visual,
+            formats,
+            graphics.anisotropy,
+            &mut model_materials,
+            &mut images,
+        );
         spawn_car_model(&mut commands, visual, &mats, &mut meshes);
         return;
     }

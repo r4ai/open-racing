@@ -39,7 +39,7 @@ T                toggle AI driver (with --ai)
 M                mute / unmute sound
 R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
-Esc              settings: input, force feedback, track condition (Tab)
+Esc              settings: input, force feedback, track, graphics (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
 Wheel and pedals: assign them in the Esc settings (input \"custom\")";

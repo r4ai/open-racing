@@ -16,6 +16,7 @@ use bevy::shader::ShaderRef;
 use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, Visual};
 
 use crate::driving::TrackModel;
+use crate::graphics::GraphicsSettings;
 
 pub type TrackMaterial = ExtendedMaterial<StandardMaterial, TrackExtension>;
 
@@ -146,13 +147,20 @@ pub fn spawn(
     mut commands: Commands,
     mut model: ResMut<TrackModel>,
     formats: Option<Res<CompressedImageFormatSupport>>,
+    graphics: Res<GraphicsSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<TrackMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(visual) = model.0.take() else { return };
     let formats = formats.map_or(CompressedImageFormats::BC, |f| f.0);
-    let mats = add_materials(&visual, formats, &mut materials, &mut images);
+    let mats = add_materials(
+        &visual,
+        formats,
+        graphics.anisotropy,
+        &mut materials,
+        &mut images,
+    );
     for m in visual.meshes {
         let (material, cast_shadows) = (mats[m.material as usize].clone(), m.cast_shadows);
         let mut entity = commands.spawn((Mesh3d(meshes.add(to_mesh(m))), MeshMaterial3d(material)));
@@ -162,17 +170,19 @@ pub fn spawn(
     }
 }
 
-/// Adds the materials of a package's render data, and the textures they use.
+/// Adds the materials of a package's render data, and the textures they use, filtered
+/// with up to `anisotropy` samples.
 pub fn add_materials(
     visual: &Visual,
     formats: CompressedImageFormats,
+    anisotropy: u16,
     materials: &mut Assets<TrackMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<Handle<TrackMaterial>> {
     let sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
-        anisotropy_clamp: 16,
+        anisotropy_clamp: anisotropy,
         ..ImageSamplerDescriptor::linear()
     });
     let n = visual.textures.len();
