@@ -1,6 +1,7 @@
 // Standard PBR with the track package's surface texture, normal map, reflection of the
 // surroundings and detail layers, see `open_racing_track::Material`. The detail layers
-// multiply into the base colour: base × multiplier × Σ maskᵢ · layerᵢ(scaleᵢ · uv).
+// multiply into the base colour: base × multiplier × Σ maskᵢ · layerᵢ(scaleᵢ · uv), or,
+// masked by the base colour's alpha, base × multiplier × lerp(layer_R(scale_R · uv), 1, α).
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -24,6 +25,7 @@ const DETAIL: u32 = 1u;
 const WORLD_UV: u32 = 2u;
 const NORMAL_MAP: u32 = 4u;
 const SURFACE: u32 = 8u;
+const BASE_ALPHA_MASK: u32 = 16u;
 
 // Textures, as indices into the bindless index table below.
 const MASK: u32 = 0u;
@@ -135,12 +137,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if (p.flags & DETAIL) != 0u {
         // Simulation (x, y) is Bevy (x, -z).
         let uv = select(in.uv, vec2(in.world_position.x, -in.world_position.z), (p.flags & WORLD_UV) != 0u);
-        let w = sample(slot, MASK, in.uv) * p.enabled;
-        let d = w.r * sample(slot, LAYER_R, uv * p.scales.r).rgb
-            + w.g * sample(slot, LAYER_G, uv * p.scales.g).rgb
-            + w.b * sample(slot, LAYER_B, uv * p.scales.b).rgb
-            + w.a * sample(slot, LAYER_A, uv * p.scales.a).rgb;
         let base = pbr_input.material.base_color;
+        var d: vec3<f32>;
+        if (p.flags & BASE_ALPHA_MASK) != 0u {
+            d = mix(sample(slot, LAYER_R, uv * p.scales.r).rgb, vec3(1.0), base.a);
+        } else {
+            let w = sample(slot, MASK, in.uv) * p.enabled;
+            d = w.r * sample(slot, LAYER_R, uv * p.scales.r).rgb
+                + w.g * sample(slot, LAYER_G, uv * p.scales.g).rgb
+                + w.b * sample(slot, LAYER_B, uv * p.scales.b).rgb
+                + w.a * sample(slot, LAYER_A, uv * p.scales.a).rgb;
+        }
         pbr_input.material.base_color = vec4(base.rgb * d * p.multiplier, base.a);
     }
 #endif

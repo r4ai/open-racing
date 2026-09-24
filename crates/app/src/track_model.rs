@@ -13,7 +13,7 @@ use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, Face, ShaderType};
 use bevy::shader::ShaderRef;
-use open_racing_track::{AlphaMode as TrackAlpha, Visual};
+use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, Visual};
 
 use crate::driving::TrackModel;
 
@@ -36,6 +36,8 @@ const WORLD_UV: u32 = 2;
 const NORMAL_MAP: u32 = 4;
 /// The surface texture is present.
 const SURFACE: u32 = 8;
+/// The base colour's alpha masks the R detail layer instead of the mask texture.
+const BASE_ALPHA_MASK: u32 = 16;
 
 #[derive(ShaderType, Clone, Debug, Default, Reflect)]
 pub struct TrackParams {
@@ -215,7 +217,10 @@ pub fn add_materials(
                 }));
                 extension.params.multiplier = d.multiplier;
                 extension.params.flags |= DETAIL | if d.world_uv { WORLD_UV } else { 0 };
-                extension.mask = images.get(d.mask, false);
+                match d.mask {
+                    DetailMask::Texture(t) => extension.mask = images.get(t, false),
+                    DetailMask::BaseAlpha => extension.params.flags |= BASE_ALPHA_MASK,
+                }
                 [
                     extension.layer_r,
                     extension.layer_g,

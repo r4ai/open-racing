@@ -11,7 +11,9 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
+/// Oldest version still read: version 4 only added `DetailMask::BaseAlpha`.
+const OLDEST_VERSION: u32 = 3;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
 /// Stored for an absent texture index.
@@ -90,11 +92,24 @@ impl Default for Material {
 /// position's (x, y) in metres when `world_uv` is set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Detail {
-    /// Index into `Visual::textures`; linear data whose R, G, B, A weigh the layers.
-    pub mask: u32,
+    pub mask: DetailMask,
     pub layers: [Option<DetailLayer>; 4],
     pub multiplier: f32,
     pub world_uv: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DetailMask {
+    /// Index into `Visual::textures`; linear data whose R, G, B, A weigh the layers.
+    Texture(u32),
+    /// The base colour's alpha keeps the base colour as it is, and its complement
+    /// weighs the R layer, the only one used:
+    ///
+    /// colour = base × multiplier × lerp(layer_R(scale · uv), 1, base alpha)
+    ///
+    /// A pattern such as carbon weave or fabric then shows where an otherwise painted
+    /// texture leaves it transparent. The surface is opaque.
+    BaseAlpha,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -220,7 +235,12 @@ impl Visual {
         let missing = |t: u32| t as usize >= self.textures.len();
         for m in &self.materials {
             let detail = m.detail.iter().flat_map(|d| {
-                std::iter::once(d.mask).chain(d.layers.iter().flatten().map(|l| l.texture))
+                let mask = match d.mask {
+                    DetailMask::Texture(t) => Some(t),
+                    DetailMask::BaseAlpha => None,
+                };
+                mask.into_iter()
+                    .chain(d.layers.iter().flatten().map(|l| l.texture))
             });
             let own = [m.base_color_texture, m.surface_texture, m.normal_texture];
             if own.into_iter().flatten().chain(detail).any(missing) {
@@ -266,8 +286,10 @@ impl Visual {
             match &m.detail {
                 None => w.u8(0),
                 Some(d) => {
-                    w.u8(1);
-                    w.u32(d.mask);
+                    match d.mask {
+                        DetailMask::Texture(t) => (w.u8(1), w.u32(t)),
+                        DetailMask::BaseAlpha => (w.u8(2), w.u32(NONE)),
+                    };
                     for layer in &d.layers {
                         w.u32(layer.map_or(NONE, |l| l.texture));
                         w.f32(layer.map_or(0.0, |l| l.scale));
@@ -290,7 +312,7 @@ impl Visual {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self, Error> {
-        let mut r = Reader::new(buf, MAGIC, VERSION, "visual.bin")?;
+        let mut r = Reader::new(buf, MAGIC, OLDEST_VERSION..=VERSION, "visual.bin")?;
         let mut v = Visual::default();
         for _ in 0..r.u32()? {
             v.textures.push(Texture {
@@ -312,8 +334,11 @@ impl Visual {
             let double_sided = r.u8()? != 0;
             let detail = match r.u8()? {
                 0 => None,
-                _ => {
-                    let mask = r.u32()?;
+                kind => {
+                    let mask = match (kind, r.u32()?) {
+                        (2, _) => DetailMask::BaseAlpha,
+                        (_, t) => DetailMask::Texture(t),
+                    };
                     let mut layers = [None; 4];
                     for layer in &mut layers {
                         let (texture, scale) = (r.u32()?, r.f32()?);

@@ -11,6 +11,8 @@ const DDS_MAGIC: &[u8] = b"DDS ";
 const HEADER_SIZE: usize = 128;
 const FOURCC_FLAG: u32 = 0x4;
 const RGB_FLAG: u32 = 0x40;
+/// Grey levels, in the red mask, possibly with alpha.
+const LUMINANCE_FLAG: u32 = 0x2_0000;
 const MIPMAP_COUNT_FLAG: u32 = 0x2_0000;
 
 /// A decoded image, 8-bit RGBA, rows top to bottom.
@@ -274,19 +276,17 @@ fn parse_dds(b: &[u8]) -> Result<Option<Source>, String> {
         }));
     }
 
-    if pf_flags & RGB_FLAG != 0 && (bits == 24 || bits == 32) {
-        let masks = [u32_at(b, 92), u32_at(b, 96), u32_at(b, 100), u32_at(b, 104)];
+    let luminance = pf_flags & LUMINANCE_FLAG != 0;
+    if (pf_flags & RGB_FLAG != 0 || luminance) && matches!(bits, 8 | 16 | 24 | 32) {
+        let mut masks = [u32_at(b, 92), u32_at(b, 96), u32_at(b, 100), u32_at(b, 104)];
+        if luminance {
+            masks[1] = masks[0];
+            masks[2] = masks[0];
+        }
         let size = bits as usize / 8;
         let texels = data
             .get(..width * height * size)
             .ok_or("truncated DDS data")?;
-        let channel = |px: u32, mask: u32| {
-            if mask == 0 {
-                255
-            } else {
-                ((px & mask) >> mask.trailing_zeros()) as u8
-            }
-        };
         let pixels = texels
             .chunks_exact(size)
             .flat_map(|p| {
@@ -304,6 +304,15 @@ fn parse_dds(b: &[u8]) -> Result<Option<Source>, String> {
         })));
     }
     Ok(None)
+}
+
+/// The bits of `px` under `mask`, scaled to 0–255; 255 for an absent channel.
+fn channel(px: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 255;
+    }
+    let max = mask >> mask.trailing_zeros();
+    (u64::from((px & mask) >> mask.trailing_zeros()) * 255 / u64::from(max)) as u8
 }
 
 fn decode_png(b: &[u8]) -> Result<Image, String> {
@@ -468,6 +477,40 @@ mod tests {
             } => (format, width, height, levels.len()),
             Source::Pixels(_) => panic!("expected blocks"),
         }
+    }
+
+    #[test]
+    fn uncompressed_grey_and_packed_colour_expand_to_rgba() {
+        let dds = |flags: u32, bits: u32, masks: [u32; 4], texel: &[u8]| {
+            let mut b = vec![0; HEADER_SIZE];
+            b[..4].copy_from_slice(DDS_MAGIC);
+            for (offset, v) in [(12, 1), (16, 1), (80, flags), (88, bits)]
+                .into_iter()
+                .chain((0..4).map(|i| (92 + 4 * i, masks[i])))
+            {
+                b[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            b.extend_from_slice(texel);
+            match parse_dds(&b).unwrap().unwrap() {
+                Source::Pixels(img) => img.pixels,
+                Source::Blocks { .. } => panic!("expected pixels"),
+            }
+        };
+        // L8A8: grey 200 with alpha 100.
+        assert_eq!(
+            dds(LUMINANCE_FLAG | 1, 16, [0xff, 0, 0, 0xff00], &[200, 100]),
+            [200, 200, 200, 100]
+        );
+        // L8, opaque.
+        assert_eq!(
+            dds(LUMINANCE_FLAG, 8, [0xff, 0, 0, 0], &[7]),
+            [7, 7, 7, 255]
+        );
+        // R5G6B5 white.
+        assert_eq!(
+            dds(RGB_FLAG, 16, [0xf800, 0x07e0, 0x001f, 0], &[0xff, 0xff]),
+            [255; 4]
+        );
     }
 
     #[test]

@@ -6,6 +6,11 @@
 //! describe surfaces with a roughness, a specular reflectance and how much of the
 //! surroundings they reflect instead; `Shading` converts one into the other.
 //!
+//! The per-pixel shaders with `useDetail` multiply the diffuse texture by `txDetail`,
+//! tiled `detailUVMultiplier` times over the UVs, where the diffuse texture's alpha is
+//! low: cars paint carbon weave, fabric and paint flakes this way. Packages keep this as a
+//! detail layer masked by the base colour's alpha.
+//!
 //! Normal maps carry over unchanged. The files store tangents that make normal × tangent
 //! point along +V, down the image, and the game's normal maps are authored for that
 //! bitangent (green down): the package's tangent frame, which follows from the UVs.
@@ -14,7 +19,9 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use open_racing_track::texture::{self, Image, Mips};
-use open_racing_track::{AlphaMode, Detail, DetailLayer, Material, Texture, VisualBuilder};
+use open_racing_track::{
+    AlphaMode, Detail, DetailLayer, DetailMask, Material, Texture, VisualBuilder,
+};
 use rayon::prelude::*;
 
 use crate::kn5;
@@ -61,6 +68,16 @@ fn diffuse_mips(m: &kn5::Material) -> Mips {
         AlphaMode::Mask(c) => Mips::AlphaTest(c),
         AlphaMode::Blend => Mips::Source,
     }
+}
+
+/// The detail texture that the diffuse texture's alpha masks, in opaque materials; in
+/// others the alpha is the surface's opacity.
+fn masked_detail(m: &kn5::Material) -> Option<&str> {
+    (!is_multilayer(m)
+        && alpha_mode(m) == AlphaMode::Opaque
+        && m.property("useDetail").unwrap_or(0.0) > 0.0)
+        .then(|| m.texture("txDetail"))
+        .flatten()
 }
 
 /// The tangent-space normal map. Object-space ones (`nmObjectSpace`) are not supported.
@@ -210,6 +227,7 @@ fn texture_uses(m: &kn5::Material) -> Vec<(&str, Job)> {
         m.texture("txMaps")
             .map(|t| (t, Job::Surface(Shading::of(m)))),
     );
+    uses.extend(masked_detail(m).map(|t| (t, Job::Prepare(Mips::Complete))));
     if is_multilayer(m) {
         let detail = std::iter::once("txMask").chain(DETAIL_LAYERS.iter().map(|(s, _)| *s));
         uses.extend(
@@ -370,9 +388,24 @@ impl<'a> Materials<'a> {
             },
             None => shading.surface([1.0; 3]),
         };
-        let detail = is_multilayer(m)
-            .then(|| detail(m, &mut |s, mips| texture(m.texture(s), Job::Prepare(mips))))
-            .flatten();
+        let detail = if is_multilayer(m) {
+            detail(m, &mut |s, mips| texture(m.texture(s), Job::Prepare(mips)))
+        } else {
+            texture(masked_detail(m), Job::Prepare(Mips::Complete)).map(|t| Detail {
+                mask: DetailMask::BaseAlpha,
+                layers: [
+                    Some(DetailLayer {
+                        texture: t,
+                        scale: tiling(m, "detailUVMultiplier"),
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+                multiplier: 1.0,
+                world_uv: false,
+            })
+        };
         let tint = if is_multilayer(m) && detail.is_none() {
             DETAIL_TINT
         } else {
@@ -398,6 +431,12 @@ impl<'a> Materials<'a> {
     }
 }
 
+/// Repetitions of a detail texture from `property`. A zero tiling would stretch one texel
+/// over the surface; tile once instead.
+fn tiling(m: &kn5::Material, property: &str) -> f32 {
+    m.property(property).filter(|&s| s > 0.0).unwrap_or(1.0)
+}
+
 /// The detail layers of a multi-layer material. Its shaders multiply the base texture by
 /// detail textures weighed by the mask's channels, tiled `mult<channel>` times per metre
 /// over the ground plane, and scale the result by `magicMult`.
@@ -408,15 +447,14 @@ fn detail(
     let mask = texture("txMask", Mips::Complete)?;
     let layers = DETAIL_LAYERS.map(|(sampler, mult)| {
         let texture = texture(sampler, Mips::Complete)?;
-        // A zero tiling would stretch one texel over the surface; tile once per metre instead.
         Some(DetailLayer {
             texture,
-            scale: m.property(mult).filter(|&s| s > 0.0).unwrap_or(1.0),
+            scale: tiling(m, mult),
         })
     });
     let multiplier = m.property("magicMult").unwrap_or(1.0).max(0.0).powf(GAMMA);
     Some(Detail {
-        mask,
+        mask: DetailMask::Texture(mask),
         layers,
         multiplier,
         world_uv: true,
@@ -464,7 +502,7 @@ mod tests {
                 .map(|i| i as u32)
         };
         let d = detail(&multilayer(), &mut texture).unwrap();
-        assert_eq!(d.mask, 1);
+        assert_eq!(d.mask, DetailMask::Texture(1));
         assert_eq!(
             d.layers[0],
             Some(DetailLayer {
@@ -530,6 +568,14 @@ mod tests {
         );
         multimap.properties.push(("nmObjectSpace".into(), 1.0));
         assert!(normal_map(&multimap).is_none());
+        // With `useDetail` the diffuse alpha masks the detail texture, unless the alpha is
+        // the surface's opacity.
+        assert!(masked_detail(&multimap).is_none());
+        multimap.properties.push(("useDetail".into(), 1.0));
+        assert_eq!(masked_detail(&multimap), Some("txDetail.dds"));
+        assert_eq!(texture_uses(&multimap).len(), 3);
+        multimap.blend_mode = 1;
+        assert!(masked_detail(&multimap).is_none());
     }
 
     #[test]

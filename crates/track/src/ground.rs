@@ -136,7 +136,7 @@ impl Ground {
     }
 
     pub(crate) fn decode(buf: &[u8]) -> Result<Self, Error> {
-        let mut r = Reader::new(buf, MAGIC, VERSION, "ground.bin")?;
+        let mut r = Reader::new(buf, MAGIC, VERSION..=VERSION, "ground.bin")?;
         let n = r.u32()?;
         let mut patches = Vec::new();
         for _ in 0..n {

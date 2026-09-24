@@ -2,6 +2,8 @@
 //! values in little-endian order. Arrays are a u32 element count followed by the
 //! elements, so bulk vertex data is read with plain copies.
 
+use std::ops::RangeInclusive;
+
 use crate::Error;
 
 pub struct Writer(Vec<u8>);
@@ -57,7 +59,13 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Checks the magic and version; `what` names the file in errors.
-    pub fn new(buf: &'a [u8], magic: &[u8; 4], version: u32, what: &str) -> Result<Self, Error> {
+    /// Starts reading a file of one of the `versions`.
+    pub fn new(
+        buf: &'a [u8],
+        magic: &[u8; 4],
+        versions: RangeInclusive<u32>,
+        what: &str,
+    ) -> Result<Self, Error> {
         if !buf.starts_with(magic) {
             return Err(Error::Format(format!(
                 "{what}: not an open-racing package file"
@@ -68,9 +76,10 @@ impl<'a> Reader<'a> {
             pos: magic.len(),
         };
         let found = r.u32()?;
-        if found != version {
+        if !versions.contains(&found) {
             return Err(Error::Format(format!(
-                "{what}: format version {found}, expected {version}; convert it again"
+                "{what}: format version {found}, expected {}; convert it again",
+                versions.end()
             )));
         }
         Ok(r)

@@ -24,7 +24,9 @@ use open_racing_sim::{SurfaceProps, Track, TrackDef, TrackError};
 use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
-pub use visual::{AlphaMode, Detail, DetailLayer, Material, Mesh, Texture, Visual, VisualBuilder};
+pub use visual::{
+    AlphaMode, Detail, DetailLayer, DetailMask, Material, Mesh, Texture, Visual, VisualBuilder,
+};
 
 /// Version of the package layout and of `track.ron`.
 pub const FORMAT_VERSION: u32 = 1;
@@ -240,7 +242,7 @@ mod tests {
             data: b"DDS normal".to_vec(),
         });
         let detail = Detail {
-            mask,
+            mask: DetailMask::Texture(mask),
             layers: [
                 None,
                 Some(DetailLayer {
@@ -263,7 +265,15 @@ mod tests {
             normal_texture: Some(normal),
             alpha_mode: AlphaMode::Mask(0.4),
             double_sided: true,
-            detail: Some(detail),
+            detail: Some(detail.clone()),
+        });
+        v.add_material(Material {
+            detail: Some(Detail {
+                mask: DetailMask::BaseAlpha,
+                world_uv: false,
+                ..detail
+            }),
+            ..Default::default()
         });
         v.add_mesh(
             m,
