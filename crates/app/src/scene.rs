@@ -67,6 +67,16 @@ struct CarSteeringWheel(Vec3);
 #[derive(Resource)]
 pub struct DriverEye(pub DVec3);
 
+/// The front end of the car's body along its x axis relative to the centre of gravity, m,
+/// for the bumper camera.
+#[derive(Resource)]
+pub struct CarNose(pub f64);
+
+/// Top-level entities of the car's visuals, hidden by cameras that put the viewer
+/// inside the car.
+#[derive(Component)]
+pub struct CarVisualRoot;
+
 /// Edge of the sky cube map's faces, in texels. The sky is a smooth gradient.
 const SKY_MAP_SIZE: u32 = 64;
 /// Luminance scale of the sky light, cd/m². Shade gets about the light that ambient light
@@ -355,10 +365,16 @@ fn spawn_car(
     let (wing_x, wing_y) = (center_x - length * 0.5 + 0.2, floor + 1.12);
     // Stays run from the body top to the underside of the wing plate.
     let stay_height = wing_y - 0.02 - body_top;
+    commands.insert_resource(CarNose((center_x + 0.5 * length).into()));
 
     // Mesh axes in the car's local Bevy frame: x forward, y up, z = right.
     commands
-        .spawn((CarBody, Transform::default(), Visibility::default()))
+        .spawn((
+            CarBody,
+            CarVisualRoot,
+            Transform::default(),
+            Visibility::default(),
+        ))
         .with_children(|car| {
             car.spawn((
                 Mesh3d(meshes.add(Cuboid::new(length, 0.5, width))),
@@ -389,7 +405,12 @@ fn spawn_car(
         let tire = &sim.car.model.tire(i).p;
         let r = tire.radius as f32;
         commands
-            .spawn((CarWheel(i), Transform::default(), Visibility::default()))
+            .spawn((
+                CarWheel(i),
+                CarVisualRoot,
+                Transform::default(),
+                Visibility::default(),
+            ))
             .with_children(|w| {
                 // Cylinder axis is Y; turn it onto the wheel's spin axis (local Z).
                 let axis = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
@@ -419,17 +440,44 @@ fn spawn_car_model(
 ) {
     // As `to_bevy`, in f32.
     let bevy = |[x, y, z]: [f32; 3]| Vec3::new(x, z, -y);
+    let nose = car
+        .visual
+        .meshes
+        .iter()
+        .zip(&car.mesh_parts)
+        .filter(|(_, part)| matches!(part, Part::Body))
+        .flat_map(|(m, _)| &m.positions)
+        .map(|p| p[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    if nose.is_finite() {
+        commands.insert_resource(CarNose(nose.into()));
+    }
     let body = commands
-        .spawn((CarBody, Transform::default(), Visibility::default()))
+        .spawn((
+            CarBody,
+            CarVisualRoot,
+            Transform::default(),
+            Visibility::default(),
+        ))
         .id();
     let wheels: [Entity; 4] = std::array::from_fn(|i| {
         commands
-            .spawn((CarWheel(i), Transform::default(), Visibility::default()))
+            .spawn((
+                CarWheel(i),
+                CarVisualRoot,
+                Transform::default(),
+                Visibility::default(),
+            ))
             .id()
     });
     let hubs: [Entity; 4] = std::array::from_fn(|i| {
         commands
-            .spawn((CarHub(i), Transform::default(), Visibility::default()))
+            .spawn((
+                CarHub(i),
+                CarVisualRoot,
+                Transform::default(),
+                Visibility::default(),
+            ))
             .id()
     });
     let steering = car.steering_wheel.map(|s| {

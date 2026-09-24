@@ -1,11 +1,11 @@
-//! Chase, cockpit, trackside TV and overhead cameras.
+//! Chase, cockpit, first-person, bumper, trackside TV and overhead cameras.
 
 use bevy::prelude::*;
 use glam::DVec3;
 
 use crate::driving::Simulation;
 use crate::input::AppRequests;
-use crate::scene::{DriverEye, quat_to_bevy, sky_light, to_bevy};
+use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, sky_light, to_bevy};
 
 #[derive(Component)]
 struct MainCamera;
@@ -14,7 +14,12 @@ struct MainCamera;
 pub enum CameraMode {
     #[default]
     Chase,
+    /// Chase camera held at a fixed distance behind the car.
+    FixedChase,
     Cockpit,
+    /// From the driver's eye with the car hidden.
+    FirstPerson,
+    Bumper,
     Tv,
     Top,
 }
@@ -22,8 +27,11 @@ pub enum CameraMode {
 impl CameraMode {
     fn next(self) -> Self {
         match self {
-            Self::Chase => Self::Cockpit,
-            Self::Cockpit => Self::Tv,
+            Self::Chase => Self::FixedChase,
+            Self::FixedChase => Self::Cockpit,
+            Self::Cockpit => Self::FirstPerson,
+            Self::FirstPerson => Self::Bumper,
+            Self::Bumper => Self::Tv,
             Self::Tv => Self::Top,
             Self::Top => Self::Chase,
         }
@@ -32,12 +40,21 @@ impl CameraMode {
     pub fn name(self) -> &'static str {
         match self {
             Self::Chase => "chase",
+            Self::FixedChase => "fixed chase",
             Self::Cockpit => "cockpit",
+            Self::FirstPerson => "first person",
+            Self::Bumper => "bumper",
             Self::Tv => "tv",
             Self::Top => "top",
         }
     }
 }
+
+/// Chase camera offsets behind and above the centre of gravity, m.
+const CHASE_BACK: f64 = 6.5;
+const CHASE_UP: f64 = 2.0;
+/// Height of the bumper camera above the ground, m.
+const BUMPER_HEIGHT: f64 = 0.45;
 
 /// Spacing of trackside TV cameras along the track, m.
 const TV_SPACING: f64 = 180.0;
@@ -48,7 +65,10 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraMode>()
             .add_systems(Startup, spawn_camera)
-            .add_systems(PostUpdate, follow.before(TransformSystems::Propagate));
+            .add_systems(
+                PostUpdate,
+                (follow, hide_car).before(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -72,6 +92,7 @@ fn follow(
     requests: Res<AppRequests>,
     sim: Res<Simulation>,
     eye: Option<Res<DriverEye>>,
+    nose: Option<Res<CarNose>>,
     mut mode: ResMut<CameraMode>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
 ) {
@@ -91,10 +112,19 @@ fn follow(
         }
     };
 
+    let driver_eye = eye.map_or(DVec3::new(-0.3, 0.38, 0.45), |e| e.0);
+    let chase = to_bevy(pos - flat * CHASE_BACK + DVec3::Z * CHASE_UP);
+    let chase_target = to_bevy(pos + flat * 4.0 + DVec3::Z * 0.6);
+    // Views fixed to the body, looking along it.
+    let mut ride = |local: DVec3| {
+        cam.translation = to_bevy(pos + rot * local);
+        cam.rotation = quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    };
+
     match *mode {
         CameraMode::Chase => {
             set_fov(60.0);
-            let desired = to_bevy(pos - flat * 6.5 + DVec3::Z * 2.0);
+            let desired = chase;
             let k = 1.0 - (-8.0 * time.delta_secs()).exp();
             // Snap when far away (reset, mode change).
             cam.translation = if cam.translation.distance(desired) > 30.0 {
@@ -102,13 +132,22 @@ fn follow(
             } else {
                 cam.translation.lerp(desired, k)
             };
-            cam.look_at(to_bevy(pos + flat * 4.0 + DVec3::Z * 0.6), Vec3::Y);
+            cam.look_at(chase_target, Vec3::Y);
         }
-        CameraMode::Cockpit => {
+        CameraMode::FixedChase => {
+            set_fov(60.0);
+            cam.translation = chase;
+            cam.look_at(chase_target, Vec3::Y);
+        }
+        CameraMode::Cockpit | CameraMode::FirstPerson => {
             set_fov(75.0);
-            let eye = eye.map_or(DVec3::new(-0.3, 0.38, 0.45), |e| e.0);
-            cam.translation = to_bevy(pos + rot * eye);
-            cam.rotation = quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+            ride(driver_eye);
+        }
+        CameraMode::Bumper => {
+            set_fov(70.0);
+            let p = &sim.car.model.params;
+            let nose = nose.map_or(p.wheelbase * (1.0 - p.front_weight) + 0.9, |n| n.0);
+            ride(DVec3::new(nose, 0.0, BUMPER_HEIGHT - p.cg_height));
         }
         CameraMode::Tv => {
             let track = &sim.track;
@@ -136,5 +175,19 @@ fn follow(
             cam.translation = to_bevy(pos + DVec3::Z * 120.0);
             cam.look_at(to_bevy(pos), to_bevy(flat));
         }
+    }
+}
+
+/// Hides the car in views from inside or on it, where its model would block the view.
+fn hide_car(mode: Res<CameraMode>, mut roots: Query<&mut Visibility, With<CarVisualRoot>>) {
+    if !mode.is_changed() {
+        return;
+    }
+    let visibility = match *mode {
+        CameraMode::FirstPerson | CameraMode::Bumper => Visibility::Hidden,
+        _ => Visibility::Inherited,
+    };
+    for mut v in &mut roots {
+        v.set_if_neq(visibility);
     }
 }
