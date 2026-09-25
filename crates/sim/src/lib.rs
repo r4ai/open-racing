@@ -24,7 +24,10 @@ pub mod weather;
 
 pub use assist::{AutoShift, BlipAssist, ClutchAssist};
 pub use brakes::BrakeState;
-pub use car::{Car, CarState, Realism, Telemetry, WheelState, WheelTelemetry};
+pub use car::{
+    AeroTelemetry, Car, CarState, MAX_AERO_TELEMETRY, Realism, Telemetry, WheelState,
+    WheelTelemetry,
+};
 pub use controls::{Controls, Shift};
 pub use drivetrain::ShiftPhase;
 pub use engine::{EngineModel, EngineState};

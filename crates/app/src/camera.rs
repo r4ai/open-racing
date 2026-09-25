@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 use glam::DVec3;
 
+use crate::debug_view::DebugSettings;
 use crate::driving::Simulation;
 use crate::input::AppRequests;
 use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, to_bevy};
@@ -196,14 +197,21 @@ pub fn body_view(sim: &Simulation, local: DVec3) -> Transform {
         .with_rotation(quat_to_bevy(rot) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
 }
 
-/// Hides the car in views from inside or on it, where its model would block the view.
-fn hide_car(mode: Res<CameraMode>, mut roots: Query<&mut Visibility, With<CarVisualRoot>>) {
-    if !mode.is_changed() {
+/// Hides the car in views from inside or on it, where its model would block the view,
+/// and while the car's debug view draws what the simulation models in its place.
+fn hide_car(
+    mode: Res<CameraMode>,
+    debug: Res<DebugSettings>,
+    mut roots: Query<&mut Visibility, With<CarVisualRoot>>,
+) {
+    if !mode.is_changed() && !debug.is_changed() {
         return;
     }
-    let visibility = match *mode {
-        CameraMode::FirstPerson | CameraMode::Bumper => Visibility::Hidden,
-        _ => Visibility::Inherited,
+    let hidden = debug.car || matches!(*mode, CameraMode::FirstPerson | CameraMode::Bumper);
+    let visibility = if hidden {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
     };
     for mut v in &mut roots {
         v.set_if_neq(visibility);

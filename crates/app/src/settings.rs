@@ -13,6 +13,7 @@
 //!   gearbox and electronics the car is fitted with.
 //! - Realism: whether hits damage the car and whether its engine's parts can fail, with
 //!   the brakes' and the engine's temperatures now.
+//! - Debug: false-colour views of the road, the environment, the aero and the car.
 //!
 //! The simulation is paused while the screen is open.
 
@@ -26,6 +27,7 @@ use open_racing_sim::{GearboxKind, Sky, TrackCondition};
 
 use crate::assists::AssistSettings;
 use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, GATES, Reported, Source};
+use crate::debug_view::{DebugSettings, RoadView};
 use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::graphics::{GraphicsSettings, GraphicsSupport, Preset, Setting};
@@ -87,10 +89,11 @@ enum Page {
     Graphics,
     Assists,
     Realism,
+    Debug,
 }
 
 /// The pages in the order Tab steps through them, with their names.
-const PAGES: [(Page, &str); 7] = [
+const PAGES: [(Page, &str); 8] = [
     (Page::Input, "input"),
     (Page::ForceFeedback, "force feedback"),
     (Page::Track, "track"),
@@ -98,6 +101,22 @@ const PAGES: [(Page, &str); 7] = [
     (Page::Graphics, "graphics"),
     (Page::Assists, "assists"),
     (Page::Realism, "realism"),
+    (Page::Debug, "debug"),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum DebugRow {
+    Road,
+    Environment,
+    Aero,
+    Car,
+}
+
+const DEBUG_ROWS: [DebugRow; 4] = [
+    DebugRow::Road,
+    DebugRow::Environment,
+    DebugRow::Aero,
+    DebugRow::Car,
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -247,6 +266,7 @@ impl Plugin for SettingsPlugin {
                         navigate_graphics,
                         navigate_assists,
                         navigate_realism,
+                        navigate_debug,
                     )
                         .chain()
                         .run_if(|o: Res<SettingsOpen>| o.0),
@@ -417,6 +437,33 @@ fn navigate_realism(
     sim.set_realism(settings.0);
     settings.save();
     screen.message = "Applies from now on; a reset (Backspace) repairs the car.".into();
+}
+
+fn navigate_debug(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut settings: ResMut<DebugSettings>,
+) {
+    if screen.page != Page::Debug {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, DEBUG_ROWS.len());
+    let (left, right, enter) = (
+        keys.just_pressed(KeyCode::ArrowLeft),
+        keys.just_pressed(KeyCode::ArrowRight),
+        keys.just_pressed(KeyCode::Enter),
+    );
+    if !(left || right || enter) {
+        return;
+    }
+    let s = &mut *settings;
+    match DEBUG_ROWS[screen.row] {
+        DebugRow::Road => s.road = s.road.step(if left { -1 } else { 1 }),
+        DebugRow::Environment => s.environment = !s.environment,
+        DebugRow::Aero => s.aero = !s.aero,
+        DebugRow::Car => s.car = !s.car,
+    }
+    settings.save();
 }
 
 fn navigate_graphics(
@@ -731,6 +778,7 @@ fn render(
     weather: Res<WeatherConfig>,
     assists: Res<AssistSettings>,
     realism: Res<RealismSettings>,
+    debug: Res<DebugSettings>,
     sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
@@ -767,6 +815,7 @@ fn render(
         Page::Graphics => render_graphics(&mut s, &screen, &graphics, *graphics_support),
         Page::Assists => render_assists(&mut s, &screen, &assists, &sim),
         Page::Realism => render_realism(&mut s, &screen, &realism, &sim),
+        Page::Debug => render_debug(&mut s, &screen, &debug),
     }
     text.0 = s;
 }
@@ -901,6 +950,46 @@ fn render_realism(s: &mut String, screen: &Screen, settings: &RealismSettings, s
     let _ = writeln!(s, "\nLeft/Right or Enter toggles.");
     if !screen.message.is_empty() {
         let _ = writeln!(s, "{}", screen.message);
+    }
+}
+
+fn render_debug(s: &mut String, screen: &Screen, settings: &DebugSettings) {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    for (i, row) in DEBUG_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let (name, value, hint) = match row {
+            DebugRow::Road => (
+                "Road",
+                settings.road.name(),
+                "(Left/Right; F1) grip, rubber, dirt or temperature over the road",
+            ),
+            DebugRow::Environment => (
+                "Environment",
+                on_off(settings.environment),
+                "(F2) sun, cloud shadows and wind round the car",
+            ),
+            DebugRow::Aero => (
+                "Aero",
+                on_off(settings.aero),
+                "(F3) each element's downforce and drag, ride heights, air temperatures",
+            ),
+            DebugRow::Car => (
+                "Car",
+                on_off(settings.car),
+                "(F4) the model hidden; tyres, brakes, struts and engine as simulated",
+            ),
+        };
+        let _ = writeln!(s, "{cursor} {name:<12} {value:<12} {hint}");
+    }
+    let _ = writeln!(
+        s,
+        "
+False colours run from blue (cold, little) through green (working temperature)
+         to red (hot, much); grip from red (poor) to green (full). A panel on the right
+         gives the numbers and scales. Left/Right or Enter changes; kept for the next run."
+    );
+    if settings.road == RoadView::Off && !(settings.environment || settings.aero || settings.car) {
+        let _ = writeln!(s, "All debug views are off.");
     }
 }
 

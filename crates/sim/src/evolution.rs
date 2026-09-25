@@ -429,12 +429,18 @@ impl TrackEvolution {
         (grip(self.line), grip(self.off))
     }
 
+    /// Rubber level of cell `i` of `map`.
+    #[inline]
+    fn cell_rubber(&self, map: &RubberMap, i: usize) -> f64 {
+        let laid = self.laid.get(i).copied().unwrap_or(0.0);
+        let band = f64::from(map.band[i]);
+        (self.off + (self.line - self.off) * band + f64::from(laid)).min(1.0)
+    }
+
     /// Grip of cell `i` of `map` from its rubber and cover.
     #[inline]
     fn cell_grip(&self, map: &RubberMap, i: usize) -> f64 {
-        let laid = self.laid.get(i).copied().unwrap_or(0.0);
-        let band = f64::from(map.band[i]);
-        let rubber = (self.off + (self.line - self.off) * band + f64::from(laid)).min(1.0);
+        let rubber = self.cell_rubber(map, i);
         let covered: f64 = match self.cover.get(&(i as u32)) {
             Some(cover) => (0..3)
                 .map(|k| ROAD_COAT_GRIP_LOSS[k] * f64::from(cover[k]))
@@ -456,6 +462,30 @@ impl TrackEvolution {
         let base = map.row(s) * map.cols;
         let (a, b, t) = map.columns(d);
         self.cell_grip(map, base + a) * (1.0 - t) + self.cell_grip(map, base + b) * t
+    }
+
+    /// Rubber level at track coordinates (s, d), 0 on dusty asphalt, 1 where it is
+    /// fully rubbered in.
+    pub fn rubber_at(&self, s: f64, d: f64) -> f64 {
+        let Some(map) = self.map.as_deref() else {
+            return self.line;
+        };
+        let base = map.row(s) * map.cols;
+        let (a, b, t) = map.columns(d);
+        self.cell_rubber(map, base + a) * (1.0 - t) + self.cell_rubber(map, base + b) * t
+    }
+
+    /// Loose material on the asphalt at track coordinates (s, d) by kind ([`crate::Coat`]
+    /// order), 1 covering it.
+    pub fn cover_at(&self, s: f64, d: f64) -> [f64; 3] {
+        let Some(map) = self.map.as_deref() else {
+            return [0.0; 3];
+        };
+        let base = map.row(s) * map.cols;
+        let (a, b, t) = map.columns(d);
+        let cover = |i: usize| self.cover.get(&(i as u32)).copied().unwrap_or_default();
+        let (ca, cb) = (cover(base + a), cover(base + b));
+        std::array::from_fn(|k| f64::from(ca[k]) * (1.0 - t) + f64::from(cb[k]) * t)
     }
 
     /// A tyre rolls `distance` metres over the asphalt at (s, d), using `grip_use`

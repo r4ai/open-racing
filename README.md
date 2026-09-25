@@ -65,7 +65,7 @@ cargo run --release -p open-racing-train-burn -- train --track-grip green..optim
 cargo run --release -p open-racing-train-burn -- eval --model runs/evolving --track-grip dusty
 ```
 
-Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app shows the coat on the tyres; the rubber and the dirt on the road are not drawn.
+Without `--track-grip` training keeps the whole asphalt at the tyres' nominal grip, as before. The laid rubber is off in training by default (`--grip-gain`), since one car adds little within an episode; tyre dirt from going off track always applies. The app shows the coat on the tyres; the rubber and the dirt on the road show in the road's [debug views](#debug-views).
 
 ### Weather
 
@@ -158,6 +158,15 @@ Putting the car back on the track (Backspace) repairs it. Every value has a defa
 
 - `brakes`: `pad_friction` (friction against the disc temperature, °C, relative to its peak, where `max_torque` applies; road pads when left out), `disc_mass` and `disc_cooling` for the front and rear discs (kg, and W/K at 50 m/s; sized from the brake torque when left out), `fluid_boiling_point` (260 °C) and `start_temperature` (the discs' temperature after a reset, 150 °C). The GT3 runs racing pads on ducted 11 / 8.5 kg discs with racing fluid, warmed to 300 °C on the way to the grid.
 - `engine`: `cooling` with `radiator` and `oil_cooler` (W/K at 50 m/s with the thermostat open; sized from the engine's peak power when left out), `thermostat` (85 °C), `boiling_point` (125 °C, under the cap's pressure) and `fan` (`true`; the GT3 has none); `over_rev_rpm`.
+
+### Debug views
+
+The app can draw what the simulation computes in false colour, with the scene's own colours set aside: blue for cold or little, through green at working temperature, to red for hot or much; grip goes from red (poor) to green (full). Turn them on with F1–F4 or on the settings screen (Esc, page "debug", saved to `debug.ron`). A panel at the bottom right gives the numbers and colour scales.
+
+- **Road** (F1 steps through the views): the grip the rubber and dirt give, the rubber level, the dirt on the asphalt (coloured by kind), or the surface temperature, laid over the road. Tyre marks are hidden while a road view is on.
+- **Environment** (F2): the ray towards the sun (yellow in sunshine, grey behind cloud), the cloud shadows on the ground round the car, the wind at the car with its gusts and the 10 m wind above it; air, sunlight and cloud figures in the panel.
+- **Aero** (F3): each aero element's downforce and drag at its centre of pressure, the ride height at each axle against its static value, the air coming at the car, and the temperature of the air round each tyre (warmed by the road and the engine bay), in the bay and at the intake.
+- **Car** (F4): the car's model is hidden. In its place the view draws the body, the struts (coloured by travel), each tyre's inner, middle and outer tread and its carcass (coloured by temperature against the grip peak), the brake discs and calipers, the engine block, sump, gearbox and radiator (all coloured by temperature), the load and grip force at each contact patch, and the car's velocity and acceleration.
 
 ## Adding content
 

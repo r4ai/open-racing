@@ -135,6 +135,14 @@ pub struct WheelTelemetry {
     pub contact: DVec3,
     /// Suspension force on the body, N.
     pub suspension_force: f64,
+    /// Force of the road on the tyre in world coordinates, N.
+    pub force: DVec3,
+    /// Friction multiplier of the tyre's nominal μ: the surface, its rubber and dirt,
+    /// camber, sliding and the tyre's condition.
+    pub grip: f64,
+    /// Temperature of the air around the tyre and of the road under it, °C.
+    pub air_temperature: f64,
+    pub road_temperature: f64,
 }
 
 impl Default for WheelTelemetry {
@@ -154,6 +162,10 @@ impl Default for WheelTelemetry {
             surface: Surface::Asphalt,
             contact: DVec3::ZERO,
             suspension_force: 0.0,
+            force: DVec3::ZERO,
+            grip: 0.0,
+            air_temperature: 0.0,
+            road_temperature: 0.0,
         }
     }
 }
@@ -170,12 +182,32 @@ pub struct Telemetry {
     pub steering_torque: f64,
     /// Aerodynamic downforce, front / rear, N.
     pub downforce: [f64; 2],
+    /// The first [`MAX_AERO_TELEMETRY`] aero elements' forces, in the order of the car's.
+    pub aero: [AeroTelemetry; MAX_AERO_TELEMETRY],
+    /// The air where the car is, and its velocity through it in body coordinates, m/s.
+    pub air: Air,
+    pub airspeed: DVec3,
     pub drag: f64,
     /// Ride height of the floor at the front / rear axle, m.
     pub ride_height: [f64; 2],
     /// Speed into a wall or the run-off barrier taken away by a hit this step, m/s
     /// (0 without an impact).
     pub barrier_impact: f64,
+}
+
+/// Aero elements reported in [`Telemetry::aero`].
+pub const MAX_AERO_TELEMETRY: usize = 16;
+
+/// One aero element in the last step.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AeroTelemetry {
+    /// Downforce, N.
+    pub lift: f64,
+    /// Drag in body coordinates, N.
+    pub drag: DVec3,
+    /// Angle of attack, rad, and the floor's height under the element, m.
+    pub angle_of_attack: f64,
+    pub ride_height: f64,
 }
 
 /// What the car can come to harm from, chosen by the driver as in other sims. Heat
@@ -493,6 +525,7 @@ impl Car {
             } else {
                 0.0
             };
+            let tyre_air = air.temperature + NEAR_ROAD_AIR * (road - air.temperature) + bay;
             tire.update_condition(
                 &mut w.tire,
                 &tread_load,
@@ -500,7 +533,7 @@ impl Car {
                 rolling_resistance * fz * speed,
                 speed,
                 fz > 0.0,
-                air.temperature + NEAR_ROAD_AIR * (road - air.temperature) + bay,
+                tyre_air,
                 road,
                 dt,
             );
@@ -533,6 +566,10 @@ impl Car {
                 surface: q.surface,
                 contact,
                 suspension_force: 0.0,
+                force,
+                grip: mu,
+                air_temperature: tyre_air,
+                road_temperature: road,
             };
         }
         tel.steering_torque = steering_torque / p.steering.ratio;
@@ -640,7 +677,7 @@ impl Car {
             let intact = |loss: &[f64; DAMAGE_ZONES]| {
                 (1.0 - (0..DAMAGE_ZONES).map(|z| loss[z] * damage[z]).sum::<f64>()).max(0.0)
             };
-            for e in &p.aero.elements {
+            for (k, e) in p.aero.elements.iter().enumerate() {
                 // Where the element sits between the axles, 0 at the front, 1 at the rear.
                 let t = (front_x - e.position[0]) / wheelbase;
                 let height = (ride[0] + (ride[1] - ride[0]) * t).max(0.0);
@@ -667,9 +704,19 @@ impl Car {
                 drag += element_drag;
                 downforce[0] += lift * (1.0 - t);
                 downforce[1] += lift * t;
+                if let Some(a) = tel.aero.get_mut(k) {
+                    *a = AeroTelemetry {
+                        lift,
+                        drag: element_drag,
+                        angle_of_attack: aoa,
+                        ride_height: height,
+                    };
+                }
             }
         }
         tel.downforce = downforce;
+        tel.air = air;
+        tel.airspeed = v_body;
         tel.drag = drag.length();
         tel.ride_height = ride;
 

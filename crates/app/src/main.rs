@@ -7,6 +7,7 @@ mod bindings;
 mod camera;
 mod capture;
 mod clouds;
+mod debug_view;
 mod driving;
 mod effects;
 mod ffb;
@@ -125,6 +126,7 @@ fn main() {
             graphics::GraphicsPlugin,
             tyre_dirt::TyreDirtPlugin,
             weather::WeatherPlugin,
+            debug_view::DebugViewPlugin,
         ));
     driving::install_policy(&mut app, &args);
     app.run();

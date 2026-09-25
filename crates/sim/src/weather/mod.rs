@@ -250,7 +250,7 @@ impl WeatherSettings {
 }
 
 /// The air where the car is.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Air {
     /// °C.
     pub temperature: f64,

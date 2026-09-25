@@ -56,6 +56,10 @@ pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// A mesh of skid marks, hidden under the road's debug view.
+#[derive(Component)]
+pub struct SkidMarkMesh;
+
 pub struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
@@ -230,6 +234,7 @@ fn spawn(
         .map(|_| {
             let mesh = meshes.add(dynamic_mesh(MARK_CHUNK));
             commands.spawn((
+                SkidMarkMesh,
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(mark_material.clone()),
                 NoFrustumCulling,

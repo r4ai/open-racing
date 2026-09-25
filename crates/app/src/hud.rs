@@ -41,8 +41,10 @@ T                toggle AI driver (with --ai)
 M                mute / unmute sound
 R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
+F1               debug view of the road: grip, rubber, dirt, temperature, off
+F2 / F3 / F4     debug views of the environment, the aero and the car
 Esc              settings: input, force feedback, track, weather, graphics, assists,
-                 realism (Tab)
+                 realism, debug (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
 Wheel, pedals and H-shifter: assign them in the Esc settings (input \"custom\")";
