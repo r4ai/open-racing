@@ -6,8 +6,12 @@
 //! change is an operation, saved at once; changes others make to `project.ron` (such as
 //! an agent using `open-racing-trackctl`) are loaded as they happen.
 
+mod assets;
 mod jobs;
+mod menus;
+mod presets;
 mod preview;
+mod profile;
 mod state;
 mod ui;
 mod viewport;
@@ -16,7 +20,6 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_egui::input::egui_wants_any_pointer_input;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use clap::Parser;
 use open_racing_track_render::TrackModelPlugin;
@@ -31,6 +34,12 @@ struct Args {
     /// scripts and agents see the 3D view.
     #[arg(long)]
     screenshot: Option<PathBuf>,
+    /// Select this road, spline or prop and frame it (with `--screenshot`, to look at it).
+    #[arg(long)]
+    focus: Option<String>,
+    /// View from above.
+    #[arg(long)]
+    top: bool,
 }
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
@@ -75,10 +84,40 @@ fn main() {
     } else {
         open_racing_track_project::projects_dir().join(&args.project)
     };
-    let editor = state::Editor::open(dir).unwrap_or_else(|e| {
+    let mut editor = state::Editor::open(dir).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
+    if let Some(name) = &args.focus {
+        let p = &editor.project;
+        let item = p
+            .road_index(name)
+            .map(state::Item::Road)
+            .or_else(|| {
+                p.splines
+                    .iter()
+                    .position(|s| &s.name == name)
+                    .map(state::Item::Spline)
+            })
+            .or_else(|| {
+                p.props
+                    .iter()
+                    .position(|x| &x.name == name)
+                    .map(state::Item::Prop)
+            });
+        match item {
+            Some(item) => editor.selection.select(item),
+            None => {
+                eprintln!("no road, spline or prop named \"{name}\"");
+                std::process::exit(1);
+            }
+        }
+    }
+    let mut orbit = viewport::Orbit::default();
+    viewport::frame_selection(&editor, &mut orbit);
+    if args.top {
+        viewport::set_view(&mut orbit, std::f32::consts::FRAC_PI_2, 1.5695);
+    }
 
     let mut app = App::new();
     if let Some(path) = args.screenshot {
@@ -97,20 +136,27 @@ fn main() {
     }))
     .add_plugins((EguiPlugin::default(), TrackModelPlugin))
     .insert_resource(editor)
-    .init_resource::<viewport::Orbit>()
+    .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
-    .init_resource::<viewport::Drag>()
+    .init_resource::<viewport::Tool>()
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
+    .init_resource::<preview::Props>()
+    .init_resource::<preview::SharedCache>()
+    .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
-    .add_systems(Startup, (viewport::setup, frame_on_start))
+    .add_systems(Startup, viewport::setup)
     .add_systems(EguiPrimaryContextPass, ui::ui)
     .add_systems(
         Update,
         (
             state::watch_file,
-            viewport::input.run_if(not(egui_wants_any_pointer_input)),
+            assets::watch,
+            assets::dropped,
+            viewport::input,
+            viewport::view_input,
             preview::rebuild,
+            preview::props,
             jobs::poll,
             viewport::gizmos,
             viewport::place_camera,
@@ -119,8 +165,4 @@ fn main() {
             .chain(),
     )
     .run();
-}
-
-fn frame_on_start(editor: Res<state::Editor>, mut orbit: ResMut<viewport::Orbit>) {
-    viewport::frame_selection(&editor, &mut orbit);
 }

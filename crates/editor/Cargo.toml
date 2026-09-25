@@ -20,3 +20,4 @@ glam.workspace = true
 ron.workspace = true
 serde.workspace = true
 clap.workspace = true
+rfd = "0.17.2"

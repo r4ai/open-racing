@@ -8,15 +8,19 @@ use glam::DVec3;
 use open_racing_sim::Surface;
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{
-    Barrier, BuiltinTexture, Grid, MaterialDef, NamedSurface, PaintLine, Pit, Profile, Range, Side,
-    Strip, TextureSource,
+    Align, Alpha, Barrier, BuiltinTexture, Grid, MaterialDef, NamedSurface, PaintLine, Pit,
+    Profile, Range, Shape, Side, Spline, Strip, TextureSource,
 };
 use open_racing_track_project::{Project, projects_dir};
 
+use crate::assets::{self, Library};
 use crate::jobs::Jobs;
+use crate::menus;
 use crate::preview::Built;
-use crate::state::Editor;
-use crate::viewport::{Orbit, ViewRect, frame_selection};
+use crate::preview::Props;
+use crate::profile::{ProfileView, profile};
+use crate::state::{Editor, Item};
+use crate::viewport::{Orbit, Tool, ViewRect, frame_selection};
 
 /// What the inspector shows.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +31,7 @@ pub enum Tab {
     Terrain,
     Surfaces,
     Materials,
+    Assets,
 }
 
 #[derive(Default)]
@@ -35,7 +40,11 @@ pub struct UiState {
     new_project: String,
     new_surface: String,
     new_material: String,
-    rename: Option<(usize, String)>,
+    rename: Option<(Item, String)>,
+    profile: ProfileView,
+    /// The inspector is hidden (N).
+    sidebar_hidden: bool,
+    assets: assets::Panel,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45,7 +54,10 @@ pub fn ui(
     mut jobs: ResMut<Jobs>,
     mut orbit: ResMut<Orbit>,
     mut rect: ResMut<ViewRect>,
+    mut tool: ResMut<Tool>,
     built: Res<Built>,
+    mut library: ResMut<Library>,
+    props: Res<Props>,
     mut state: Local<UiState>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) -> Result {
@@ -72,11 +84,17 @@ pub fn ui(
             (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
         )
     });
-    if undo && !ctx.egui_wants_keyboard_input() {
+    if undo && !ctx.egui_wants_keyboard_input() && tool.modal.is_none() {
         editor.undo();
     }
-    if redo && !ctx.egui_wants_keyboard_input() {
+    if redo && !ctx.egui_wants_keyboard_input() && tool.modal.is_none() {
         editor.redo();
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::N) && i.modifiers.is_none())
+        && !ctx.egui_wants_keyboard_input()
+        && tool.modal.is_none()
+    {
+        state.sidebar_hidden = !state.sidebar_hidden;
     }
 
     egui::Panel::top("menu").show(&mut root, |ui| {
@@ -147,16 +165,29 @@ pub fn ui(
             outliner(ui, editor, &mut state);
         });
 
+    let mut sidebar = !state.sidebar_hidden;
     egui::Panel::right("inspector")
         .resizable(true)
         .default_size(340.0)
-        .show(&mut root, |ui| {
+        .show_collapsible(&mut root, &mut sidebar, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match state.tab {
-                Tab::Road => road_inspector(ui, editor, &mut state),
+                Tab::Road => match editor.selection.item {
+                    Some(Item::Spline(_)) => spline_inspector(ui, editor, &mut state),
+                    Some(Item::Prop(_)) => prop_inspector(ui, editor, &library),
+                    _ => road_inspector(ui, editor, &mut state),
+                },
                 Tab::Markers => markers_inspector(ui, editor),
                 Tab::Terrain => terrain_inspector(ui, editor),
                 Tab::Surfaces => surfaces_inspector(ui, editor, &mut state),
-                Tab::Materials => materials_inspector(ui, editor, &mut state),
+                Tab::Materials => materials_inspector(ui, editor, &mut state, &library),
+                Tab::Assets => assets::panel(
+                    ui,
+                    editor,
+                    &mut library,
+                    &props,
+                    &mut tool,
+                    &mut state.assets,
+                ),
             });
         });
 
@@ -165,7 +196,7 @@ pub fn ui(
         .default_size(190.0)
         .show(&mut root, |ui| {
             ui.columns(2, |cols| {
-                profile(&mut cols[0], editor, &built);
+                profile(&mut cols[0], editor, &mut state.profile);
                 egui::ScrollArea::vertical()
                     .id_salt("report")
                     .show(&mut cols[1], |ui| {
@@ -178,10 +209,13 @@ pub fn ui(
             });
         });
 
+    menus::header(&mut root, editor, &mut tool, &mut orbit);
+
     // What is left is the 3D view.
     let free = root.available_rect_before_wrap();
     let _ = window;
     rect.0 = Some(Rect::new(free.min.x, free.min.y, free.max.x, free.max.y));
+    menus::overlay(&ctx, editor, &mut tool, &built, &mut orbit, free.min);
     Ok(())
 }
 
@@ -208,10 +242,9 @@ fn outliner(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
         } else {
             road.name.clone()
         };
-        let selected = state.tab == Tab::Road && editor.selection.road == Some(i);
+        let selected = state.tab == Tab::Road && editor.selection.road() == Some(i);
         if ui.selectable_label(selected, label).clicked() {
-            editor.selection.road = Some(i);
-            editor.selection.node = None;
+            editor.selection.select(Item::Road(i));
             state.tab = Tab::Road;
         }
     }
@@ -225,33 +258,54 @@ fn outliner(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
             && ui.button("remove").clicked()
         {
             editor.apply(vec![Op::RemoveRoad { road: name }], None);
-            editor.selection.road = Some(0);
+            editor.selection.select(Item::Road(0));
         }
     });
+    ui.separator();
+    ui.strong("Kerbs, walls, fences");
+    for (i, sp) in editor.project.splines.iter().enumerate() {
+        let selected = state.tab == Tab::Road && editor.selection.spline() == Some(i);
+        if ui.selectable_label(selected, &sp.name).clicked() {
+            editor.selection.select(Item::Spline(i));
+            state.tab = Tab::Road;
+        }
+    }
+    if editor.project.splines.is_empty() {
+        ui.weak("Shift+A in the view to draw one.");
+    }
+    ui.separator();
+    ui.strong("Props");
+    for (i, p) in editor.project.props.iter().enumerate() {
+        let selected = state.tab == Tab::Road && editor.selection.prop() == Some(i);
+        if ui.selectable_label(selected, &p.name).clicked() {
+            editor.selection.select(Item::Prop(i));
+            state.tab = Tab::Road;
+        }
+    }
+    if editor.project.props.is_empty() {
+        ui.weak("Place models from Assets.");
+    }
     ui.separator();
     for (tab, name) in [
         (Tab::Markers, "Race markers"),
         (Tab::Terrain, "Terrain"),
         (Tab::Surfaces, "Surfaces"),
         (Tab::Materials, "Materials"),
+        (Tab::Assets, "Assets"),
     ] {
         if ui.selectable_label(state.tab == tab, name).clicked() {
             state.tab = tab;
         }
     }
-    ui.separator();
-    ui.small(
-        "Left drag: move node (Shift: height)\nCtrl+click: add node\nRight drag: orbit, middle: pan\nDelete: remove node, F: frame",
-    );
 }
 
 /// Adds a short straight road beside the selected one's selected node, like it.
 fn add_road(editor: &mut Editor) {
     let base = editor
         .selection
-        .road
+        .road()
         .and_then(|r| editor.project.roads.get(r))
-        .and_then(|r| r.nodes.get(editor.selection.node.unwrap_or(0)))
+        .and_then(|r| r.nodes.get(editor.selection.node().unwrap_or(0)))
         .map_or(DVec3::ZERO, |n| n.pos);
     let mut k = editor.project.roads.len();
     let name = loop {
@@ -269,8 +323,9 @@ fn add_road(editor: &mut Editor) {
         like: None,
     }];
     if editor.apply(ops, None) {
-        editor.selection.road = Some(editor.project.roads.len() - 1);
-        editor.selection.node = None;
+        editor
+            .selection
+            .select(Item::Road(editor.project.roads.len() - 1));
     }
 }
 
@@ -366,7 +421,7 @@ fn ranges_ui(ui: &mut egui::Ui, ranges: &mut Vec<Range>, node: Option<usize>, pe
 fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
     let Some(r) = editor
         .selection
-        .road
+        .road()
         .filter(|&r| r < editor.project.roads.len())
     else {
         ui.label("Select a road.");
@@ -375,17 +430,11 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
     let road = editor.project.roads[r].clone();
     let name = road.name.clone();
     let (surfaces, materials) = names(&editor.project);
-    let node = editor.selection.node;
+    let node = editor.selection.node();
     let period = road.period();
 
     // Name.
-    let text = match &mut state.rename {
-        Some((i, t)) if *i == r => t,
-        _ => {
-            state.rename = Some((r, name.clone()));
-            &mut state.rename.as_mut().unwrap().1
-        }
-    };
+    let text = rename_text(state, Item::Road(r), &name);
     let resp = ui.horizontal(|ui| {
         ui.label("Road");
         ui.text_edit_singleline(text)
@@ -431,73 +480,8 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
         );
     }
 
-    // Selected node.
     ui.separator();
-    match node.filter(|&n| n < road.nodes.len()) {
-        Some(n) => {
-            let nd = road.nodes[n];
-            ui.strong(format!("Node {n} (u = {n})"));
-            let mut p = nd.pos;
-            let mut moved = false;
-            ui.horizontal(|ui| {
-                for (axis, v) in ["x", "y", "z"].iter().zip([&mut p.x, &mut p.y, &mut p.z]) {
-                    ui.label(*axis);
-                    moved |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
-                }
-            });
-            if moved {
-                editor.apply(
-                    vec![Op::MoveNode {
-                        road: name.clone(),
-                        index: n,
-                        pos: p,
-                    }],
-                    Some(&format!("node {name} {n}")),
-                );
-            }
-            let mut manual = nd.handle.is_some();
-            let (_, auto) = open_racing_track_project::curve::handles(&road.nodes, road.closed, n);
-            let mut h = nd.handle.unwrap_or(auto);
-            let mut hchanged = ui.checkbox(&mut manual, "manual handle").changed();
-            if manual {
-                ui.horizontal(|ui| {
-                    for (axis, v) in ["hx", "hy", "hz"]
-                        .iter()
-                        .zip([&mut h.x, &mut h.y, &mut h.z])
-                    {
-                        ui.label(*axis);
-                        hchanged |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
-                    }
-                });
-            }
-            if hchanged {
-                editor.apply(
-                    vec![Op::SetHandle {
-                        road: name.clone(),
-                        index: n,
-                        handle: manual.then_some(h),
-                    }],
-                    Some(&format!("handle {name} {n}")),
-                );
-            }
-            if ui.button("Remove node").clicked() {
-                editor.apply(
-                    vec![Op::RemoveNode {
-                        road: name.clone(),
-                        index: n,
-                    }],
-                    None,
-                );
-                editor.selection.node = None;
-            }
-        }
-        None => {
-            ui.label(format!(
-                "{} nodes. Click one in the view to edit it.",
-                road.nodes.len()
-            ));
-        }
-    }
+    node_ui(ui, editor, &name, &road.nodes, road.closed);
 
     // Profiles.
     ui.separator();
@@ -796,6 +780,216 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
     }
 }
 
+/// The text field for renaming `item`, kept while it is edited.
+fn rename_text<'a>(state: &'a mut UiState, item: Item, name: &str) -> &'a mut String {
+    if !matches!(&state.rename, Some((i, _)) if *i == item) {
+        state.rename = Some((item, name.to_string()));
+    }
+    &mut state.rename.as_mut().expect("just set").1
+}
+
+/// The selected nodes of a road or spline: the active one's position and handle.
+fn node_ui(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    name: &str,
+    nodes: &[open_racing_track_project::Node],
+    closed: bool,
+) {
+    let selected = editor.selection.nodes.len();
+    let Some(n) = editor.selection.node().filter(|&n| n < nodes.len()) else {
+        ui.label(format!(
+            "{} nodes. Click one in the view (A: all) to edit it.",
+            nodes.len()
+        ));
+        return;
+    };
+    let nd = nodes[n];
+    if selected > 1 {
+        ui.strong(format!("Node {n} (u = {n}), {selected} selected"));
+    } else {
+        ui.strong(format!("Node {n} (u = {n})"));
+    }
+    let mut p = nd.pos;
+    let mut moved = false;
+    ui.horizontal(|ui| {
+        for (axis, v) in ["x", "y", "z"].iter().zip([&mut p.x, &mut p.y, &mut p.z]) {
+            ui.label(*axis);
+            moved |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+        }
+    });
+    if moved {
+        editor.apply(
+            vec![Op::MoveNode {
+                line: name.to_string(),
+                index: n,
+                pos: p,
+            }],
+            Some(&format!("node {name} {n}")),
+        );
+    }
+    let mut manual = nd.handle.is_some();
+    let (_, auto) = open_racing_track_project::curve::handles(nodes, closed, n);
+    let mut h = nd.handle.unwrap_or(auto);
+    let mut hchanged = ui
+        .checkbox(&mut manual, "manual handle")
+        .on_hover_text("Drag the handle in the view; Alt+click it for automatic")
+        .changed();
+    if manual {
+        ui.horizontal(|ui| {
+            for (axis, v) in ["hx", "hy", "hz"]
+                .iter()
+                .zip([&mut h.x, &mut h.y, &mut h.z])
+            {
+                ui.label(*axis);
+                hchanged |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+            }
+        });
+    }
+    if hchanged {
+        editor.apply(
+            vec![Op::SetHandle {
+                line: name.to_string(),
+                index: n,
+                handle: manual.then_some(h),
+            }],
+            Some(&format!("handle {name} {n}")),
+        );
+    }
+    let label = if selected > 1 {
+        "Remove nodes (X)"
+    } else {
+        "Remove node (X)"
+    };
+    if ui.button(label).clicked() {
+        crate::viewport::delete(editor);
+    }
+}
+
+fn spline_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
+    let Some(i) = editor
+        .selection
+        .spline()
+        .filter(|&i| i < editor.project.splines.len())
+    else {
+        ui.label("Select a spline.");
+        return;
+    };
+    let before = editor.project.splines[i].clone();
+    let name = before.name.clone();
+    let (surfaces, materials) = names(&editor.project);
+
+    let text = rename_text(state, Item::Spline(i), &name);
+    let resp = ui.horizontal(|ui| {
+        ui.label("Spline");
+        ui.text_edit_singleline(text)
+    });
+    if resp.inner.lost_focus() && *text != name && !text.is_empty() {
+        let spline = Spline {
+            name: text.clone(),
+            ..before
+        };
+        let nodes = editor.selection.nodes.clone();
+        if editor.apply(
+            vec![Op::RemoveSpline { name }, Op::PutSpline { spline }],
+            None,
+        ) {
+            editor.selection.item = Some(Item::Spline(editor.project.splines.len() - 1));
+            editor.selection.nodes = nodes;
+        }
+        return;
+    }
+
+    let mut sp = before.clone();
+    let mut changed = ui.checkbox(&mut sp.closed, "closed loop").changed();
+    changed |= ui
+        .checkbox(&mut sp.drape, "follow the ground")
+        .on_hover_text(
+            "Lay it on the roads and terrain under its line instead of at the nodes' heights",
+        )
+        .changed();
+    changed |= drag(ui, "resolution m", &mut sp.resolution, 0.05, 0.1..=10.0);
+    ui.horizontal(|ui| {
+        let band = matches!(sp.shape, Shape::Band { .. });
+        let preset = |label| {
+            crate::presets::PRESETS
+                .iter()
+                .find(|p| p.label == label)
+                .map(|p| (p.shape)(&editor.project))
+        };
+        if ui.selectable_label(band, "band (kerb, run-off)").clicked() && !band {
+            sp.shape = preset("Kerb").expect("preset");
+            changed = true;
+        }
+        if ui
+            .selectable_label(!band, "wall (barrier, fence)")
+            .clicked()
+            && band
+        {
+            sp.shape = preset("Concrete wall").expect("preset");
+            changed = true;
+        }
+    });
+    match &mut sp.shape {
+        Shape::Band {
+            width,
+            align,
+            profile,
+            surface,
+            material,
+            lift,
+        } => {
+            changed |= drag(ui, "width m", width, 0.05, 0.0..=100.0);
+            ui.horizontal(|ui| {
+                ui.label("lies");
+                for (a, label) in [
+                    (Align::Right, "right"),
+                    (Align::Center, "centred"),
+                    (Align::Left, "left"),
+                ] {
+                    changed |= ui.selectable_value(align, a, label).changed();
+                }
+                ui.label("of its line");
+            });
+            changed |= profile_ui(ui, profile, ("spline profile", i));
+            ui.horizontal(|ui| {
+                ui.label("surface");
+                changed |= combo(ui, ("sp surface", i), surface, &surfaces);
+                ui.label("material");
+                changed |= combo(ui, ("sp material", i), material, &materials);
+            });
+            changed |= drag(ui, "lift m", lift, 0.005, -1.0..=1.0);
+        }
+        Shape::Wall {
+            height,
+            thickness,
+            material,
+            collide,
+        } => {
+            changed |= drag(ui, "height m", height, 0.05, 0.05..=30.0);
+            changed |= drag(ui, "thickness m (0: thin)", thickness, 0.05, 0.0..=10.0);
+            ui.horizontal(|ui| {
+                ui.label("material");
+                changed |= combo(ui, ("sp material", i), material, &materials);
+            });
+            changed |= ui.checkbox(collide, "cars collide with it").changed();
+        }
+    }
+    if changed {
+        editor.apply(
+            vec![Op::PutSpline { spline: sp }],
+            Some(&format!("spline {name}")),
+        );
+    }
+    ui.separator();
+    node_ui(ui, editor, &name, &before.nodes, before.closed);
+    ui.separator();
+    if ui.button("Delete spline").clicked() {
+        editor.selection.nodes.clear();
+        crate::viewport::delete(editor);
+    }
+}
+
 fn keys_len_gt_one(n: usize) -> bool {
     n > 1
 }
@@ -841,7 +1035,7 @@ fn markers_inspector(ui: &mut egui::Ui, editor: &mut Editor) {
     let p = &editor.project;
     let mut m = p.markers.clone();
     let main_period = p.road(&p.main_road).map_or(1.0, |r| r.period());
-    let node = editor.selection.node;
+    let node = editor.selection.node();
     let mut changed = false;
     ui.heading("Race markers");
     ui.label("Places on the main road are spline parameters u (node index + fraction).");
@@ -1055,8 +1249,59 @@ fn surfaces_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiStat
     });
 }
 
-fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
+/// A texture: none, a built-in one, or a file among the project's textures.
+fn texture_picker(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    source: &mut TextureSource,
+    library: &Library,
+    builtins: bool,
+) -> bool {
+    let text = match &*source {
+        TextureSource::None => "none".to_string(),
+        TextureSource::Builtin(t) => format!("{t:?} (built in)"),
+        TextureSource::File(p) => p.to_string_lossy().into_owned(),
+    };
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(text)
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(source, TextureSource::None, "none")
+                .changed();
+            if builtins {
+                for t in BuiltinTexture::ALL {
+                    changed |= ui
+                        .selectable_value(
+                            source,
+                            TextureSource::Builtin(t),
+                            format!("{t:?} (built in)"),
+                        )
+                        .changed();
+                }
+            }
+            for a in library.textures() {
+                changed |= ui
+                    .selectable_value(
+                        source,
+                        TextureSource::File(a.path.clone()),
+                        a.path.to_string_lossy(),
+                    )
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn materials_inspector(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    state: &mut UiState,
+    library: &Library,
+) {
     ui.heading("Materials");
+    ui.small("Import textures in Assets to use them here.");
     let materials = editor.project.materials.clone();
     for (i, m) in materials.iter().enumerate() {
         let mut m = m.clone();
@@ -1068,41 +1313,35 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
                     ui.label("tint");
                     changed |= ui.color_edit_button_rgb(&mut m.color).changed();
                 });
-                let current = match &m.texture {
-                    TextureSource::None => "none".to_string(),
-                    TextureSource::Builtin(t) => format!("{t:?}"),
-                    TextureSource::File(_) => "file".to_string(),
-                };
-                egui::ComboBox::from_id_salt(("tex", i))
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut m.texture, TextureSource::None, "none")
-                            .changed();
-                        for t in BuiltinTexture::ALL {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut m.texture,
-                                    TextureSource::Builtin(t),
-                                    format!("{t:?}"),
-                                )
-                                .changed();
-                        }
-                        if !matches!(m.texture, TextureSource::File(_))
-                            && ui.selectable_label(false, "file…").clicked()
-                        {
-                            m.texture = TextureSource::File("textures/texture.png".into());
-                            changed = true;
-                        }
-                    });
-                if let TextureSource::File(path) = &mut m.texture {
-                    let mut s = path.to_string_lossy().into_owned();
-                    if ui.text_edit_singleline(&mut s).lost_focus() {
-                        *path = s.into();
+                ui.horizontal(|ui| {
+                    ui.label("texture");
+                    changed |= texture_picker(ui, ("tex", i), &mut m.texture, library, true);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("normal map");
+                    changed |= texture_picker(ui, ("normal", i), &mut m.normal, library, false);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("alpha");
+                    let mut kind = match m.alpha {
+                        Alpha::Opaque => 0,
+                        Alpha::Mask(_) => 1,
+                        Alpha::Blend => 2,
+                    };
+                    let before = kind;
+                    for (k, label) in ["opaque", "cut out", "blend"].iter().enumerate() {
+                        ui.selectable_value(&mut kind, k, *label);
+                    }
+                    if kind != before {
+                        m.alpha = [Alpha::Opaque, Alpha::Mask(0.5), Alpha::Blend][kind];
                         changed = true;
                     }
-                    ui.small("PNG or DDS, relative to the project directory");
-                }
+                    if let Alpha::Mask(c) = &mut m.alpha {
+                        changed |= ui
+                            .add(egui::DragValue::new(c).speed(0.01).range(0.0..=1.0))
+                            .changed();
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("tile m");
                     changed |= ui
@@ -1162,6 +1401,8 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
                 roughness: 0.8,
                 reflectance: 0.5,
                 double_sided: false,
+                normal: TextureSource::None,
+                alpha: Alpha::Opaque,
             };
             if editor.apply(vec![Op::PutMaterial { material }], None) {
                 state.new_material.clear();
@@ -1170,129 +1411,65 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
     });
 }
 
-/// The selected road's elevation along its length, with its nodes: drag a node up or
-/// down to change its height; click one to select it.
-fn profile(ui: &mut egui::Ui, editor: &mut Editor, built: &Built) {
-    let Some(r) = editor
+fn prop_inspector(ui: &mut egui::Ui, editor: &mut Editor, library: &Library) {
+    let Some(i) = editor
         .selection
-        .road
-        .filter(|&r| r < editor.project.roads.len())
+        .prop()
+        .filter(|&i| i < editor.project.props.len())
     else {
+        ui.label("Select a prop.");
         return;
     };
-    let Some(smp) = built.roads.get(r) else {
-        return;
-    };
-    if smp.frames.is_empty() {
-        return;
-    }
-    let road = editor.project.roads[r].clone();
-    ui.strong(format!(
-        "Elevation of \"{}\" ({:.0} m)",
-        road.name, smp.length
-    ));
-    let size = ui.available_size();
-    let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(60.0)),
-        egui::Sense::click_and_drag(),
-    );
-    let rect = resp.rect.shrink(8.0);
-    painter.rect_filled(resp.rect, 4.0, egui::Color32::from_gray(24));
-    let (zmin, zmax) = smp
-        .frames
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), f| {
-            (a.min(f.pos.z), b.max(f.pos.z))
-        });
-    let (zmin, zmax) = ((zmin - 2.0).min(zmax - 10.0), zmax + 2.0);
-    let x = |s: f64| rect.left() + (s / smp.length.max(1.0)) as f32 * rect.width();
-    let y = |z: f64| rect.bottom() - ((z - zmin) / (zmax - zmin)) as f32 * rect.height();
-    let z_at = |py: f32| zmin + ((rect.bottom() - py) / rect.height()) as f64 * (zmax - zmin);
-    // Height lines every 5 m.
-    let mut z = (zmin / 5.0).ceil() * 5.0;
-    while z < zmax {
-        painter.hline(
-            rect.x_range(),
-            y(z),
-            egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
-        );
-        painter.text(
-            egui::pos2(rect.left(), y(z)),
-            egui::Align2::LEFT_BOTTOM,
-            format!("{z:.0} m"),
-            egui::FontId::monospace(10.0),
-            egui::Color32::from_gray(110),
-        );
-        z += 5.0;
-    }
-    let line: Vec<egui::Pos2> = smp
-        .frames
-        .iter()
-        .map(|f| egui::pos2(x(f.s), y(f.pos.z)))
-        .collect();
-    painter.add(egui::Shape::line(
-        line,
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 255)),
-    ));
-
-    let nodes: Vec<(usize, egui::Pos2)> = road
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (i, egui::pos2(x(smp.s_at(i as f64)), y(n.pos.z))))
-        .collect();
-    for &(i, p) in &nodes {
-        let selected = editor.selection.node == Some(i);
-        let color = if selected {
-            egui::Color32::from_rgb(255, 215, 30)
-        } else {
-            egui::Color32::from_rgb(90, 230, 255)
-        };
-        painter.circle_filled(p, if selected { 6.0 } else { 4.5 }, color);
-        painter.text(
-            p + egui::vec2(0.0, -9.0),
-            egui::Align2::CENTER_BOTTOM,
-            i.to_string(),
-            egui::FontId::monospace(10.0),
-            egui::Color32::WHITE,
-        );
-    }
-
-    let nearest = |pos: egui::Pos2| {
-        nodes
+    let before = editor.project.props[i].clone();
+    let mut p = before.clone();
+    ui.horizontal(|ui| {
+        ui.label("Prop");
+        ui.strong(&p.name);
+    });
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("model");
+        egui::ComboBox::from_id_salt(("prop model", i))
+            .selected_text(p.model.to_string_lossy())
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                for a in library.models() {
+                    changed |= ui
+                        .selectable_value(&mut p.model, a.path.clone(), a.path.to_string_lossy())
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        for (axis, v) in ["x", "y", "z"]
             .iter()
-            .map(|&(i, p)| (i, p.distance(pos)))
-            .filter(|&(_, d)| d < 12.0)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    };
-    if resp.drag_started()
-        && let Some(i) = resp.interact_pointer_pos().and_then(nearest)
-    {
-        editor.selection.node = Some(i);
-        editor.begin_drag();
+            .zip([&mut p.pos.x, &mut p.pos.y, &mut p.pos.z])
+        {
+            ui.label(*axis);
+            changed |= ui.add(egui::DragValue::new(v).speed(0.25)).changed();
+        }
+    });
+    let mut deg = p.yaw.to_degrees();
+    if drag(ui, "turn °", &mut deg, 1.0, -360.0..=360.0) {
+        p.yaw = deg.to_radians();
+        changed = true;
     }
-    if resp.dragged()
-        && editor.dragging
-        && let (Some(i), Some(pos)) = (editor.selection.node, resp.interact_pointer_pos())
-    {
-        let mut p = road.nodes[i].pos;
-        p.z = z_at(pos.y.clamp(rect.top(), rect.bottom()));
+    changed |= drag(ui, "scale", &mut p.scale, 0.01, 0.01..=100.0);
+    changed |= ui
+        .checkbox(&mut p.drape, "stand on the ground")
+        .on_hover_text("Its height comes from the road or terrain under it")
+        .changed();
+    changed |= ui
+        .checkbox(&mut p.collide, "cars collide with it")
+        .changed();
+    if changed {
         editor.apply(
-            vec![Op::MoveNode {
-                road: road.name.clone(),
-                index: i,
-                pos: p,
-            }],
-            None,
+            vec![Op::PutProp { prop: p }],
+            Some(&format!("prop {}", before.name)),
         );
     }
-    if resp.drag_stopped() {
-        editor.end_drag();
-    }
-    if resp.clicked()
-        && let Some(i) = resp.interact_pointer_pos().and_then(nearest)
-    {
-        editor.selection.node = Some(i);
+    ui.small("G: move · R: turn · S: scale · Shift+D: duplicate · X: delete");
+    if ui.button("Delete prop").clicked() {
+        crate::viewport::delete(editor);
     }
 }

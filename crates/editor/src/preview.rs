@@ -1,26 +1,45 @@
 //! The 3D preview: the project's meshes, rebuilt in the background whenever the project
-//! changes, in the same materials the game renders them with.
+//! changes, in the same materials the game renders them with, and its props, placed
+//! from the project every frame so that they follow edits at once.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use bevy::image::CompressedImageFormatSupport;
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
+use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::Sampled;
+use open_racing_track_project::model::{Model, Placement};
 use open_racing_track_project::project::MaterialDef;
 use open_racing_track_project::road::MeshData;
-use open_racing_track_project::{Project, Textures, bake};
-use open_racing_track_render::{self as render, TrackMaterial};
+use open_racing_track_project::{Cache, Project, bake};
+use open_racing_track_render::{self as render, TrackMaterial, to_bevy};
 
+use crate::assets::Library;
 use crate::state::Editor;
 
 /// A mesh of the preview, despawned when it is rebuilt.
 #[derive(Component)]
 pub struct PreviewMesh;
 
-/// What the last finished build knows about the roads, for gizmos and picking.
+/// A prop of the preview: `Project::props[i]`, showing the model at this path.
+#[derive(Component)]
+pub struct PreviewProp(usize, PathBuf);
+
+/// Textures and models, shared by the builds in the background and the main thread.
+#[derive(Resource, Clone, Default)]
+pub struct SharedCache(pub Arc<Mutex<Cache>>);
+
+/// What the last finished build knows, for gizmos and picking.
 #[derive(Resource, Default)]
 pub struct Built {
     pub roads: Vec<Sampled>,
+    pub splines: Vec<Sampled>,
+    /// Everything solid, to find what the pointer is over.
+    pub ground: Option<Arc<GroundMesh>>,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -28,6 +47,8 @@ pub struct Built {
 #[derive(Default)]
 struct Meshes {
     roads: Vec<Sampled>,
+    splines: Vec<Sampled>,
+    ground: Option<Arc<GroundMesh>>,
     /// (material, mesh, casts shadows)
     meshes: Vec<(usize, Mesh, bool)>,
 }
@@ -37,10 +58,10 @@ pub struct Rebuild {
     task: Option<Task<Meshes>>,
     /// Revision the running or last started build is of.
     started: u64,
-    /// Materials the handles were made from.
+    /// Materials the handles were made from, and the asset files' revision then.
     materials: Vec<MaterialDef>,
+    assets: u64,
     handles: Vec<Handle<TrackMaterial>>,
-    textures: Option<Textures>,
 }
 
 fn to_mesh(m: MeshData) -> Mesh {
@@ -59,26 +80,28 @@ fn build(project: Project) -> Meshes {
     let terrain = project
         .material_index(&project.terrain.material)
         .unwrap_or(0);
-    let mut meshes = Vec::new();
-    let mut roads = Vec::new();
+    let mut meshes: Vec<_> = scene
+        .visual_parts()
+        .map(|p| (p.material, to_mesh(p.mesh.clone()), p.cast_shadows))
+        .collect();
     if let Some(t) = scene.terrain {
         meshes.extend(t.chunks.into_iter().map(|m| (terrain, to_mesh(m), false)));
     }
-    for b in scene.roads {
-        meshes.extend(
-            b.visual
-                .into_iter()
-                .map(|p| (p.material, to_mesh(p.mesh), p.cast_shadows)),
-        );
-        roads.push(b.sampled);
+    let surfaces: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
+    Meshes {
+        ground: Some(Arc::new(scene.ground.build(&surfaces))),
+        roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
+        splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
+        meshes,
     }
-    Meshes { roads, meshes }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild(
     mut commands: Commands,
     editor: Res<Editor>,
+    library: Res<Library>,
+    cache: Res<SharedCache>,
     mut state: ResMut<Rebuild>,
     mut built: ResMut<Built>,
     old: Query<Entity, With<PreviewMesh>>,
@@ -87,10 +110,11 @@ pub fn rebuild(
     mut materials: ResMut<Assets<TrackMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // Materials change rarely; their textures are prepared once.
-    if state.materials != editor.project.materials {
-        let mut textures = state.textures.take().unwrap_or_default();
-        match bake::materials(&editor.project, &editor.dir, &mut textures) {
+    // Materials change rarely; their textures are prepared again only when their files
+    // change.
+    if state.materials != editor.project.materials || state.assets != library.revision {
+        let mut cache = cache.0.lock().expect("cache");
+        match bake::materials(&editor.project, &editor.dir, &mut cache) {
             Ok(visual) => {
                 state.handles = render::add_materials(
                     &visual,
@@ -99,13 +123,13 @@ pub fn rebuild(
                     &mut materials,
                     &mut images,
                 );
-                state.materials = editor.project.materials.clone();
                 // Rebuild so meshes pick up the new handles.
                 state.started = 0;
             }
             Err(e) => warn!("materials: {e}"),
         }
-        state.textures = Some(textures);
+        state.materials = editor.project.materials.clone();
+        state.assets = library.revision;
     }
 
     if let Some(task) = &mut state.task
@@ -132,6 +156,8 @@ pub fn rebuild(
             }
         }
         built.roads = done.roads;
+        built.splines = done.splines;
+        built.ground = done.ground;
         built.count += 1;
     }
 
@@ -139,5 +165,155 @@ pub fn rebuild(
         let (project, revision) = (editor.project.clone(), editor.revision);
         state.started = revision;
         state.task = Some(AsyncComputeTaskPool::get().spawn(async move { build(project) }));
+    }
+}
+
+/// A model ready to show: its meshes with their materials.
+struct Shown {
+    parts: Vec<(Handle<Mesh>, Handle<TrackMaterial>, bool)>,
+}
+
+/// A model read in the background, or why it could not be.
+type Loaded = (PathBuf, Result<Arc<Model>, String>);
+
+#[derive(Resource, Default)]
+pub struct Props {
+    models: HashMap<PathBuf, Shown>,
+    /// Loaded models, with the triangle counts the asset list shows.
+    pub triangles: HashMap<PathBuf, usize>,
+    /// Models that failed to load, and why.
+    pub failed: HashMap<PathBuf, String>,
+    loading: Option<Task<Vec<Loaded>>>,
+    assets: u64,
+}
+
+/// Loads the models props use, keeps an entity for each prop and places it where the
+/// project says.
+#[allow(clippy::too_many_arguments)]
+pub fn props(
+    mut commands: Commands,
+    editor: Res<Editor>,
+    library: Res<Library>,
+    cache: Res<SharedCache>,
+    built: Res<Built>,
+    mut state: ResMut<Props>,
+    mut shown: Query<(Entity, &PreviewProp, &mut Transform)>,
+    formats: Option<Res<CompressedImageFormatSupport>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<TrackMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let project = &editor.project;
+    // Changed files load again.
+    if state.assets != library.revision && state.loading.is_none() {
+        state.assets = library.revision;
+        state.models.clear();
+        state.failed.clear();
+        for (e, ..) in &shown {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
+
+    if let Some(task) = &mut state.loading
+        && let Some(done) = check_ready(task)
+    {
+        state.loading = None;
+        for (path, model) in done {
+            match model {
+                Ok(m) => {
+                    let handles = render::add_materials(
+                        &m.look,
+                        render::formats(formats.as_deref()),
+                        16,
+                        &mut materials,
+                        &mut images,
+                    );
+                    let parts = m
+                        .meshes
+                        .iter()
+                        .map(|mesh| {
+                            let material = handles
+                                .get(mesh.material as usize)
+                                .cloned()
+                                .unwrap_or_default();
+                            (
+                                meshes.add(render::to_mesh(mesh.clone())),
+                                material,
+                                mesh.cast_shadows,
+                            )
+                        })
+                        .collect();
+                    state.triangles.insert(path.clone(), m.triangles);
+                    state.models.insert(path, Shown { parts });
+                }
+                Err(e) => {
+                    state.failed.insert(path, e);
+                }
+            }
+        }
+    }
+
+    // Models to load.
+    let wanted: HashSet<&PathBuf> = project.props.iter().map(|p| &p.model).collect();
+    let missing: Vec<PathBuf> = wanted
+        .into_iter()
+        .filter(|p| !state.models.contains_key(*p) && !state.failed.contains_key(*p))
+        .cloned()
+        .collect();
+    if !missing.is_empty() && state.loading.is_none() {
+        let (cache, dir) = (cache.0.clone(), editor.dir.clone());
+        state.loading = Some(AsyncComputeTaskPool::get().spawn(async move {
+            missing
+                .into_iter()
+                .map(|path| {
+                    let m = cache
+                        .lock()
+                        .expect("cache")
+                        .model(&dir, &path)
+                        .map_err(|e| e.to_string());
+                    (path, m)
+                })
+                .collect()
+        }));
+    }
+
+    // One entity per prop, showing its model; placed every frame.
+    let mut have = vec![false; project.props.len()];
+    for (e, p, mut t) in &mut shown {
+        match project.props.get(p.0).filter(|prop| prop.model == p.1) {
+            Some(prop) if !have[p.0] => {
+                have[p.0] = true;
+                let at = Placement::of(prop, built.ground.as_deref());
+                *t = Transform {
+                    translation: to_bevy(at.pos),
+                    rotation: Quat::from_rotation_y(at.yaw as f32),
+                    scale: Vec3::splat(at.scale as f32),
+                };
+            }
+            _ => commands.entity(e).despawn(),
+        }
+    }
+    for (i, prop) in project.props.iter().enumerate() {
+        if have[i] {
+            continue;
+        }
+        let Some(model) = state.models.get(&prop.model) else {
+            continue;
+        };
+        commands
+            .spawn((
+                PreviewProp(i, prop.model.clone()),
+                Transform::default(),
+                Visibility::default(),
+            ))
+            .with_children(|c| {
+                for (mesh, material, shadows) in &model.parts {
+                    let mut e = c.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+                    if !shadows {
+                        e.insert(NotShadowCaster);
+                    }
+                }
+            });
     }
 }

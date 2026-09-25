@@ -4,11 +4,14 @@
 use glam::{DVec2, DVec3};
 
 use crate::project::Project;
-use crate::road::{MeshData, RoadBuild};
+use crate::road::{Layer, MeshData, RoadBuild};
 
 /// How far the ground stays under the roads' surfaces, m, so that the roads always lie
 /// on top of it.
 const UNDER_ROADS: f64 = 0.25;
+/// How far the ground stays under every triangle of the roads' surfaces and strips, m,
+/// wherever the grid's cells meet them.
+const CLEARANCE: f64 = 0.05;
 /// How far the ground drops at the roads' outer edges, m: enough to hide under the
 /// edges without showing a step.
 const AT_EDGES: f64 = 0.03;
@@ -160,6 +163,8 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
         }
     }
 
+    clamp_under(&mut z, roads, lo, t.cell, (nx, ny));
+
     let position = |i: usize, j: usize| {
         let p = lo + DVec2::new(i as f64, j as f64) * t.cell;
         [p.x as f32, p.y as f32, z[j * nx + i] as f32]
@@ -214,6 +219,35 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
         chunks,
         solid: grid(0, 0, nx - 1, ny - 1, false),
     })
+}
+
+/// Lowers the corners of every cell that a road's surface or strip triangle reaches
+/// below that triangle's lowest vertex. The ground is linear within a cell, so it then
+/// stays under the roads wherever they are, on grades, in sags and over banking alike.
+fn clamp_under(z: &mut [f64], roads: &[RoadBuild], lo: DVec2, cell: f64, (nx, ny): (usize, usize)) {
+    let index = |v: f64, n: usize| ((v / cell).floor().max(0.0) as usize).min(n - 2);
+    let parts = roads
+        .iter()
+        .flat_map(|b| &b.solid)
+        .filter(|p| matches!(p.layer, Layer::Surface | Layer::Strip));
+    for part in parts {
+        let m = &part.mesh;
+        for &t in m.indices.as_chunks::<3>().0 {
+            let p = t.map(|i| m.positions[i as usize].map(f64::from));
+            let x = p.map(|p| p[0] - lo.x);
+            let y = p.map(|p| p[1] - lo.y);
+            let low = p.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min) - CLEARANCE;
+            let min = |a: [f64; 3]| a.into_iter().fold(f64::INFINITY, f64::min);
+            let max = |a: [f64; 3]| a.into_iter().fold(f64::NEG_INFINITY, f64::max);
+            let (i0, i1) = (index(min(x), nx), index(max(x), nx) + 1);
+            let (j0, j1) = (index(min(y), ny), index(max(y), ny) + 1);
+            for j in j0..=j1 {
+                for v in &mut z[j * nx + i0..=j * nx + i1] {
+                    *v = v.min(low);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

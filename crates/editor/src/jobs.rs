@@ -6,7 +6,7 @@ use std::process::Command;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
-use open_racing_track_project::{Project, Textures, bake, validate};
+use open_racing_track_project::{Cache, Project, bake, validate};
 
 pub struct Baked {
     pub name: String,
@@ -33,7 +33,7 @@ impl Jobs {
         let (project, dir) = (project.clone(), dir.to_path_buf());
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let package =
-                bake::bake(&project, &dir, &mut Textures::default()).map_err(|e| e.to_string())?;
+                bake::bake(&project, &dir, &mut Cache::default()).map_err(|e| e.to_string())?;
             let report = validate::check(&package, true);
             let out = open_racing_track::tracks_dir().join(&project.name);
             package.save(&out).map_err(|e| e.to_string())?;
