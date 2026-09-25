@@ -26,6 +26,8 @@ pub struct State {
     new_material: String,
     /// The item being renamed and its new name so far.
     rename: Option<(Item, String)>,
+    /// The track's name as typed so far.
+    track_name: String,
     /// The track's tab is shown only because nothing was selected.
     stand_in: bool,
 }
@@ -125,7 +127,7 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, library: &Library
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match c.shell.tab {
-                PropTab::Track => track_tab(ui, c),
+                PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor),
                 PropTab::Terrain => terrain_tab(ui, c.editor),
                 PropTab::Surfaces => surfaces_tab(ui, c.editor, state),
@@ -293,9 +295,36 @@ fn name_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item) {
     }
 }
 
+/// A stretch of a node's length round node `n`, or along the whole road without one.
+/// On an open road it stops at the ends; on a closed one it may run across the start.
+fn stretch_round(node: Option<usize>, period: f64, closed: bool) -> Vec<Range> {
+    let Some(n) = node else {
+        return vec![];
+    };
+    let u = n as f64;
+    let range = if closed {
+        Range {
+            from: (u - 0.5).rem_euclid(period.max(1.0)),
+            to: (u + 0.5).rem_euclid(period.max(1.0)),
+        }
+    } else {
+        Range {
+            from: (u - 0.5).max(0.0),
+            to: (u + 0.5).min(period),
+        }
+    };
+    vec![range]
+}
+
 /// Stretches of the road, in spline parameters, with a button to add one round the
 /// selected node.
-fn ranges_ui(ui: &mut egui::Ui, ranges: &mut Vec<Range>, node: Option<usize>, period: f64) -> bool {
+fn ranges_ui(
+    ui: &mut egui::Ui,
+    ranges: &mut Vec<Range>,
+    node: Option<usize>,
+    period: f64,
+    closed: bool,
+) -> bool {
     let mut changed = false;
     let mut remove = None;
     if ranges.is_empty() {
@@ -342,11 +371,7 @@ fn ranges_ui(ui: &mut egui::Ui, ranges: &mut Vec<Range>, node: Option<usize>, pe
             .on_hover_text("Limit it to part of the road; drag the ends in the view")
             .clicked()
         {
-            let u = node.map_or(0.0, |n| n as f64);
-            ranges.push(Range {
-                from: (u - 0.5).rem_euclid(period.max(1.0)),
-                to: (u + 0.5).min(period),
-            });
+            ranges.extend(stretch_round(Some(node.unwrap_or(0)), period, closed));
             changed = true;
         }
     });
@@ -398,19 +423,21 @@ fn focused(c: &mut Ctx, focus: Focus) -> Option<bool> {
 
 // The tabs.
 
-fn track_tab(ui: &mut egui::Ui, c: &mut Ctx) {
+fn track_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
     section(ui, "Track", "track", true, |ui| {
-        let mut name = c.editor.project.name.clone();
         let resp = row(ui, "Name", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
+            ui.add(egui::TextEdit::singleline(&mut state.track_name).desired_width(f32::INFINITY))
         });
-        if resp.lost_focus() && name != c.editor.project.name && !name.trim().is_empty() {
-            c.editor.apply(
-                vec![Op::SetName {
-                    name: name.trim().to_string(),
-                }],
-                None,
-            );
+        let name = state.track_name.trim();
+        if resp.lost_focus() {
+            if !name.is_empty() && name != c.editor.project.name {
+                let name = name.to_string();
+                c.editor.apply(vec![Op::SetName { name }], None);
+            }
+            state.track_name = c.editor.project.name.clone();
+        } else if !resp.has_focus() {
+            // Follow changes from elsewhere (undo, the file).
+            state.track_name = c.editor.project.name.clone();
         }
         let closed: Vec<String> = c
             .editor
@@ -649,7 +676,7 @@ fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                     );
                     changed |= profile_ui(ui, &mut s.profile, (r, side as u8, i));
                     changed |= drag(ui, "Fade m", &mut s.fade, 0.1, 0.0..=100.0);
-                    changed |= ranges_ui(ui, &mut s.ranges, node, period);
+                    changed |= ranges_ui(ui, &mut s.ranges, node, period, road.closed);
                     removed = row(ui, "", |ui| ui.button("Remove strip").clicked());
                 });
                 if open.is_some() {
@@ -701,14 +728,7 @@ fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                             k += 1;
                             sname = format!("{base} {k}");
                         }
-                        let ranges = node
-                            .map(|n| {
-                                vec![Range {
-                                    from: (n as f64 - 0.5).max(0.0),
-                                    to: (n as f64 + 0.5).min(period),
-                                }]
-                            })
-                            .unwrap_or_default();
+                        let ranges = stretch_round(node, period, road.closed);
                         let strip = Strip {
                             name: sname,
                             width,
@@ -769,7 +789,7 @@ fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                     changed |= drag(ui, "Dash m", on, 0.1, 0.1..=100.0);
                     changed |= drag(ui, "Gap m", off, 0.1, 0.1..=100.0);
                 }
-                changed |= ranges_ui(ui, &mut l.ranges, node, period);
+                changed |= ranges_ui(ui, &mut l.ranges, node, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove line").clicked());
             });
         if open.is_some() {
@@ -851,7 +871,7 @@ fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                 changed |= drag(ui, "Height m", &mut b.height, 0.05, 0.1..=20.0);
                 changed |= drag(ui, "Thickness m", &mut b.thickness, 0.05, 0.0..=5.0);
                 changed |= combo_row(ui, "Material", ("bm", r, i), &mut b.material, &materials);
-                changed |= ranges_ui(ui, &mut b.ranges, node, period);
+                changed |= ranges_ui(ui, &mut b.ranges, node, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove barrier").clicked());
             });
         if open.is_some() {
@@ -1288,9 +1308,14 @@ fn surfaces_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
                 .hint_text("new surface")
                 .desired_width(150.0),
         );
-        if ui.button("+ Surface").clicked() && !state.new_surface.trim().is_empty() {
+        let name = state.new_surface.trim();
+        if ui.button("+ Surface").clicked() && !name.is_empty() {
+            if editor.project.surface_index(name).is_some() {
+                editor.status = format!("a surface is called \"{name}\" already");
+                return;
+            }
             let surface = NamedSurface {
-                name: state.new_surface.trim().to_string(),
+                name: name.to_string(),
                 props: open_racing_sim::SurfaceProps::of(Surface::Asphalt),
             };
             if editor.apply(vec![Op::PutSurface { surface }], None) {
@@ -1416,9 +1441,14 @@ fn materials_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State, libr
                 .hint_text("new material")
                 .desired_width(150.0),
         );
-        if ui.button("+ Material").clicked() && !state.new_material.trim().is_empty() {
+        let name = state.new_material.trim();
+        if ui.button("+ Material").clicked() && !name.is_empty() {
+            if editor.project.material_index(name).is_some() {
+                editor.status = format!("a material is called \"{name}\" already");
+                return;
+            }
             let material = MaterialDef {
-                name: state.new_material.trim().to_string(),
+                name: name.to_string(),
                 color: [1.0; 3],
                 texture: TextureSource::Builtin(BuiltinTexture::Concrete),
                 tile: [2.0, 2.0],

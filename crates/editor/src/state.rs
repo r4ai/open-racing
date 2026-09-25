@@ -4,6 +4,7 @@
 //! the editor work on the same thing. Changes made to the file from outside are loaded
 //! as they happen.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -90,7 +91,7 @@ impl Selection {
 pub struct Editor {
     pub dir: PathBuf,
     pub project: Project,
-    undo: Vec<Project>,
+    undo: VecDeque<Project>,
     redo: Vec<Project>,
     /// Bumped on every change; the preview rebuilds when it moves.
     pub revision: u64,
@@ -129,7 +130,7 @@ impl Editor {
             stamp: stamp(&dir),
             dir,
             project,
-            undo: Vec::new(),
+            undo: VecDeque::new(),
             redo: Vec::new(),
             revision: 1,
             last_check: Instant::now(),
@@ -155,10 +156,10 @@ impl Editor {
         }
     }
 
-    fn push_undo(&mut self) {
-        self.undo.push(self.project.clone());
+    fn push_undo(&mut self, before: Project) {
+        self.undo.push_back(before);
         if self.undo.len() > HISTORY {
-            self.undo.remove(0);
+            self.undo.pop_front();
         }
         self.redo.clear();
     }
@@ -173,35 +174,28 @@ impl Editor {
                 .is_some_and(|(last, t)| last == k && now - *t < COALESCE)
         });
         let before = self.project.clone();
-        match ops::apply_all(&mut self.project, &ops) {
-            Ok(()) => {
-                if !merge && !self.dragging {
-                    self.undo.push(before);
-                    if self.undo.len() > HISTORY {
-                        self.undo.remove(0);
-                    }
-                    self.redo.clear();
-                }
-                self.last_edit = key.map(|k| (k.to_string(), now));
-                self.revision += 1;
-                if !self.dragging {
-                    self.save();
-                }
-                self.clamp_selection();
-                true
-            }
-            Err(e) => {
-                self.status = e.to_string();
-                false
-            }
+        if let Err(e) = ops::apply_all(&mut self.project, &ops) {
+            self.status = e.to_string();
+            return false;
         }
+        if !merge && !self.dragging {
+            self.push_undo(before);
+        }
+        self.last_edit = key.map(|k| (k.to_string(), now));
+        self.revision += 1;
+        if !self.dragging {
+            self.save();
+        }
+        self.clamp_selection();
+        true
     }
 
     /// Starts a drag: the edits until `end_drag` undo as one step and are saved at the
     /// end.
     pub fn begin_drag(&mut self) {
         if !self.dragging {
-            self.push_undo();
+            self.push_undo(self.project.clone());
+            self.last_edit = None;
             self.dragging = true;
         }
     }
@@ -217,7 +211,7 @@ impl Editor {
     pub fn cancel_drag(&mut self) {
         if self.dragging {
             self.dragging = false;
-            if let Some(p) = self.undo.pop() {
+            if let Some(p) = self.undo.pop_back() {
                 self.project = p;
                 self.revision += 1;
                 self.clamp_selection();
@@ -225,29 +219,38 @@ impl Editor {
         }
     }
 
+    /// Steps back; not while dragging, whose start is the step it would undo.
     pub fn undo(&mut self) {
-        if let Some(p) = self.undo.pop() {
+        if !self.can_undo() {
+            return;
+        }
+        if let Some(p) = self.undo.pop_back() {
             self.redo.push(std::mem::replace(&mut self.project, p));
             self.changed("undone");
         }
     }
 
     pub fn redo(&mut self) {
+        if !self.can_redo() {
+            return;
+        }
         if let Some(p) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.project, p));
+            self.undo.push_back(std::mem::replace(&mut self.project, p));
             self.changed("redone");
         }
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        !self.dragging && !self.undo.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        !self.dragging && !self.redo.is_empty()
     }
 
     fn changed(&mut self, what: &str) {
+        // The next edit is a step of its own, whatever its key.
+        self.last_edit = None;
         self.revision += 1;
         self.save();
         self.clamp_selection();
@@ -289,8 +292,8 @@ impl Editor {
         self.stamp = now;
         match Project::load(&self.dir) {
             Ok(p) if p != self.project => {
-                self.push_undo();
-                self.project = p;
+                let before = std::mem::replace(&mut self.project, p);
+                self.push_undo(before);
                 self.changed("reloaded: project.ron changed on disk");
             }
             Ok(_) => {}
@@ -309,6 +312,18 @@ impl Editor {
     /// The selected road or spline: its name, nodes and whether it is closed.
     pub fn line(&self) -> Option<(&str, &[Node], bool)> {
         item_line(&self.project, self.selection.item?)
+    }
+
+    /// The nodes an edit of the selected line works on: the selected ones, or all of them
+    /// with none selected.
+    pub fn picked_nodes(&self) -> Vec<usize> {
+        let count = self.line().map_or(0, |(_, nodes, _)| nodes.len());
+        if self.selection.nodes.is_empty() {
+            (0..count).collect()
+        } else {
+            let sel = self.selection.nodes.iter().copied();
+            sel.filter(|&n| n < count).collect()
+        }
     }
 }
 
@@ -381,6 +396,42 @@ mod tests {
                 outgoing: DVec3::X * 4.0
             }
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn undo_waits_for_a_drag_and_ends_merging() {
+        let dir = std::env::temp_dir().join(format!(
+            "open-racing-editor-undo-merge-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let crown = |c: f64| {
+            vec![Op::SetRoad {
+                road: "circuit".into(),
+                closed: None,
+                crown: Some(c),
+                surface: None,
+                material: None,
+                resolution: None,
+            }]
+        };
+        assert!(editor.apply(crown(0.1), Some("crown")));
+        editor.begin_drag();
+        assert!(!editor.can_undo(), "no undo in the middle of a drag");
+        editor.undo();
+        assert!(editor.dragging);
+        editor.end_drag();
+        editor.undo();
+
+        // An edit with the same key right after an undo is a step of its own.
+        assert!(editor.apply(crown(0.3), Some("crown")));
+        editor.undo();
+        assert!(editor.apply(crown(0.2), Some("crown")));
+        assert!(!editor.can_redo(), "the undone edit is gone");
+        editor.undo();
+        assert_eq!(editor.project.roads[0].crown, 0.1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

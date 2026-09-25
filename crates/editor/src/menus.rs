@@ -250,23 +250,11 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
             used |= commands::button_as(ui, c, Cmd::Delete, "Delete Nodes");
         }
         Some(Hit::Handle(it, n, _)) => {
-            let name = item_line(&c.editor.project, it)
-                .map_or("", |l| l.0)
-                .to_string();
             ui.strong(format!("Handle of node {n}"));
             ui.separator();
             if item(ui, "Automatic handle", "Alt+click") {
                 used = true;
-                c.editor.apply(
-                    vec![Op::SetNodeHandles {
-                        line: name,
-                        index: n,
-                        mode: HandleMode::Auto,
-                        incoming: glam::DVec3::ZERO,
-                        outgoing: glam::DVec3::ZERO,
-                    }],
-                    None,
-                );
+                edit::auto_handles(c.editor, it, n);
             }
         }
         Some(Hit::Marker(Marker::Sector(i))) => {
@@ -275,8 +263,10 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
             if item(ui, "Remove sector", "") {
                 used = true;
                 let mut sectors = c.editor.project.markers.sectors.clone();
-                sectors.remove(i);
-                set_markers(c, None, Some(sectors));
+                if i < sectors.len() {
+                    sectors.remove(i);
+                    set_markers(c, None, Some(sectors));
+                }
             }
         }
         Some(Hit::Marker(Marker::Start)) => {
@@ -381,6 +371,14 @@ fn remove_stretch(c: &mut Ctx, end: RangeEnd) {
         return;
     };
     let name = road.name.clone();
+    // The menu may outlive what it was opened on (an undo, a reload).
+    let ranges = match end.part {
+        Part::Strip(side, i) => road.strips(side).get(i).map(|s| s.ranges.len()),
+        Part::Barrier(i) => road.barriers.get(i).map(|b| b.ranges.len()),
+    };
+    if ranges.is_none_or(|n| end.range >= n) {
+        return;
+    }
     let op = match end.part {
         Part::Strip(side, i) => {
             let mut strip = road.strips(side)[i].clone();

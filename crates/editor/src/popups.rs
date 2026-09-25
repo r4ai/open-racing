@@ -18,7 +18,7 @@ pub fn show(ctx: &egui::Context, c: &mut Ctx) {
     let (keep, chosen) = match popup {
         Popup::Search { at, text, selected } => search(ctx, c, at, text, selected),
         Popup::Rename { at, item, text } => rename(ctx, c, at, item, text),
-        Popup::Handles { at } => handles(ctx, c, at),
+        Popup::Handles { at } => handles(ctx, at),
         Popup::Pie { at } => pie(ctx, c, at),
     };
     c.shell.popup = keep;
@@ -145,7 +145,7 @@ fn rename(
     (Some(Popup::Rename { at, item, text }), None)
 }
 
-fn handles(ctx: &egui::Context, c: &mut Ctx, at: Vec2) -> (Option<Popup>, Option<Cmd>) {
+fn handles(ctx: &egui::Context, at: Vec2) -> (Option<Popup>, Option<Cmd>) {
     let mut chosen = None;
     let (_, outside) = popup_area(ctx, "handles", pos(at) - egui::vec2(20.0, 12.0), |ui| {
         ui.set_min_width(180.0);
@@ -166,7 +166,6 @@ fn handles(ctx: &egui::Context, c: &mut Ctx, at: Vec2) -> (Option<Popup>, Option
             chosen = Some(Cmd::ToggleClosed);
         }
     });
-    let _ = c;
     if chosen.is_some() || outside || escape(ctx) {
         return (None, chosen);
     }

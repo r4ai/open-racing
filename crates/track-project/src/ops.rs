@@ -155,7 +155,6 @@ pub enum Op {
         name: String,
     },
 
-    /// Sets the race markers; those left out stay as they are.
     /// Adds a kerb, wall or fence along its own spline, or replaces the one of the same
     /// name.
     PutSpline {
@@ -164,6 +163,11 @@ pub enum Op {
     RemoveSpline {
         name: String,
     },
+    /// Renames a spline, keeping its place in the list.
+    RenameSpline {
+        name: String,
+        to: String,
+    },
 
     /// Places a 3D model, or replaces the prop of the same name.
     PutProp {
@@ -171,6 +175,11 @@ pub enum Op {
     },
     RemoveProp {
         name: String,
+    },
+    /// Renames a prop, keeping its place in the list.
+    RenameProp {
+        name: String,
+        to: String,
     },
     /// Moves, turns or resizes a prop; what is left out stays as it is.
     MoveProp {
@@ -183,6 +192,7 @@ pub enum Op {
         scale: Option<f64>,
     },
 
+    /// Sets the race markers; those left out stay as they are.
     SetMarkers {
         #[serde(default)]
         start: Option<f64>,
@@ -435,7 +445,12 @@ impl Op {
                         }
                         l.insert(i, node)
                     }
-                    None => l.nodes().push(node),
+                    None => {
+                        // Through `insert`, so that a closed road's keys and ranges on its
+                        // closing segment move onto the new one.
+                        let end = l.nodes().len();
+                        l.insert(end, node)
+                    }
                 }
             }
             Op::MoveNode { line, index, pos } => {
@@ -465,8 +480,30 @@ impl Op {
             }
             Op::PutSpline { spline } => put(&mut p.splines, spline, |s| &s.name, None),
             Op::RemoveSpline { name } => remove(&mut p.splines, "spline", &name, |s| &s.name)?,
+            Op::RenameSpline { name, to } => {
+                if p.line(&to).is_some() {
+                    return Err(Error::Invalid(format!(
+                        "a road or spline named \"{to}\" exists"
+                    )));
+                }
+                p.splines
+                    .iter_mut()
+                    .find(|s| s.name == name)
+                    .ok_or_else(|| missing("spline", &name))?
+                    .name = to;
+            }
             Op::PutProp { prop } => put(&mut p.props, prop, |x| &x.name, None),
             Op::RemoveProp { name } => remove(&mut p.props, "prop", &name, |x| &x.name)?,
+            Op::RenameProp { name, to } => {
+                if p.props.iter().any(|x| x.name == to) {
+                    return Err(Error::Invalid(format!("a prop named \"{to}\" exists")));
+                }
+                p.props
+                    .iter_mut()
+                    .find(|x| x.name == name)
+                    .ok_or_else(|| missing("prop", &name))?
+                    .name = to;
+            }
             Op::MoveProp {
                 name,
                 pos,
@@ -644,8 +681,10 @@ impl Op {
             Op::RemoveBarrier { .. } => "RemoveBarrier",
             Op::PutSpline { .. } => "PutSpline",
             Op::RemoveSpline { .. } => "RemoveSpline",
+            Op::RenameSpline { .. } => "RenameSpline",
             Op::PutProp { .. } => "PutProp",
             Op::RemoveProp { .. } => "RemoveProp",
+            Op::RenameProp { .. } => "RenameProp",
             Op::MoveProp { .. } => "MoveProp",
             Op::SetMarkers { .. } => "SetMarkers",
             Op::SetPit { .. } => "SetPit",
@@ -744,6 +783,67 @@ mod tests {
         .unwrap();
         let r1 = &p.roads[0].left[0].ranges;
         assert_eq!(r1[0].from, r0[0].from + 1.0);
+    }
+
+    #[test]
+    fn appending_to_a_closed_road_keeps_the_closing_segment_s_keys() {
+        let mut p = Project::new("t");
+        let n = p.roads[0].nodes.len() as f64;
+        // A key and a stretch on the closing segment, from the last node back to 0.
+        apply_all(
+            &mut p,
+            &[Op::SetKey {
+                road: "circuit".into(),
+                curve: Curve::Bank,
+                u: n - 0.5,
+                value: 0.1,
+            }],
+        )
+        .unwrap();
+        apply_all(
+            &mut p,
+            &[Op::AddNode {
+                line: "circuit".into(),
+                pos: DVec3::new(-60.0, 20.0, 0.0),
+                before: None,
+            }],
+        )
+        .unwrap();
+        let key = p.roads[0]
+            .bank
+            .keys
+            .iter()
+            .find(|k| k.value == 0.1)
+            .unwrap();
+        assert_eq!(key.u, n + 0.5, "the key stays on the closing segment");
+    }
+
+    #[test]
+    fn splines_and_props_rename_in_place_and_never_overwrite() {
+        let mut p = Project::new("t");
+        let ops = parse(
+            r#"[
+                PutSpline(spline: (name: "a", closed: false, drape: true, resolution: 1.0,
+                    nodes: [(pos: (0, 0, 0)), (pos: (10, 0, 0))],
+                    shape: Wall(height: 1.0, thickness: 0.5, material: "concrete"))),
+                PutSpline(spline: (name: "b", closed: false, drape: true, resolution: 1.0,
+                    nodes: [(pos: (0, 5, 0)), (pos: (10, 5, 0))],
+                    shape: Wall(height: 1.0, thickness: 0.5, material: "concrete"))),
+                RenameSpline(name: "a", to: "first"),
+            ]"#,
+        )
+        .unwrap();
+        apply_all(&mut p, &ops).unwrap();
+        assert_eq!(p.splines[0].name, "first");
+        assert_eq!(p.splines[1].name, "b");
+        for to in ["b", "circuit"] {
+            let op = Op::RenameSpline {
+                name: "first".into(),
+                to: to.into(),
+            };
+            assert!(apply_all(&mut p, &[op]).is_err(), "{to} is taken");
+        }
+        assert_eq!(p.splines.len(), 2);
     }
 
     #[test]

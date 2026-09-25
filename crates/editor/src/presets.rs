@@ -123,9 +123,9 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
-/// `base`, or `base.001`, `base.002`… whichever no road or spline is called yet.
-pub fn unique_name(project: &Project, base: &str) -> String {
-    let taken = |n: &str| project.road(n).is_some() || project.spline(n).is_some();
+/// `base`, or `base.001`, `base.002`… whichever is not `taken` yet, as Blender names
+/// copies.
+pub fn free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(base) {
         return base.to_string();
     }
@@ -137,6 +137,16 @@ pub fn unique_name(project: &Project, base: &str) -> String {
         .map(|i| format!("{stem}.{i:03}"))
         .find(|n| !taken(n))
         .expect("some name is free")
+}
+
+/// A name no road or spline has yet.
+pub fn unique_name(project: &Project, base: &str) -> String {
+    free_name(base, |n| project.line(n).is_some())
+}
+
+/// A name no prop has yet.
+pub fn unique_prop_name(project: &Project, base: &str) -> String {
+    free_name(base, |n| project.props.iter().any(|p| p.name == n))
 }
 
 impl Preset {

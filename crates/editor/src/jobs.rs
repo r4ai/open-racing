@@ -20,10 +20,13 @@ pub struct Jobs {
     bake: Option<(Task<Result<Baked, String>>, bool)>,
     /// Report of the last bake.
     pub report: Option<String>,
-    pub running: bool,
 }
 
 impl Jobs {
+    pub fn running(&self) -> bool {
+        self.bake.is_some()
+    }
+
     /// Bakes the project into `<content>/tracks/<name>/`; `play` launches the game on it
     /// if it passes.
     pub fn bake(&mut self, project: &Project, dir: &Path, play: bool) {
@@ -45,7 +48,6 @@ impl Jobs {
             })
         });
         self.bake = Some((task, play));
-        self.running = true;
         self.report = Some("baking and driving a test lap…".into());
     }
 }
@@ -59,7 +61,6 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
     };
     let play = *play;
     jobs.bake = None;
-    jobs.running = false;
     match result {
         Ok(b) => {
             editor.status = format!("baked into {}", b.dir.display());

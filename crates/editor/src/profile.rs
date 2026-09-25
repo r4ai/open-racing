@@ -27,6 +27,8 @@ pub struct ProfileView {
 }
 
 struct NodeDrag {
+    /// The road and node dragged.
+    road: String,
     node: usize,
     /// Started with G: follows the pointer without a button held.
     modal: bool,
@@ -35,6 +37,13 @@ struct NodeDrag {
 }
 
 impl ProfileView {
+    /// Puts back a node being dragged, when the view goes away or shows another road.
+    pub fn stop(&mut self, editor: &mut Editor) {
+        if self.drag.take().is_some() {
+            editor.cancel_drag();
+        }
+    }
+
     fn fit(&mut self, smp: &Sampled, nodes: impl Iterator<Item = f64>) {
         let (lo, hi) = smp
             .frames
@@ -57,10 +66,18 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         .road()
         .filter(|&r| r < editor.project.roads.len())
     else {
+        view.stop(editor);
         ui.label("Select a road to see its elevation.");
         return;
     };
     let road = editor.project.roads[r].clone();
+    if view
+        .drag
+        .as_ref()
+        .is_some_and(|d| d.road != road.name || d.node >= road.nodes.len())
+    {
+        view.stop(editor);
+    }
     if road.nodes.len() < 2 {
         return;
     }
@@ -263,7 +280,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             resp.interact_pointer_pos()
                 .and_then(nearest)
                 .map(|i| (i, false))
-        } else if hovered && key(egui::Key::G) {
+        } else if hovered && !ui.ctx().egui_wants_keyboard_input() && key(egui::Key::G) {
             editor
                 .selection
                 .node()
@@ -274,6 +291,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         };
         if let Some((node, modal)) = start {
             view.drag = Some(NodeDrag {
+                road: road.name.clone(),
                 node,
                 z: road.nodes[node].pos.z,
                 modal,

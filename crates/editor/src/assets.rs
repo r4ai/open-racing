@@ -108,16 +108,7 @@ pub fn place(editor: &mut Editor, model: &Path, at: glam::DVec3) {
     let stem = model
         .file_stem()
         .map_or("prop".into(), |s| s.to_string_lossy().into_owned());
-    let name = (1..)
-        .map(|i| {
-            if i == 1 {
-                stem.clone()
-            } else {
-                format!("{stem}.{i:03}")
-            }
-        })
-        .find(|n| editor.project.props.iter().all(|p| &p.name != n))
-        .expect("some name is free");
+    let name = crate::presets::unique_prop_name(&editor.project, &stem);
     let prop = Prop {
         name,
         model: model.to_path_buf(),
@@ -379,11 +370,17 @@ fn rename(editor: &mut Editor, library: &mut Library, from: &Path, name: &str) {
         return;
     }
     let ops = assets::repoint(&editor.project, from, &to);
-    if !ops.is_empty() {
-        editor.apply(ops, None);
+    library.refresh();
+    if !ops.is_empty() && !editor.apply(ops, None) {
+        // What used the file would point at nothing: put it back.
+        let why = std::mem::take(&mut editor.status);
+        editor.status = match std::fs::rename(&full_to, &full_from) {
+            Ok(()) => format!("not renamed: {why}"),
+            Err(e) => format!("{why}; and putting {} back failed: {e}", from.display()),
+        };
+        return;
     }
     editor.status = format!("renamed to {}", to.display());
-    library.refresh();
 }
 
 /// A material using a texture, named after its file, and shown in the inspector.
@@ -391,16 +388,7 @@ fn new_material(editor: &mut Editor, texture: &Path) {
     let stem = texture
         .file_stem()
         .map_or("material".into(), |s| s.to_string_lossy().into_owned());
-    let name = (1..)
-        .map(|i| {
-            if i == 1 {
-                stem.clone()
-            } else {
-                format!("{stem} {i}")
-            }
-        })
-        .find(|n| editor.project.material_index(n).is_none())
-        .expect("some name is free");
+    let name = crate::presets::free_name(&stem, |n| editor.project.material_index(n).is_some());
     let material = MaterialDef {
         name: name.clone(),
         color: [1.0; 3],

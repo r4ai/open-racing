@@ -59,6 +59,15 @@ pub struct CurveGraph {
     drag: Option<Drag>,
 }
 
+impl CurveGraph {
+    /// Puts back a key being dragged, when the graph goes away or shows something else.
+    pub fn stop(&mut self, editor: &mut Editor) {
+        if self.drag.take().is_some() {
+            editor.cancel_drag();
+        }
+    }
+}
+
 pub fn panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -73,9 +82,8 @@ pub fn panel(
             (Shown::Bank, "Bank"),
         ] {
             if ui.selectable_label(state.shown == shown, label).clicked() {
-                if state.drag.take().is_some() {
-                    editor.cancel_drag();
-                }
+                state.stop(editor);
+                elevation.stop(editor);
                 state.shown = shown;
                 state.road = None;
                 state.selected = None;
@@ -91,9 +99,7 @@ pub fn panel(
         .road()
         .filter(|&i| i < editor.project.roads.len())
     else {
-        if state.drag.take().is_some() {
-            editor.cancel_drag();
-        }
+        state.stop(editor);
         ui.label("Select a road to edit its width or bank.");
         return;
     };
@@ -109,9 +115,7 @@ pub fn panel(
     let fit_clicked = ui.button("Fit").clicked();
     let fit = state.road.as_deref() != Some(&road.name) || fit_clicked;
     if fit {
-        if state.drag.take().is_some() {
-            editor.cancel_drag();
-        }
+        state.stop(editor);
         state.road = Some(road.name.clone());
         state.selected = None;
         let values = (0..=256)

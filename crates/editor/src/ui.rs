@@ -238,6 +238,11 @@ pub fn ui(
             });
         c.shell.bottom_open = open;
     }
+    // A drag in a graph that is no longer shown would never end.
+    if c.shell.maximized || !c.shell.bottom_open || c.shell.bottom != BottomTab::Curves {
+        profile.stop(c.editor);
+        curve_graph.stop(c.editor);
+    }
 
     menus::header(&mut root, &mut c);
     let mut open = c.shell.sidebar;
@@ -280,6 +285,18 @@ fn list_projects() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Opens another project, dropping what the tools were doing in this one.
+fn open_project(c: &mut Ctx, dir: std::path::PathBuf) {
+    let before = c.editor.dir.clone();
+    c.editor.switch(dir);
+    if c.editor.dir != before {
+        c.tool.reset();
+        c.shell.popup = None;
+        c.shell.focus = None;
+        crate::viewport::frame_all(c.editor, c.orbit);
+    }
+}
+
 fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
@@ -292,7 +309,7 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
                         .desired_width(140.0),
                 );
                 if ui.button("New / Open").clicked() && !new_project.trim().is_empty() {
-                    c.editor.switch(projects_dir().join(new_project.trim()));
+                    open_project(c, projects_dir().join(new_project.trim()));
                     ui.close();
                 }
             });
@@ -308,7 +325,7 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
                         .to_string_lossy()
                         .into_owned();
                     if ui.button(name).clicked() {
-                        c.editor.switch(dir);
+                        open_project(c, dir);
                         ui.close();
                     }
                 }
@@ -358,7 +375,7 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
         ui.strong(&c.editor.project.name);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let idle = !c.jobs.running;
+            let idle = !c.jobs.running();
             if ui
                 .add_enabled(idle, egui::Button::new("▶ Bake & Drive"))
                 .on_hover_text("Bake the track, check it with a test lap and drive it")
@@ -373,7 +390,7 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
             {
                 commands::run(Cmd::Bake, c);
             }
-            if c.jobs.running {
+            if c.jobs.running() {
                 ui.spinner();
             }
         });

@@ -29,7 +29,7 @@ use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
-use open_racing_track_project::curve::{Frame, Sampled, handles};
+use open_racing_track_project::curve::{Frame, Sampled, handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side, StationCurve};
 use open_racing_track_render::{from_bevy, to_bevy};
@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use open_racing_track_project::model::Placement;
 
-use crate::presets::{PRESETS, unique_name};
+use crate::presets::{PRESETS, unique_name, unique_prop_name};
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
 
@@ -372,6 +372,19 @@ pub struct Tool {
     middle_press: bool,
 }
 
+impl Tool {
+    /// Drops what the tools are doing, keeping their settings: another project was
+    /// opened.
+    pub fn reset(&mut self) {
+        *self = Tool {
+            active: self.active,
+            overlays: self.overlays,
+            snap: self.snap,
+            ..default()
+        };
+    }
+}
+
 enum LeftRelease {
     Click(Option<Hit>),
     Box(Rect),
@@ -693,17 +706,7 @@ pub fn selection_pivot(editor: &Editor, built: &Built) -> Option<DVec3> {
         return Some(Placement::of(prop, built.ground.as_deref()).pos);
     }
     let (_, nodes, _) = item_line(&editor.project, item)?;
-    let picked: Vec<usize> = if editor.selection.nodes.is_empty() {
-        (0..nodes.len()).collect()
-    } else {
-        editor
-            .selection
-            .nodes
-            .iter()
-            .copied()
-            .filter(|&n| n < nodes.len())
-            .collect()
-    };
+    let picked = editor.picked_nodes();
     if picked.is_empty() {
         return None;
     }
@@ -1331,21 +1334,7 @@ fn click(
     match hit {
         Some(Hit::Node(item, n)) if shift => editor.selection.toggle_node(item, n),
         Some(Hit::Node(item, n)) => editor.selection.select_node(item, n),
-        Some(Hit::Handle(item, n, _)) if alt => {
-            if let Some((name, ..)) = item_line(&editor.project, item) {
-                let line = name.to_string();
-                editor.apply(
-                    vec![Op::SetNodeHandles {
-                        line,
-                        index: n,
-                        mode: HandleMode::Auto,
-                        incoming: DVec3::ZERO,
-                        outgoing: DVec3::ZERO,
-                    }],
-                    None,
-                );
-            }
-        }
+        Some(Hit::Handle(item, n, _)) if alt => crate::edit::auto_handles(editor, item, n),
         Some(Hit::Body(item)) => {
             if editor.selection.item != Some(item) {
                 editor.selection.select(item);
@@ -1417,7 +1406,9 @@ pub fn delete(editor: &mut Editor) {
         return;
     };
     if let Item::Prop(i) = item {
-        let name = editor.project.props[i].name.clone();
+        let Some(name) = editor.project.props.get(i).map(|p| p.name.clone()) else {
+            return;
+        };
         if editor.apply(vec![Op::RemoveProp { name }], None) {
             editor.selection = Default::default();
         }
@@ -1445,9 +1436,11 @@ pub fn delete(editor: &mut Editor) {
             })
             .collect()
     };
+    let whole = editor.selection.nodes.is_empty();
     if editor.apply(ops, None) {
         editor.selection.nodes.clear();
-        if editor.line().is_none() {
+        // After removing the whole item its index names the next one in the list.
+        if whole || editor.line().is_none() {
             editor.selection = Default::default();
         }
     }
@@ -1457,7 +1450,7 @@ pub fn delete(editor: &mut Editor) {
 /// node after the nearest segment's middle.
 fn insert_index(nodes: &[open_racing_track_project::Node], closed: bool, pos: DVec3) -> usize {
     let n = nodes.len();
-    let segs = if closed { n } else { n.saturating_sub(1) };
+    let segs = segments(n, closed);
     let mid = |i: usize| (nodes[i].pos + nodes[(i + 1) % n].pos) * 0.5;
     (0..segs)
         .min_by(|&a, &b| {
@@ -1541,7 +1534,7 @@ pub fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
 pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
     let p = &editor.project;
     let (op, item) = match editor.selection.item {
-        Some(Item::Spline(s)) => {
+        Some(Item::Spline(s)) if s < p.splines.len() => {
             let mut copy = p.splines[s].clone();
             copy.name = unique_name(p, &copy.name);
             (
@@ -1549,13 +1542,9 @@ pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) 
                 Item::Spline(p.splines.len()),
             )
         }
-        Some(Item::Prop(i)) => {
+        Some(Item::Prop(i)) if i < p.props.len() => {
             let mut copy = p.props[i].clone();
-            let base = copy.name.clone();
-            copy.name = (1..)
-                .map(|k| format!("{base}.{k:03}"))
-                .find(|n| p.props.iter().all(|x| &x.name != n))
-                .expect("some name is free");
+            copy.name = unique_prop_name(p, &copy.name);
             (Op::PutProp { prop: copy }, Item::Prop(p.props.len()))
         }
         _ => {
@@ -1593,17 +1582,13 @@ pub fn start_modal(
                 editor.status = "Width and tilt change a road: select one, or its nodes".into();
                 return;
             };
+            let nodes = editor.picked_nodes();
             let road = &editor.project.roads[r];
-            let count = road.nodes.len();
             Target::Shape {
                 road: road.name.clone(),
-                count,
+                count: road.nodes.len(),
                 closed: road.closed,
-                nodes: if editor.selection.nodes.is_empty() {
-                    (0..count).collect()
-                } else {
-                    editor.selection.nodes.clone()
-                },
+                nodes,
                 left: road.width_left.clone(),
                 right: road.width_right.clone(),
                 bank: road.bank.clone(),
@@ -1628,7 +1613,9 @@ pub fn start_modal(
         Some(Hit::Range(end)) => Target::Range { end },
         _ if editor.selection.prop().is_some() => {
             let index = editor.selection.prop().expect("a prop");
-            let p = &editor.project.props[index];
+            let Some(p) = editor.project.props.get(index) else {
+                return;
+            };
             Target::Prop {
                 index,
                 pos: p.pos,
@@ -1640,13 +1627,9 @@ pub fn start_modal(
             let Some(item) = editor.selection.item else {
                 return;
             };
+            let picked = editor.picked_nodes();
             let Some((_, nodes, _)) = editor.line() else {
                 return;
-            };
-            let picked: Vec<usize> = if editor.selection.nodes.is_empty() {
-                (0..nodes.len()).collect()
-            } else {
-                editor.selection.nodes.clone()
             };
             Target::Nodes {
                 item,
@@ -1668,7 +1651,9 @@ pub fn start_modal(
         Target::Handle { node, start, .. } => (Mode::Grab, *node + *start),
         Target::Marker { .. } => (Mode::Grab, tool.pointer.unwrap_or_default()),
         Target::Range { end } => {
-            let road = &editor.project.roads[end.road];
+            let Some(road) = editor.project.roads.get(end.road) else {
+                return;
+            };
             let (Some(smp), Some(rg)) = (
                 built.roads.get(end.road),
                 parts(road)
@@ -2219,11 +2204,12 @@ fn draw(
     if !finish {
         return;
     }
-    let d = tool.draw.take().expect("drawing");
-    if d.points.len() < 2 {
-        editor.status = "a line needs at least two points".into();
+    if tool.draw.as_ref().is_some_and(|d| d.points.len() < 2) {
+        // Keep drawing: a stray Enter or right click should not lose the first point.
+        editor.status = "a line needs at least two points (Esc cancels)".into();
         return;
     }
+    let d = tool.draw.take().expect("drawing");
     match d.kind {
         DrawKind::Road => {
             let name = unique_name(&editor.project, "road");
@@ -2254,8 +2240,12 @@ fn draw(
 
 /// Frames the selected nodes, or the selected road or spline.
 pub fn frame_selection(editor: &Editor, orbit: &mut Orbit) {
-    if let Some(i) = editor.selection.prop() {
-        let p = to_bevy(editor.project.props[i].pos);
+    if let Some(prop) = editor
+        .selection
+        .prop()
+        .and_then(|i| editor.project.props.get(i))
+    {
+        let p = to_bevy(prop.pos);
         return frame(orbit, &[p - Vec3::splat(15.0), p + Vec3::splat(15.0)]);
     }
     let Some((_, nodes, _)) = editor.line() else {
@@ -2350,7 +2340,7 @@ pub fn gizmos(
             gizmos.linestrip(pts, line.with_alpha(if selected { 0.9 } else { 0.4 }));
         }
         let n = nodes.len();
-        let segs = if closed { n } else { n.saturating_sub(1) };
+        let segs = segments(n, closed);
         if selected {
             for i in 0..segs {
                 gizmos.line(

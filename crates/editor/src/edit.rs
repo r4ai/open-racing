@@ -4,12 +4,12 @@
 
 use glam::DVec3;
 use open_racing_track_project::Project;
-use open_racing_track_project::curve::handles;
+use open_racing_track_project::curve::{handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Key, Road, StationCurve};
 
 use crate::preview::Built;
-use crate::state::{Editor, Item};
+use crate::state::{Editor, Item, item_line};
 
 /// The name of a road, spline or prop.
 pub fn item_name(project: &Project, item: Item) -> Option<&str> {
@@ -97,17 +97,12 @@ pub fn select_less(editor: &mut Editor) {
 
 /// Sets the handles of the selected nodes, keeping their present shape.
 pub fn set_handles(editor: &mut Editor, mode: HandleMode) {
+    let picked = editor.picked_nodes();
     let Some((name, nodes, closed)) = editor.line() else {
         return;
     };
-    let picked: Vec<usize> = if editor.selection.nodes.is_empty() {
-        (0..nodes.len()).collect()
-    } else {
-        editor.selection.nodes.clone()
-    };
     let ops: Vec<Op> = picked
         .into_iter()
-        .filter(|&i| i < nodes.len())
         .map(|index| {
             let (incoming, mut outgoing) = handles(nodes, closed, index);
             if !closed && index + 1 == nodes.len() && outgoing.length_squared() < 1e-12 {
@@ -134,6 +129,24 @@ pub fn set_handles(editor: &mut Editor, mode: HandleMode) {
     }
 }
 
+/// Makes a node's handles automatic again (Alt + click on a handle).
+pub fn auto_handles(editor: &mut Editor, item: Item, index: usize) {
+    let Some((name, ..)) = item_line(&editor.project, item) else {
+        return;
+    };
+    let line = name.to_string();
+    editor.apply(
+        vec![Op::SetNodeHandles {
+            line,
+            index,
+            mode: HandleMode::Auto,
+            incoming: DVec3::ZERO,
+            outgoing: DVec3::ZERO,
+        }],
+        None,
+    );
+}
+
 /// Adds a node halfway along each segment between selected nodes, or along every
 /// segment with none selected, on the curve as last built.
 pub fn subdivide(editor: &mut Editor, built: &Built) {
@@ -142,7 +155,7 @@ pub fn subdivide(editor: &mut Editor, built: &Built) {
     };
     let n = nodes.len();
     let sel = editor.selection.nodes.clone();
-    let segs = if closed { n } else { n.saturating_sub(1) };
+    let segs = segments(n, closed);
     let picked: Vec<usize> = (0..segs)
         .filter(|&i| sel.is_empty() || (sel.contains(&i) && sel.contains(&((i + 1) % n))))
         .collect();
@@ -226,47 +239,14 @@ pub fn rename(editor: &mut Editor, item: Item, to: &str) -> bool {
     if to.is_empty() || to == name {
         return false;
     }
-    let p = &editor.project;
-    let (ops, after) = match item {
-        Item::Road(_) => (
-            vec![Op::RenameRoad {
-                road: name,
-                to: to.to_string(),
-            }],
-            item,
-        ),
-        Item::Spline(s) => {
-            let mut spline = p.splines[s].clone();
-            spline.name = to.to_string();
-            (
-                vec![Op::RemoveSpline { name }, Op::PutSpline { spline }],
-                Item::Spline(p.splines.len() - 1),
-            )
-        }
-        Item::Prop(i) => {
-            if p.props.iter().any(|x| x.name == to) {
-                editor.status = format!("a prop is called \"{to}\" already");
-                return false;
-            }
-            let mut prop = p.props[i].clone();
-            prop.name = to.to_string();
-            (
-                vec![Op::RemoveProp { name }, Op::PutProp { prop }],
-                Item::Prop(p.props.len() - 1),
-            )
-        }
+    let to = to.to_string();
+    let op = match item {
+        Item::Road(_) => Op::RenameRoad { road: name, to },
+        Item::Spline(_) => Op::RenameSpline { name, to },
+        Item::Prop(_) => Op::RenameProp { name, to },
     };
-    let nodes = editor.selection.nodes.clone();
-    let was = editor.selection.item;
-    if editor.apply(ops, None) {
-        if was == Some(item) {
-            editor.selection.item = Some(after);
-            editor.selection.nodes = nodes;
-        }
-        true
-    } else {
-        false
-    }
+    // The renamed item keeps its place in the list, and so the selection.
+    editor.apply(vec![op], None)
 }
 
 /// A road's profile: its left or right width, or its bank.
@@ -288,11 +268,7 @@ pub fn node_keys(
     closed: bool,
     changes: &[(usize, f64)],
 ) -> Vec<Key> {
-    let period = if closed {
-        count
-    } else {
-        count.saturating_sub(1)
-    } as f64;
+    let period = segments(count, closed) as f64;
     let mut out = curve.clone();
     let changed = |j: usize| changes.iter().any(|&(i, _)| i == j);
     for &(i, _) in changes {
@@ -334,13 +310,9 @@ pub fn set_at_nodes(editor: &mut Editor, curve: Curve, value: f64, key: &str) {
     else {
         return;
     };
+    let picked = editor.picked_nodes();
     let road = &editor.project.roads[r];
     let count = road.nodes.len();
-    let picked: Vec<usize> = if editor.selection.nodes.is_empty() {
-        (0..count).collect()
-    } else {
-        editor.selection.nodes.clone()
-    };
     let changes: Vec<(usize, f64)> = picked.into_iter().map(|n| (n, value)).collect();
     let curves: &[Curve] = match curve {
         Curve::Width => &[Curve::WidthLeft, Curve::WidthRight],
@@ -419,6 +391,42 @@ mod tests {
         assert_eq!(e.project.roads[0].name, "ring");
         assert_eq!(e.selection.item, Some(Item::Road(0)));
         assert!(!rename(&mut e, Item::Road(0), "  "));
+
+        // Splines keep their place, and a taken name leaves everything as it was.
+        for (name, y) in [("a", 0.0), ("b", 5.0)] {
+            let spline = crate::presets::PRESETS[0].spline(
+                &e.project,
+                vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
+            );
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                ..spline
+            };
+            assert!(e.apply(vec![Op::PutSpline { spline }], None));
+        }
+        e.selection.select(Item::Spline(0));
+        assert!(rename(&mut e, Item::Spline(0), "first"));
+        assert_eq!(e.project.splines[0].name, "first");
+        assert_eq!(e.selection.item, Some(Item::Spline(0)));
+        assert!(!rename(&mut e, Item::Spline(0), "b"));
+        assert_eq!(e.project.splines.len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_whole_item_selects_nothing() {
+        let (mut e, dir) = editor("delete");
+        for y in [0.0, 5.0] {
+            let spline = crate::presets::PRESETS[0].spline(
+                &e.project,
+                vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
+            );
+            assert!(e.apply(vec![Op::PutSpline { spline }], None));
+        }
+        e.selection.select(Item::Spline(0));
+        crate::viewport::delete(&mut e);
+        assert_eq!(e.project.splines.len(), 1);
+        assert_eq!(e.selection.item, None, "not the spline that moved up");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

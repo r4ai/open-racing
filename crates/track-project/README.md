@@ -195,6 +195,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | operation | fields | what it does |
 | --- | --- | --- |
 | `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence) |
+| `RenameSpline` | `name`, `to` | renames a spline; fails if a road or spline has that name |
 
 **Markers and terrain**
 
@@ -217,6 +218,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | --- | --- | --- |
 | `PutProp` / `RemoveProp` | `prop` / `name` | places, replaces or removes a prop |
 | `MoveProp` | `name`, `pos?`, `yaw?`, `scale?` | moves, turns or resizes a prop |
+| `RenameProp` | `name`, `to` | renames a prop; fails if another prop has that name |
 
 ## Working on a track
 

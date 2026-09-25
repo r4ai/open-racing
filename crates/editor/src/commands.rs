@@ -230,7 +230,7 @@ impl Cmd {
         match self {
             Undo => e.can_undo(),
             Redo => e.can_redo(),
-            Bake | BakeDrive => !c.jobs.running,
+            Bake | BakeDrive => !c.jobs.running(),
             Rename | Grab | Rotate | Scale | Delete => sel.item.is_some(),
             FrameSelected => sel.item.is_some(),
             SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | Subdivide
