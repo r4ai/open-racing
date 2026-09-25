@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use open_racing_sim::TrackCondition;
 
+use crate::assists::AssistSettings;
 use crate::camera::CameraMode;
 use crate::driving::{Mode, Simulation};
 use crate::ffb::FfbStatus;
@@ -39,10 +40,10 @@ T                toggle AI driver (with --ai)
 M                mute / unmute sound
 R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
-Esc              settings: input, force feedback, track, weather, graphics (Tab)
+Esc              settings: input, force feedback, track, weather, graphics, assists (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
-Wheel and pedals: assign them in the Esc settings (input \"custom\")";
+Wheel, pedals and H-shifter: assign them in the Esc settings (input \"custom\")";
 
 fn spawn(mut commands: Commands) {
     let panel = |top: bool| Node {
@@ -103,6 +104,7 @@ fn update(
     camera: Res<CameraMode>,
     diagnostics: Res<Time>,
     ffb: Res<FfbStatus>,
+    assists: Res<AssistSettings>,
     mut hud: Query<&mut Text, With<HudText>>,
 ) {
     let Ok(mut text) = hud.single_mut() else {
@@ -124,11 +126,16 @@ fn update(
         Mode::Ai => "AI".into(),
         Mode::Replay => "REPLAY".into(),
     };
-    let gear = match (dt.gear, dt.shift_timer > 0.0) {
-        (_, true) => "-".into(),
-        (-1, _) => "R".into(),
-        (0, _) => "N".into(),
-        (g, _) => g.to_string(),
+    let name = |g: i32| match g {
+        -1 => "R".to_string(),
+        0 => "N".to_string(),
+        g => g.to_string(),
+    };
+    // Mid-shift, where the gearbox is heading.
+    let gear = if dt.target_gear != dt.gear {
+        format!("{}>{}", name(dt.gear), name(dt.target_gear))
+    } else {
+        name(dt.gear)
     };
 
     let mut s = String::new();
@@ -146,6 +153,8 @@ fn update(
         dt.rpm(),
         if dt.stalled {
             "   ENGINE STALLED (I)"
+        } else if dt.grinding {
+            "   GEARS GRINDING (clutch!)"
         } else {
             ""
         }
@@ -161,11 +170,13 @@ fn update(
     );
     let _ = writeln!(
         s,
-        "throttle {}  brake {}  steer {:+5.0} deg",
+        "throttle {}  brake {}  clutch {}  steer {:+5.0} deg",
         bar(c.throttle),
         bar(c.brake),
+        bar(c.clutch),
         c.steer_wheel_angle.to_degrees()
     );
+    let _ = writeln!(s, "assists: {} (Esc)", *assists);
     let _ = writeln!(
         s,
         "tyre   load N   slip deg   slip %    in  mid  out  core C    bar   wear %   grip %"

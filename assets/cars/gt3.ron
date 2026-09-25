@@ -69,15 +69,25 @@
 
     clutch: (
         max_torque: 900.0,
-        anti_stall_rpm: 1600.0,
     ),
 
     gearbox: (
         ratios: [3.15, 2.37, 1.93, 1.62, 1.39, 1.20],
         reverse: 3.0,
         final_drive: 3.4,
-        shift_time: 0.05,
         efficiency: 0.92,
+        kind: Sequential(
+            shift_time: 0.05,
+            dog_release_torque: 150.0,
+        ),
+    ),
+
+    // Paddle-shift and engine electronics of a GT3 car.
+    electronics: (
+        anti_stall: Some((rpm: 1100.0)),
+        auto_blip: true,
+        ignition_cut: true,
+        downshift_protection_rpm: Some(9000.0),
     ),
 
     differential: (

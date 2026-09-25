@@ -15,12 +15,17 @@ use std::path::Path;
 
 use open_racing_sim::params::DifferentialParams;
 use open_racing_sim::tire::TireParams;
-use open_racing_sim::{CarParams, Drive};
+use open_racing_sim::{CarParams, Drive, ElectronicsParams, GearboxKind};
 
 use crate::ini::{self, Section};
 use crate::json::Value;
 use crate::{Error, lut};
 
+/// Synchroniser torque given to H-pattern gearboxes, which the game's data does not
+/// describe, N·m.
+const SYNCHRO_TORQUE: f64 = 25.0;
+/// Hand travel between gates of an H-pattern lever with sequential requests, s.
+const LEVER_TIME: f64 = 0.25;
 const PSI: f64 = 0.0689476;
 /// Density of fuel, kg/l.
 const FUEL_DENSITY: f64 = 0.745;
@@ -505,9 +510,38 @@ impl Physics {
         if let Some(v) = get("GEARS", "FINAL").filter(|v| *v > 0.0) {
             g.final_drive = v;
         }
-        if let Some(ms) = get("GEARBOX", "CHANGE_UP_TIME").filter(|v| *v >= 0.0) {
-            g.shift_time = ms / 1000.0;
-        }
+        // A car that takes an H-pattern shifter has a manual gearbox; the others shift by
+        // paddles through a sequential one, cutting the ignition on upshifts.
+        let shifter = get("GEARBOX", "SUPPORTS_SHIFTER").is_some_and(|v| v != 0.0);
+        let (base_time, dog_release_torque) = match g.kind {
+            GearboxKind::Sequential {
+                shift_time,
+                dog_release_torque,
+            } => (shift_time, dog_release_torque),
+            _ => (0.1, 100.0),
+        };
+        g.kind = if shifter {
+            GearboxKind::HPattern {
+                synchro_torque: SYNCHRO_TORQUE,
+                lever_time: LEVER_TIME,
+            }
+        } else {
+            GearboxKind::Sequential {
+                shift_time: get("GEARBOX", "CHANGE_UP_TIME")
+                    .filter(|v| *v >= 0.0)
+                    .map_or(base_time, |ms| ms / 1000.0),
+                dog_release_torque,
+            }
+        };
+        let limiter = self.params.engine.limiter_rpm;
+        self.params.electronics = ElectronicsParams {
+            anti_stall: None,
+            auto_blip: get("AUTOBLIP", "ELECTRONIC").is_some_and(|v| v != 0.0),
+            ignition_cut: !shifter,
+            downshift_protection_rpm: get("DOWNSHIFT_PROTECTION", "ACTIVE")
+                .filter(|v| *v != 0.0)
+                .map(|_| limiter + get("DOWNSHIFT_PROTECTION", "OVERREV").unwrap_or(0.0)),
+        };
         if let Some(v) = get("CLUTCH", "MAX_TORQUE").filter(|v| *v > 0.0) {
             self.params.clutch.max_torque = v;
         }
@@ -780,6 +814,32 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         CarModel::new(p.params.clone(), p.front.clone(), p.rear.clone()).unwrap();
         p
+    }
+
+    #[test]
+    fn gearbox_type_and_electronics_follow_the_drivetrain() {
+        let p = with_drivetrain(
+            "manual",
+            "[GEARBOX]\nSUPPORTS_SHIFTER=1\nCHANGE_UP_TIME=200\n[AUTOBLIP]\nELECTRONIC=0\n",
+        );
+        assert!(matches!(
+            p.params.gearbox.kind,
+            GearboxKind::HPattern { .. }
+        ));
+        assert_eq!(p.params.electronics, ElectronicsParams::default());
+
+        let p = with_drivetrain(
+            "paddles",
+            "[GEARBOX]\nSUPPORTS_SHIFTER=0\nCHANGE_UP_TIME=60\n[AUTOBLIP]\nELECTRONIC=1\n\
+             [DOWNSHIFT_PROTECTION]\nACTIVE=1\nOVERREV=200\n",
+        );
+        let GearboxKind::Sequential { shift_time, .. } = p.params.gearbox.kind else {
+            panic!("{:?}", p.params.gearbox.kind);
+        };
+        assert!((shift_time - 0.06).abs() < 1e-12);
+        let e = &p.params.electronics;
+        assert!(e.auto_blip && e.ignition_cut && e.anti_stall.is_none());
+        assert_eq!(e.downshift_protection_rpm, Some(7500.0 + 200.0));
     }
 
     #[test]

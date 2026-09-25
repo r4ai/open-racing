@@ -224,6 +224,8 @@ fn keyboard(
     requests.toggle_help = keys.just_pressed(KeyCode::KeyH);
     requests.toggle_mute = keys.just_pressed(KeyCode::KeyM);
     requests.recenter_vr = keys.just_pressed(KeyCode::KeyR);
+    // Only a bound H-pattern shifter (custom input, read after this) holds a gate.
+    input.controls.selector = None;
     if !matches!(*selection, InputSelection::Auto | InputSelection::Keyboard) {
         return;
     }
@@ -365,6 +367,7 @@ fn custom(
     c.throttle = value(Action::Throttle);
     c.brake = value(Action::Brake);
     c.clutch = value(Action::Clutch);
+    c.selector = bindings.selector(&pads, &reported);
     if bindings.just_pressed(Action::ShiftUp, &pads) {
         c.shift = Shift::Up;
     } else if bindings.just_pressed(Action::ShiftDown, &pads) {

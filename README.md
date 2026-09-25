@@ -14,7 +14,7 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 
 | crate               | role                                                                                                                                                                                         |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber, tread temperature and wear), engine / clutch / sequential gearbox, front / rear / all-wheel drive through limited-slip differentials, aero, tracks |
+| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, camber, tread temperature and wear), engine / clutch / H-pattern, sequential and dual-clutch gearboxes with their electronics, front / rear / all-wheel drive through limited-slip differentials, aero, tracks |
 | `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
 | `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
 | `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |
@@ -89,7 +89,7 @@ Training (`open-racing-env`) keeps fixed standard conditions (25 °C air and roa
 | --------- | ---------------------------------------------------------- |
 | W/S, ↑/↓  | throttle / brake                                           |
 | A/D, ←/→  | steering                                                   |
-| E/Q       | shift up / down (`--auto-shift` for automatic)             |
+| E/Q       | shift up / down                                            |
 | C         | clutch                                                     |
 | I         | restart the engine after a stall                           |
 | Backspace | put the car back on the track                              |
@@ -98,7 +98,7 @@ Training (`open-racing-env`) keeps fixed standard conditions (25 °C air and roa
 | T         | switch to the AI driver                                    |
 | M         | mute / unmute sound                                        |
 | Tab       | choose the input device                                    |
-| Esc       | settings: input, force feedback, track, weather, graphics  |
+| Esc       | settings: input, force feedback, track, weather, graphics, assists |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
 
@@ -108,13 +108,29 @@ For a wheel and pedals, open the settings with Esc (the simulation pauses), pick
 
 Force feedback (Windows, DirectInput) plays the simulated steering torque on the wheel that steers, with the driver's centring spring switched off. The torque is taken about each front wheel's steering axis from everything acting on its contact patch: the tyre's aligning moment, the lateral force on the mechanical trail, the longitudinal force on the scrub radius and the load on the caster and kingpin inclination, so the force goes light as the fronts lose grip and bumps, undulations and kerb ridges kick through the rim. The pneumatic trail grows with the tyre's load, swaps ends in reverse and shrinks on loose ground, where the tyre ploughs; at a standstill the contact patch winds up against the steering like rubber, ever more softly as it slips round, and springs back when the wheel is let go; loose ground holds it less. On top of the torque the wheel plays two vibrations: the grain of the surface under the front tyres, rougher off the track, and the scrub of front tyres sliding. Its settings are on the second page of the settings screen (Esc, then Tab) and are saved to `ffb.ron` next to `input.ron`: on/off, the base's peak torque in N·m (e.g. 12 for a MOZA R12, with the wheel software's own FFB gain at 100 %), strength as a share of the car's steering torque (100 % reproduces it 1:1 at the rim; a GT3 car peaks around 20 N·m), max output in N·m, road detail (the share of fast changes such as bumps and kerbs reproduced, 100 % as simulated), effects (strength of the two vibrations), damping and direction. Keep the torque below the max output: a clipped force is flat and carries no detail. Wheels differ in which way they push, so hold the wheel and run the test first: it must turn the wheel left, otherwise flip the direction. Turning the wheel past the car's steering lock (270° each way for the GT3) pauses the force until it comes back; being driven into lock three times within seconds (an inverted direction) stops it until the settings screen is opened. The HUD shows either. If the wheel itself stops the effect (e.g. MOZA's hands-off protection), it is restarted.
 
+### Engine, clutch and gearbox
+
+The engine, the gearbox input shaft and the driven wheels turn as three bodies joined by friction couplings — the clutch, a synchroniser, or a dual clutch's two clutches — each stuck or slipping (with less friction while slipping) and meshed gears. Three kinds of gearbox are modelled:
+
+- **H-pattern manual** (`fr_sports`): the lever moves through neutral, and the selected gear's synchroniser has to match the input shaft to it before the dogs mesh. With the clutch down that takes a fraction of a second; with the engine still connected it cannot, and the gears grind. The clutch pedal bites over the top of its travel. Drop it at rest and the engine stalls; let it in with the car rolling and the engine turns with the wheels (a bump start works).
+- **Sequential dog box with paddles** (`gt3` and the other road cars): the dogs let go only once the torque through them falls, which is what the ignition cut on upshifts is for. They then mesh at whatever speed the engine turns, and the clutch absorbs the difference, so a downshift without a blip snaps the driven wheels.
+- **Dual clutch**: the next gear is preselected and a shift hands the torque from one clutch to the other without a break. Its control unit works the clutches: it slips them to pull away, creeps with neither pedal pressed and opens them before a stall.
+
+Each car lists the electronics it is fitted with (`electronics` in its RON file): anti-stall, auto-blip, ignition cut and downshift protection. The GT3 has them all; the `fr_sports` has none. Whatever the car has, three driver aids on the settings screen (Esc, page "assists", saved to `assists.ron`) work the controls as a driver would:
+
+- **Clutch** (on by default): lets the clutch in as the engine revs to pull away, so the car rests in gear with the throttle closed; opens it before a stall; works it through H-pattern shifts.
+- **Auto-blip** (on by default): matches revs on downshifts, as heel-and-toe does.
+- **Auto shift** (off by default, or `--auto-shift`): picks the gears.
+
+An H-pattern shifter's gates (1–7 and R) can be assigned on the input page like the other buttons; with them assigned, the shifter selects the gear directly.
+
 ## Adding content
 
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
 - Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template, or convert a car into a car package (below). Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
   `drive` picks the driven wheels: `Rear` (the default), `Front`, or `All(front_share: …, centre_differential: (…), front_differential: (…))`, where a centre differential splits the torque between the axles; `differential` is the driven axle's, the rear one's for all-wheel drive. Keep the front and rear tyres the same size on an all-wheel-drive car with a locking centre differential: like a real one, it fights a difference in wheel speed.
   Where the engine sits shows in `front_weight` and in `inertia`: masses near the centre lower the pitch and yaw inertia. With the same parts, a mid-engined car puts more power down, turns in quicker, understeers less and rotates more when the driver lifts mid-corner than a front-engined one, and a nose-heavy front-drive car understeers most (tests in `crates/sim/tests/physics.rs`).
-- Bundled cars (`--car <name>`), all fictional and representative of their class: `gt3` (mid-engined GT3 racer on slicks, the default), `hot_hatch` (front-wheel drive, 61 % front), `awd_sedan` (all-wheel drive, 40 % of the torque to the front), `fr_coupe` and `mr_coupe` (the same 3.0 l coupé with the engine in front, 52 % front, and in the middle, 42 % front). The road cars run on the Velloni Strada R road tyre.
+- Bundled cars (`--car <name>`), all fictional and representative of their class: `gt3` (mid-engined GT3 racer on slicks, the default), `hot_hatch` (front-wheel drive, 61 % front), `awd_sedan` (all-wheel drive, 40 % of the torque to the front), `fr_coupe` and `mr_coupe` (the same 3.0 l coupé with the engine in front, 52 % front, and in the middle, 42 % front), `fr_sports` (a light 2.0 l boxer sports car with a six-speed H-pattern manual and no gearbox electronics). The road cars run on the Velloni Strada R road tyre.
 - Tyres: add `assets/tires/<name>.ron` using `velloni_zeta_gt_front.ron` as a template. A tyre file holds the size, the force curves, how pressure changes stiffness, peak slip, rolling resistance and grip, and the thermal model (inner / middle / outer tread zones and carcass, cooling, operating window, wear). Hot pressure follows the carcass temperature (gas law), so the cold pressure, camber and driving style show up in the tread temperatures on the HUD as they would on a real car. The bundled GT3 runs on the fictional Velloni Zeta GT, modelled on public figures for GT3 slicks (30/68-18 front, 31/71-18 rear).
 
 ### Track packages

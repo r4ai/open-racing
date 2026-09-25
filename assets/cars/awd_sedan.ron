@@ -69,15 +69,17 @@
 
     clutch: (
         max_torque: 650.0,
-        anti_stall_rpm: 1100.0,
     ),
 
     gearbox: (
         ratios: [3.25, 2.05, 1.48, 1.16, 0.95, 0.79],
         reverse: 3.2,
         final_drive: 4.0,
-        shift_time: 0.10,
         efficiency: 0.88,             // three differentials and a transfer case
+        kind: Sequential(
+            shift_time: 0.10,
+            dog_release_torque: 100.0,
+        ),
     ),
 
     drive: All(
@@ -87,6 +89,11 @@
     ),
 
     // Rear differential.
+    // Paddle shift cuts the ignition to unload the dogs on upshifts.
+    electronics: (
+        ignition_cut: true,
+    ),
+
     differential: (
         preload: 50.0,
         power_ramp: 0.30,

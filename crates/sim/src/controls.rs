@@ -25,6 +25,9 @@ pub struct Controls {
     pub clutch: f64,
     /// Edge-triggered gear change request.
     pub shift: Shift,
+    /// Gate an H-pattern shifter holds (−1 = reverse, 0 = neutral), or `None` without a
+    /// shifter. It overrides `shift` on H-pattern gearboxes and means nothing on others.
+    pub selector: Option<i32>,
 }
 
 impl Controls {
@@ -35,6 +38,7 @@ impl Controls {
             brake: self.brake.clamp(0.0, 1.0),
             clutch: self.clutch.clamp(0.0, 1.0),
             shift: self.shift,
+            selector: self.selector,
         }
     }
 }

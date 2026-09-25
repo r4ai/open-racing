@@ -39,11 +39,18 @@ fn gt3() -> Arc<CarModel> {
     Arc::new(CarModel::gt3())
 }
 
+/// Steps the car with the clutch worked by the clutch assist, as a driver pulling away
+/// would.
+fn step_with_clutch(car: &mut Car, track: &Track, assist: &mut ClutchAssist, mut c: Controls) {
+    assist.apply(car, &mut c);
+    car.step(track, &c);
+}
+
 /// Upshifts just below the rev limiter.
 fn shift_for(car: &Car) -> Shift {
     let (p, dt) = (&car.model.params, &car.state.drivetrain);
     let top = p.gearbox.ratios.len() as i32;
-    if dt.rpm() > 0.96 * p.engine.limiter_rpm && dt.gear < top && dt.shift_timer == 0.0 {
+    if dt.rpm() > 0.96 * p.engine.limiter_rpm && dt.gear < top && !dt.shifting() {
         Shift::Up
     } else {
         Shift::None
@@ -84,12 +91,15 @@ fn settles_at_static_ride_height() {
 fn acceleration_and_top_speed() {
     let track = circle(5000.0);
     let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
+    let mut clutch = ClutchAssist::default();
     let mut t100 = None;
     for _ in 0..70_000 {
         let shift = shift_for(&car);
-        car.step(
+        step_with_clutch(
+            &mut car,
             &track,
-            &Controls {
+            &mut clutch,
+            Controls {
                 throttle: 1.0,
                 shift,
                 ..Default::default()
@@ -390,6 +400,7 @@ fn gt3_driving(drive: Drive) -> Arc<CarModel> {
 fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
     let track = circle(5000.0);
     let mut car = Car::new(model, &track, 0.0, 0.0, 0.0, 1);
+    let mut clutch = ClutchAssist::default();
     let mut t100 = None;
     while car.state.time < seconds {
         let shift = shift_for(&car);
@@ -397,9 +408,11 @@ fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
             .filter(|&i| car.model.corners[i].driven)
             .map(|i| car.state.wheels[i].kappa)
             .fold(0.0, f64::max);
-        car.step(
+        step_with_clutch(
+            &mut car,
             &track,
-            &Controls {
+            &mut clutch,
+            Controls {
                 throttle: (1.0 - 8.0 * (spin - 0.1)).clamp(0.0, 1.0),
                 shift,
                 ..Default::default()
@@ -416,10 +429,13 @@ fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
 fn launch_slips(model: Arc<CarModel>) -> [f64; 4] {
     let track = circle(5000.0);
     let mut car = Car::new(model, &track, 0.0, 0.0, 0.0, 1);
+    let mut clutch = ClutchAssist::default();
     while car.state.time < 0.3 {
-        car.step(
+        step_with_clutch(
+            &mut car,
             &track,
-            &Controls {
+            &mut clutch,
+            Controls {
                 throttle: 1.0,
                 ..Default::default()
             },
@@ -789,4 +805,341 @@ fn a_parked_tyre_winds_up_like_rubber_and_springs_back() {
         grass[10],
         asphalt[10]
     );
+}
+
+// ---- Engine, clutch and gearbox ------------------------------------------------------
+
+/// Speed in km/h after `seconds` of `controls`, worked through the clutch assist if given.
+fn roll(
+    car: &mut Car,
+    track: &Track,
+    mut clutch: Option<ClutchAssist>,
+    controls: Controls,
+    seconds: f64,
+) {
+    let end = car.state.time + seconds;
+    while car.state.time < end {
+        let mut c = controls;
+        if let Some(assist) = clutch.as_mut() {
+            assist.apply(car, &mut c);
+        }
+        car.step(track, &c);
+    }
+}
+
+/// A GT3 car with a dual-clutch gearbox instead of its sequential one.
+fn gt3_dual_clutch(creep_torque: f64) -> Arc<CarModel> {
+    let gt3 = CarModel::gt3();
+    let mut params = gt3.params.clone();
+    params.gearbox.kind = GearboxKind::DualClutch {
+        shift_time: 0.15,
+        creep_torque,
+        launch_rpm: 4000.0,
+    };
+    params.electronics = ElectronicsParams {
+        auto_blip: true,
+        ..Default::default()
+    };
+    Arc::new(CarModel::new(params, gt3.front_tire.p.clone(), gt3.rear_tire.p.clone()).unwrap())
+}
+
+#[test]
+fn clutch_assist_holds_the_car_at_rest_with_the_throttle_closed() {
+    let track = circle(5000.0);
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
+    roll(
+        &mut car,
+        &track,
+        Some(ClutchAssist::default()),
+        Controls::default(),
+        10.0,
+    );
+    assert!(
+        car.speed() < 0.5 / 3.6,
+        "creeps at {:.1} km/h",
+        car.speed() * 3.6
+    );
+    assert!(!car.state.drivetrain.stalled);
+
+    // With the clutch let in, the idling engine drives the car at its idle speed in 1st:
+    // the GT3's anti-stall slips the clutch to pull away rather than stall.
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
+    roll(&mut car, &track, None, Controls::default(), 10.0);
+    let p = &car.model.params;
+    let idle_speed = p.engine.idle_rpm / drivetrain::RPM_PER_RAD_S / drivetrain::gear_ratio(p, 1)
+        * car.model.rear_tire.p.radius;
+    assert!(!car.state.drivetrain.stalled);
+    assert!(
+        (car.speed() - idle_speed).abs() < 0.1 * idle_speed,
+        "{:.1} km/h, idle speed {:.1} km/h",
+        car.speed() * 3.6,
+        idle_speed * 3.6
+    );
+}
+
+#[test]
+fn a_manual_car_stalls_unless_the_clutch_is_slipped_to_pull_away() {
+    let track = circle(5000.0);
+    let model = asset_car("fr_sports");
+    let mut car = Car::new(model.clone(), &track, 0.0, 0.0, 0.0, 1);
+    roll(
+        &mut car,
+        &track,
+        None,
+        Controls {
+            throttle: 0.3,
+            ..Default::default()
+        },
+        2.0,
+    );
+    assert!(
+        car.state.drivetrain.stalled,
+        "pulled away with the clutch dropped"
+    );
+
+    let mut car = Car::new(model, &track, 0.0, 0.0, 0.0, 1);
+    let throttle = Controls {
+        throttle: 0.5,
+        ..Default::default()
+    };
+    roll(
+        &mut car,
+        &track,
+        Some(ClutchAssist::default()),
+        throttle,
+        3.0,
+    );
+    assert!(!car.state.drivetrain.stalled);
+    assert!(
+        car.speed() > 15.0 / 3.6,
+        "only {:.1} km/h",
+        car.speed() * 3.6
+    );
+}
+
+#[test]
+fn braking_to_rest_in_gear_stalls_without_anti_stall() {
+    let track = circle(5000.0);
+    let brake = Controls {
+        brake: 0.4,
+        ..Default::default()
+    };
+    let stop = |model| {
+        let mut car = Car::new(model, &track, 0.0, 0.0, 50.0 / 3.6, 2);
+        roll(&mut car, &track, None, brake, 5.0);
+        assert!(car.speed() < 0.1);
+        car.state.drivetrain.stalled
+    };
+    assert!(!stop(gt3()), "the GT3's anti-stall let it stall");
+    assert!(stop(asset_car("fr_sports")), "survived without anti-stall");
+    // The clutch assist opens the clutch in time.
+    let mut car = Car::new(asset_car("fr_sports"), &track, 0.0, 0.0, 50.0 / 3.6, 2);
+    roll(&mut car, &track, Some(ClutchAssist::default()), brake, 5.0);
+    assert!(!car.state.drivetrain.stalled);
+}
+
+#[test]
+fn fr_sports_figures() {
+    // A 150 kW, 1.3 t sports car on road tyres: 0-100 km/h in roughly 7-8 s.
+    let track = circle(50_000.0);
+    let mut car = Car::new(asset_car("fr_sports"), &track, 0.0, 0.0, 0.0, 1);
+    let mut clutch = ClutchAssist::default();
+    let mut t100 = None;
+    while car.state.time < 15.0 && t100.is_none() {
+        // Lifts for each shift, as a driver of a manual car does.
+        let shifting = car.state.drivetrain.shifting();
+        let mut c = Controls {
+            throttle: if shifting { 0.0 } else { 1.0 },
+            shift: AutoShift.shift(&car),
+            ..Default::default()
+        };
+        clutch.apply(&car, &mut c);
+        car.step(&track, &c);
+        if car.speed() >= 100.0 / 3.6 {
+            t100 = Some(car.state.time);
+        }
+    }
+    let t100 = t100.expect("reaches 100 km/h");
+    assert!((6.5..9.0).contains(&t100), "0-100 km/h in {t100:.2} s");
+}
+
+#[test]
+fn an_h_pattern_gear_goes_in_only_once_the_synchroniser_matches_speeds() {
+    let track = circle(5000.0);
+    let model = asset_car("fr_sports");
+    let shift_up = |clutch: f64| {
+        let mut car = Car::new(model.clone(), &track, 0.0, 0.0, 60.0 / 3.6, 2);
+        let mut engaged = None;
+        for k in 0..1000 {
+            car.step(
+                &track,
+                &Controls {
+                    throttle: 0.3,
+                    clutch,
+                    shift: if k == 0 { Shift::Up } else { Shift::None },
+                    ..Default::default()
+                },
+            );
+            if engaged.is_none() && car.state.drivetrain.gear == 3 {
+                engaged = Some(car.state.time);
+            }
+        }
+        (engaged, car.state.drivetrain)
+    };
+    // With the engine driving the input shaft, the synchroniser cannot slow it: it grinds.
+    let (engaged, dt) = shift_up(0.0);
+    assert!(
+        engaged.is_none(),
+        "went into 3rd with the clutch in at {engaged:?} s"
+    );
+    assert!(dt.grinding && dt.target_gear == 3);
+    // With the clutch down it only has the input shaft to slow: the lever's travel and a
+    // fraction of a second.
+    let (engaged, _) = shift_up(1.0);
+    let engaged = engaged.expect("goes into 3rd with the clutch down");
+    assert!(engaged < 0.4, "took {engaged:.2} s");
+}
+
+#[test]
+fn an_h_shifter_selects_gates_directly() {
+    let track = circle(5000.0);
+    let mut car = Car::new(asset_car("fr_sports"), &track, 0.0, 0.0, 0.0, 0);
+    let gate = |g| Controls {
+        clutch: 1.0,
+        selector: Some(g),
+        ..Default::default()
+    };
+    roll(&mut car, &track, None, gate(1), 0.5);
+    assert_eq!(car.state.drivetrain.gear, 1);
+    roll(&mut car, &track, None, gate(-1), 1.0);
+    assert_eq!(car.state.drivetrain.gear, -1);
+    roll(&mut car, &track, None, gate(0), 0.1);
+    assert_eq!(car.state.drivetrain.gear, 0);
+}
+
+/// Peak rear-wheel slip over a downshift from 4th to 3rd at 100 km/h, the throttle closed.
+fn downshift_slip(model: Arc<CarModel>, blip: bool) -> f64 {
+    let track = circle(5000.0);
+    let mut car = Car::new(model, &track, 0.0, 0.0, 100.0 / 3.6, 4);
+    let mut worst: f64 = 0.0;
+    for k in 0..1000 {
+        let mut c = Controls {
+            shift: if k == 100 { Shift::Down } else { Shift::None },
+            ..Default::default()
+        };
+        if blip {
+            BlipAssist.apply(&car, &mut c);
+        }
+        car.step(&track, &c);
+        worst = worst.max(-car.state.wheels[RL].kappa.min(car.state.wheels[RR].kappa));
+    }
+    assert_eq!(car.state.drivetrain.gear, 3);
+    worst
+}
+
+#[test]
+fn a_blip_smooths_a_sequential_downshift() {
+    let model = asset_car("fr_coupe");
+    let (dry, blipped) = (
+        downshift_slip(model.clone(), false),
+        downshift_slip(model, true),
+    );
+    assert!(
+        blipped < 0.5 * dry,
+        "rear slip {dry:.3} without a blip, {blipped:.3} with"
+    );
+}
+
+#[test]
+fn downshift_protection_refuses_an_over_rev() {
+    let track = circle(5000.0);
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 170.0 / 3.6, 3);
+    let down = Controls {
+        shift: Shift::Down,
+        ..Default::default()
+    };
+    car.step(&track, &down);
+    assert!(
+        !car.state.drivetrain.shifting(),
+        "accepted a downshift to 2nd at 170 km/h"
+    );
+    // Slow enough, the same request goes through.
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 120.0 / 3.6, 3);
+    car.step(&track, &down);
+    assert!(car.state.drivetrain.shifting());
+}
+
+#[test]
+fn a_dual_clutch_upshift_keeps_the_drive() {
+    let track = circle(50_000.0);
+    let mut car = Car::new(gt3_dual_clutch(0.0), &track, 0.0, 0.0, 80.0 / 3.6, 2);
+    let full = Controls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    roll(&mut car, &track, None, full, 0.5);
+    let mut slowest = f64::INFINITY;
+    let mut shifted = false;
+    for k in 0..400 {
+        let before = car.speed();
+        car.step(
+            &track,
+            &Controls {
+                shift: if k == 0 { Shift::Up } else { Shift::None },
+                ..full
+            },
+        );
+        slowest = slowest.min((car.speed() - before) / DT);
+        shifted |= car.state.drivetrain.shifting();
+    }
+    assert!(shifted && car.state.drivetrain.gear == 3);
+    assert!(slowest > 1.0, "the drive dropped: {slowest:.2} m/s²");
+}
+
+#[test]
+fn a_dual_clutch_creeps_pulls_away_and_stops_on_its_own() {
+    let track = circle(5000.0);
+    // Creep with neither pedal pressed; hold still on the brake.
+    let mut car = Car::new(gt3_dual_clutch(40.0), &track, 0.0, 0.0, 0.0, 1);
+    roll(&mut car, &track, None, Controls::default(), 5.0);
+    assert!(
+        car.speed() > 1.0 / 3.6,
+        "no creep: {:.2} km/h",
+        car.speed() * 3.6
+    );
+    let mut car = Car::new(gt3_dual_clutch(40.0), &track, 0.0, 0.0, 0.0, 1);
+    let brake = Controls {
+        brake: 0.2,
+        ..Default::default()
+    };
+    roll(&mut car, &track, None, brake, 5.0);
+    assert!(car.speed() < 0.1 / 3.6);
+    // Pulls away at full throttle without stalling, and brakes to rest in gear without
+    // stalling either, dropping gears as it slows.
+    let full = Controls {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    roll(&mut car, &track, None, full, 3.0);
+    assert!(car.speed() > 60.0 / 3.6, "{:.1} km/h", car.speed() * 3.6);
+    car.step(
+        &track,
+        &Controls {
+            shift: Shift::Up,
+            ..full
+        },
+    );
+    roll(&mut car, &track, None, full, 2.0);
+    roll(
+        &mut car,
+        &track,
+        None,
+        Controls {
+            brake: 0.5,
+            ..Default::default()
+        },
+        6.0,
+    );
+    let dt = car.state.drivetrain;
+    assert!(car.speed() < 0.1 && !dt.stalled && dt.gear == 1, "{dt:?}");
 }

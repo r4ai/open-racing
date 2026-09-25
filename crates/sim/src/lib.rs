@@ -19,12 +19,15 @@ pub mod tire;
 pub mod track;
 pub mod weather;
 
-pub use assist::AutoShift;
+pub use assist::{AutoShift, BlipAssist, ClutchAssist};
 pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
 pub use controls::{Controls, Shift};
+pub use drivetrain::ShiftPhase;
 pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
-pub use params::{CarModel, CarParams, Drive, ParamsError};
+pub use params::{
+    AntiStall, CarModel, CarParams, Drive, ElectronicsParams, GearboxKind, ParamsError,
+};
 pub use tire::TireCondition;
 pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};
 pub use weather::{Air, Sky, Weather, WeatherSettings};
