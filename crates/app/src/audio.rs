@@ -16,6 +16,7 @@ use open_racing_sim::{GRAVITY, Surface};
 use crate::driving::{self, Simulation};
 use crate::effects::{slide, smoothstep};
 use crate::input::AppRequests;
+use crate::settings::SettingsOpen;
 
 const SAMPLE_RATE: u32 = 44_100;
 const SR: f32 = SAMPLE_RATE as f32;
@@ -348,7 +349,12 @@ fn spawn(mut commands: Commands, mut synths: ResMut<Assets<CarSynth>>, sim: Res<
     });
 }
 
-fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<CarSound>) {
+fn update(
+    sim: Res<Simulation>,
+    requests: Res<AppRequests>,
+    settings: Res<SettingsOpen>,
+    mut sound: ResMut<CarSound>,
+) {
     if requests.toggle_mute {
         sound.muted = !sound.muted;
     }
@@ -382,7 +388,9 @@ fn update(sim: Res<Simulation>, requests: Res<AppRequests>, mut sound: ResMut<Ca
     let rpm = drivetrain.rpm();
     let shifted = drivetrain.gear != sound.last_gear;
     sound.last_gear = drivetrain.gear;
-    let master = if sound.muted { 0.0 } else { 1.0 };
+    // Physics pauses on the settings screen, but its last engine and tyre state
+    // remains live in the audio thread. Fade that state out until driving resumes.
+    let master = if sound.muted || settings.0 { 0.0 } else { 1.0 };
     let mut knobs = sound.knobs.lock().unwrap();
     *knobs = Knobs {
         rpm: rpm as f32,

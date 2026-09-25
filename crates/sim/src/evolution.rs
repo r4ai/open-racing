@@ -62,9 +62,10 @@ const LINE_SPACING: f64 = 10.0;
 /// Distance the racing line keeps from the track edges (half a car and a little), m.
 const LINE_MARGIN: f64 = 1.3;
 /// The rubbered band: full rubber within this distance of the line, none beyond the
-/// outer one, m. Cars do not all drive the same line, so the band is wider than a car.
+/// outer one, m. The outer edge is limited by the road edge on narrow sections.
+/// Cars do not all drive the same line, so the band is wider than a car.
 const BAND_INNER: f64 = 0.5;
-const BAND_OUTER: f64 = 4.0;
+const BAND_OUTER: f64 = 5.0;
 /// Effective top asphalt depth, m, heated over one grid cell.
 const HEATED_DEPTH: f64 = 0.002;
 /// Asphalt density and specific heat, kg/m³ and J/(kg·K), from FHWA-HRT-04-127.
@@ -207,12 +208,22 @@ impl RubberMap {
             let d_line = at(&line.offset, s);
             let work = at(&line.work, s);
             let strength = STRAIGHT_RUBBER + (1.0 - STRAIGHT_RUBBER) * work;
+            let road = track.sample_at(s);
+            let left_outer = BAND_OUTER.min(road.width_left - d_line - CELL_D);
+            let right_outer = BAND_OUTER.min(road.width_right + d_line - CELL_D);
             offsets[r] = d_line as f32;
             for c in 0..cols {
                 let d = d0 + (c as f64 + 0.5) * CELL_D;
                 let from_line = d - d_line;
-                band[r * cols + c] =
-                    (strength * (1.0 - smoothstep(BAND_INNER, BAND_OUTER, from_line.abs()))) as f32;
+                let outer = if from_line >= 0.0 {
+                    left_outer
+                } else {
+                    right_outer
+                };
+                band[r * cols + c] = (strength
+                    * (1.0
+                        - smoothstep(BAND_INNER, outer.max(BAND_INNER + CELL_D), from_line.abs())))
+                    as f32;
             }
         }
         Self {
@@ -738,7 +749,7 @@ mod tests {
                 corner = corner.max(on_line);
             }
             // Far off the line: clean but not rubbered in.
-            let off = if line > 0.0 { line - 5.0 } else { line + 5.0 };
+            let off = if line > 0.0 { line - 6.0 } else { line + 6.0 };
             assert_close(e.grip_at(Surface::Asphalt, s, off), OFF_LINE_GRIP);
             assert_close(e.grip_at(Surface::Kerb, s, off), 1.0);
             // The line cuts to the inside of corners.
@@ -758,11 +769,21 @@ mod tests {
         let e = TrackEvolution::new(map.clone(), TrackCondition::Optimum.grip(), 0.0);
         let s = 100.0;
         let line = map.racing_line(s);
-        let levels = [0.0, 1.5, 3.0, 5.0].map(|offset| e.rubber_at(s, line + offset));
-        assert!(levels[0] > levels[1] && levels[1] > levels[2]);
-        assert!(levels[2] > levels[3] + 0.01, "{levels:?}");
-        // A narrow circuit can end inside the shoulder of this broad band.
-        assert!(levels[3] < levels[0] * 0.2, "{levels:?}");
+        let road = track.sample_at(s);
+        let direction = if road.width_left - line > road.width_right + line {
+            1.0
+        } else {
+            -1.0
+        };
+        let levels =
+            [0.0, 1.5, 3.0, 4.0, 5.0].map(|offset| e.rubber_at(s, line + direction * offset));
+        assert!(
+            levels.windows(2).all(|pair| pair[0] > pair[1]),
+            "{levels:?}"
+        );
+        // The broad side still carries a fading shoulder past 4 m, then reaches
+        // bare asphalt by 5 m.
+        assert!(levels[3] > 0.01 && levels[4] < 0.01, "{levels:?}");
     }
 
     #[test]
