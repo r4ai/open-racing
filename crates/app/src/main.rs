@@ -77,6 +77,11 @@ fn main() {
     let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "open-racing".into(),
+            resolution: if std::env::var_os("OPEN_RACING_CAPTURE_QUALITY").is_some() {
+                bevy::window::WindowResolution::new(2560, 1440).with_scale_factor_override(1.0)
+            } else {
+                default()
+            },
             // In VR the headset paces the frames; the window must not hold them back.
             present_mode: if args.vr {
                 PresentMode::AutoNoVsync

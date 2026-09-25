@@ -1,454 +1,240 @@
-// Clouds in four layers, from the simulation's weather (see `open_racing_sim::weather`):
-// - cumulus and stratus/stratocumulus, ray marched as volumes. Cumulus have flat bases at
-//   the condensation level and billowing tops that tower where the cloud map is dense;
-//   stratus is a flatter, smoother deck;
-// - altostratus/altocumulus and cirrus, thin sheets drawn where the view ray meets them.
-//
-// Where each layer has cloud comes from the simulation's cloud map (two patterns blended
-// by `weights`, above `threshold`, at the layer's scale), so the clouds drawn are those
-// that shade the road. Perlin–Worley noise breaks the map into billows and finer Worley
-// noise erodes their edges. Sunlight is marched towards the sun through the cloud, with
-// an approximation of multiple scattering (Wrenninge) and a two-lobed phase function for
-// the silver lining; the sky lights the tops and the ground the bases.
-//
-// The mesh is a large sphere around the scene drawn at infinite depth, so it only
-// covers pixels where the sky shows.
-
-#import bevy_pbr::{
-    mesh_functions,
-    forward_io::{Vertex, VertexOutput},
-    mesh_view_bindings::{view, globals},
+// Moisture-driven cloud rendering. HDR radiance is pre-exposed before storage.
+// Shape/erosion and scattering follow the published Horizon/Nubis approach;
+// the large-scale density comes from the CPU moist-convection model.
+struct Cirrus {
+    altitude: f32, threshold: f32, cover: f32, scale: f32,
+    offset: vec2<f32>, weights: vec2<f32>,
 }
-
-struct Layer {
-    // World heights of the base and of the highest tops.
-    base: f32,
-    top: f32,
-    threshold: f32,
-    cover: f32,
-    // Shift of the layer's pattern (map X, Y), and the patterns' weights.
-    offset: vec2<f32>,
-    weights: vec2<f32>,
-    // Size of the pattern relative to the map, and extinction per m at full density.
-    scale: f32,
-    extinction: f32,
-    // Threshold of the convective cells.
-    cell_threshold: f32,
-    // Uniform arrays step in 16 bytes.
-    _pad: vec3<f32>,
-}
-
 struct CloudParams {
-    // Towards the sun, world space.
-    sun_direction: vec3<f32>,
-    steps: u32,
-    // Sunlight reaching the clouds, lux.
-    sun_illuminance: vec3<f32>,
-    light_steps: u32,
-    // Radiance of the sky over the clouds and of the ground under them, cd/m².
-    sky_radiance: vec3<f32>,
-    // Strength of the edge erosion by the detail noise, 0 turns it off.
-    detail: f32,
-    ground_radiance: vec3<f32>,
-    // World height of the planet's centre.
-    planet_centre: f32,
-    // Radiance of the haze at the horizon, cd/m².
-    horizon_radiance: vec3<f32>,
-    // 1 to vary the ray start every frame (for TAA), 0 for a fixed pattern.
-    temporal: f32,
-    // Direction the cirrus streaks along (world X, Z).
-    streaks: vec2<f32>,
-    // Scale from the simulation's extinction to the drawn clouds'.
-    density_scale: f32,
-    _pad: f32,
-    // How far the cumulus tops lean downwind of their bases (world X, Z), m.
-    shear: vec2<f32>,
-    _pad2: vec2<f32>,
-    // Cumulus, stratus, middle, cirrus.
-    layers: array<Layer, 4>,
+    sun_direction: vec3<f32>, steps: u32,
+    sun_illuminance: vec3<f32>, light_steps: u32,
+    sky_radiance: vec3<f32>, detail: f32,
+    ground_radiance: vec3<f32>, base_height: f32,
+    horizon_radiance: vec3<f32>, blend: f32,
+    shape_offset: vec2<f32>, detail_offset: vec2<f32>,
+    frame_ages: vec2<f32>, streaks: vec2<f32>,
+    cirrus_phase: vec2<f32>, noise_mean: vec2<f32>,
+    upper_wind: vec2<f32>, occupied_bands: u32, march_base: f32,
+    winds: array<vec4<f32>, 32>, cirrus: Cirrus,
+}
+struct Uniforms {
+    params: CloudParams,
+    world_from_clip: mat4x4<f32>, previous_clip_from_world: mat4x4<f32>,
+    camera: vec4<f32>, previous_camera: vec4<f32>,
+    resolution: vec2<f32>, motion: vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+struct Output { @location(0) color: vec4<f32>, @location(1) depth: f32 }
+fn direction(uv: vec2<f32>) -> vec3<f32> {
+    let p = u.world_from_clip * vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.5, 1.0);
+    return normalize(p.xyz / p.w - u.camera.xyz);
+}
+fn height(p: vec3<f32>) -> f32 {
+    let horizontal = p.xz - u.camera.xz;
+    return p.y - u.params.base_height + dot(horizontal, horizontal) / 12720000.0;
+}
+fn wind(h: f32) -> vec2<f32> {
+    if h > 6000.0 { return u.params.upper_wind; }
+    let z = clamp(h / 187.5 - 0.5, 0.0, 31.0);
+    return mix(u.params.winds[u32(z)].zw, u.params.winds[min(u32(z)+1u,31u)].zw, fract(z));
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: CloudParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var cloud_map: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var cloud_map_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var shape_noise: texture_3d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var shape_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var detail_noise: texture_3d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var detail_sampler: sampler;
+#ifdef MARCH
+@group(1) @binding(0) var cloud_map: texture_2d<f32>;
+@group(1) @binding(1) var shape_noise: texture_3d<f32>;
+@group(1) @binding(2) var detail_noise: texture_3d<f32>;
+@group(1) @binding(3) var field: texture_3d<f32>;
+@group(1) @binding(4) var repeating: sampler;
 
-const PI: f32 = 3.14159265;
-const EARTH_RADIUS: f32 = 6360000.0;
-// Must match `CLOUD_MAP_PERIOD` and `CLOUD_SOFTNESS` in the simulation.
-const MAP_PERIOD: f32 = 16384.0;
-const SOFTNESS: f32 = 0.75;
-// Must match `CELL_SOFTNESS` in the simulation.
-const CELL_SOFTNESS: f32 = 0.15;
-// Edge of the tiles of the shape and detail noise, m.
-const SHAPE_TILE: f32 = 2600.0;
-const DETAIL_TILE: f32 = 320.0;
-// Distance over which far cloud fades into the haze, m.
-const FADE_DISTANCE: f32 = 38000.0;
-// Farthest the volumes are marched, and the farthest sheet drawn, m.
-const MAX_MARCH: f32 = 50000.0;
-const MAX_SHEET: f32 = 90000.0;
-// Sheets are drawn as dense as the simulation's layers: their holes are resolved there.
-const SHEET_DENSITY_SCALE: f32 = 1.0;
-// Step along the view ray: a share of the distance, within these bounds at 64 steps, m.
-const STEP_SHARE: f32 = 0.012;
-const STEP_RANGE: vec2<f32> = vec2<f32>(25.0, 700.0);
-// First step of the march towards the sun, m; each is longer by `LIGHT_GROWTH`.
-const LIGHT_STEP: f32 = 40.0;
-const LIGHT_GROWTH: f32 = 1.9;
-
-@vertex
-fn vertex(vertex: Vertex) -> VertexOutput {
-    var out: VertexOutput;
-    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
-    out.world_position = mesh_functions::mesh_position_local_to_world(
-        world_from_local,
-        vec4<f32>(vertex.position, 1.0),
-    );
-    var clip = view.clip_from_world * vec4<f32>(out.world_position.xyz, 1.0);
-    // Infinitely far (reverse Z): only where nothing else was drawn.
-    clip.z = 0.0;
-    out.position = clip;
-    return out;
+fn field_density(p: vec3<f32>) -> f32 {
+    let h = height(p);
+    if h < 0.0 || h >= 6000.0 { return 0.0; }
+    let z = clamp(h / 187.5 - 0.5, 0.0, 31.0);
+    let winds = mix(u.params.winds[u32(z)], u.params.winds[min(u32(z)+1u,31u)], fract(z));
+    let a = vec2<f32>(p.x, -p.z) - winds.xy * u.params.frame_ages.x;
+    let b = vec2<f32>(p.x, -p.z) - winds.zw * u.params.frame_ages.y;
+    let y = clamp(h / 6000.0, 0.5/32.0, 31.5/32.0);
+    let previous = textureSampleLevel(field, repeating, vec3<f32>(a.x/16384.0, y, a.y/16384.0), 0.0).r;
+    let current = textureSampleLevel(field, repeating, vec3<f32>(b.x/16384.0, y, b.y/16384.0), 0.0).g;
+    return mix(previous, current, u.params.blend);
 }
 
-fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
-    return c + (x - a) / (b - a) * (d - c);
-}
-
-// Distance along the ray from inside a sphere to where it leaves it.
-fn exit_sphere(ro: vec3<f32>, rd: vec3<f32>, centre: vec3<f32>, radius: f32) -> f32 {
-    let oc = ro - centre;
-    let b = dot(oc, rd);
-    let c = dot(oc, oc) - radius * radius;
-    let h = b * b - c;
-    if h < 0.0 {
-        return -1.0;
+fn density(p: vec3<f32>, footprint: f32, detailed: bool) -> f32 {
+    let coarse = field_density(p);
+    if coarse < 0.000015 { return 0.0; }
+    let q = p - vec3<f32>(u.params.shape_offset.x, u.params.base_height, -u.params.shape_offset.y);
+    let lod = max(log2(max(footprint, 1.0) / (2600.0/64.0)), 0.0);
+    let n = textureSampleLevel(shape_noise, repeating, q/2600.0, lod);
+    // Broad mass dominates. Detail only sculpts the dilute boundary, never turns
+    // the whole volume into a stack of equal Worley bubbles.
+    let edge = 1.0 - smoothstep(0.015, 0.05, coarse);
+    // The eroded shape was mip-filtered on the CPU. Normalising by its measured
+    // mean preserves the coarse liquid-water extinction at every footprint.
+    var shaped = coarse * mix(1.0, n.r / max(u.params.noise_mean.x,0.001), edge);
+    if detailed && u.params.detail > 0.0 && footprint < 160.0 {
+        let d = p - vec3<f32>(u.params.detail_offset.x, u.params.base_height, -u.params.detail_offset.y);
+        let fine = textureSampleLevel(detail_noise, repeating, d/320.0, max(log2(max(footprint,1.0)/10.0), 0.0)).r;
+        let erosion = 0.28 * edge * u.params.detail * (1.0-smoothstep(60.0,160.0,footprint));
+        shaped *= (1.0 - erosion * fine) / (1.0 - erosion * u.params.noise_mean.y);
     }
-    return -b + sqrt(h);
+    return shaped;
 }
 
-// Distance to where the ray meets a sphere from outside, or -1.
-fn hit_sphere(ro: vec3<f32>, rd: vec3<f32>, centre: vec3<f32>, radius: f32) -> f32 {
-    let oc = ro - centre;
-    let b = dot(oc, rd);
-    let c = dot(oc, oc) - radius * radius;
-    let h = b * b - c;
-    if h < 0.0 || b > 0.0 {
-        return -1.0;
-    }
-    return -b - sqrt(h);
+// Stable local curved-layer intersection: no subtraction of Earth-radius squares.
+fn shell(rd: vec3<f32>, altitude: f32) -> f32 {
+    let a = max(dot(rd.xz, rd.xz) / 12720000.0, 1e-12);
+    let c = altitude - (u.camera.y - u.params.base_height);
+    let root = sqrt(max(rd.y*rd.y + 4.0*a*c, 0.0));
+    if rd.y >= 0.0 { return max(2.0*c/max(rd.y+root,1e-8),0.0); }
+    return max((-rd.y + root)/(2.0*a),0.0);
 }
-
-// Layer `i` over a world point: how far the map's regions allow the layer (0..1), and
-// how far in from the edge of its convective cell the point is (0 at the edge, 1 at the
-// middle; negative outside).
-fn layer_map(i: u32, p: vec3<f32>) -> vec2<f32> {
-    let l = params.layers[i];
-    if l.cover <= 0.001 {
-        return vec2<f32>(0.0, -1.0);
-    }
-    let at = (vec2<f32>(p.x, -p.z) - l.offset) / l.scale;
-    let t = textureSampleLevel(cloud_map, cloud_map_sampler, at / MAP_PERIOD, 0.0);
-    let potential = dot(l.weights, (t.rg * 255.0 - 128.0) / 32.0);
-    let region = saturate((potential - l.threshold) / SOFTNESS);
-    return vec2<f32>(region, (t.b - l.cell_threshold) / max(1.0 - l.cell_threshold, 0.05));
+fn hg(c: f32, g: f32) -> f32 {
+    return (1.0-g*g) / (12.5663706 * pow(max(1.0+g*g-2.0*g*c,0.01),1.5));
 }
-
-// Cover of layer `i` over a world point, 0..1, as `CloudLayer::density` in the
-// simulation: the regions, the middle of each cell first.
-fn layer_cover(i: u32, p: vec3<f32>) -> f32 {
-    let m = layer_map(i, p);
-    let l = params.layers[i];
-    let cell = m.y * max(1.0 - l.cell_threshold, 0.05);
-    return m.x * saturate(cell / CELL_SOFTNESS);
+fn phase(c: f32, g: f32) -> f32 { return 0.7*hg(c,0.75*g) + 0.3*hg(c,-0.2*g); }
+fn noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.9829189*fract(dot(pixel,vec2<f32>(0.06711056,0.00583715))) + u.motion.z*0.61803398875);
 }
-
-// Base cloud shape (Schneider): the Perlin–Worley noise dilated by the Worley FBM, so
-// that the billows bulge out of a rounded mass, 0..1.
-fn base_shape(q: vec3<f32>) -> f32 {
-    let n = textureSampleLevel(shape_noise, shape_sampler, q / SHAPE_TILE, 0.0);
-    let worley = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
-    return saturate(remap(n.r, worley - 1.0, 1.0, 0.0, 1.0));
-}
-
-// Erodes the edges of density `d` with the detail noise (Schneider): wispy, curly
-// fibres at the base, billows higher up.
-fn erode(d: f32, q: vec3<f32>, h: f32, strength: f32) -> f32 {
-    let n = textureSampleLevel(detail_noise, detail_sampler, q / DETAIL_TILE, 0.0);
-    let fine = n.r * 0.625 + n.g * 0.25 + n.b * 0.125;
-    let e = mix(fine, 1.0 - fine, saturate(h * 8.0)) * strength * params.detail;
-    return saturate(remap(d, e, 1.0, 0.0, 1.0));
-}
-
-// Coverage-shaped density (Schneider): the shape where the cover lets it through, and
-// thinner where the cover is light.
-fn with_cover(shape: f32, cover: f32) -> f32 {
-    return saturate(remap(shape, 1.0 - cover, 1.0, 0.0, 1.0)) * cover;
-}
-
-// Extinction per m at a point of the low volumes (cumulus and stratus), world height
-// `y` of the point on the curved Earth; no detail for the light march.
-fn extinction(p: vec3<f32>, y: f32, detailed: bool) -> f32 {
-    var sigma = 0.0;
-    // Cumulus: a flat base at the condensation level; each cell a dome, rising highest
-    // over the middle of the cell, its top leaning downwind with the shear.
-    let cu = params.layers[0];
-    if y > cu.base && y < cu.top {
-        let h = (y - cu.base) / (cu.top - cu.base);
-        let lean = vec3<f32>(params.shear.x, 0.0, params.shear.y) * h;
-        let m = layer_map(0u, p - lean);
-        // A dome over the cell: as high as a hemisphere at this distance from the middle,
-        // lower where the region's cover is thin.
-        let x = saturate(m.y);
-        let reach = sqrt(x * (2.0 - x)) * (0.45 + 0.55 * m.x);
-        if m.x > 0.0 && m.y > 0.0 && h < reach {
-            let hc = h / reach;
-            let gradient = saturate(remap(hc, 0.0, 0.06, 0.0, 1.0))
-                * saturate(remap(hc, 0.6, 1.0, 1.0, 0.0));
-            // The shape noise always carves the surface into billows.
-            let c = min(m.x * smoothstep(0.0, 0.35, m.y), 0.55);
-            let q = p - vec3<f32>(cu.offset.x, 0.0, -cu.offset.y) - lean;
-            var d = with_cover(base_shape(q) * gradient, c);
-            if detailed && d > 0.0 {
-                d = erode(d, q, hc, 0.6);
-            }
-            sigma += d * cu.extinction;
-        }
-    }
-    // Stratus: a deck with a soft base and top, lumpy while it is broken into
-    // stratocumulus cells, almost smooth when closed.
-    let st = params.layers[1];
-    if y > st.base && y < st.top {
-        let c = layer_cover(1u, p);
-        if c > 0.0 {
-            let h = (y - st.base) / (st.top - st.base);
-            let gradient = saturate(remap(h, 0.0, 0.2, 0.0, 1.0))
-                * saturate(remap(h, 0.6, 1.0, 1.0, 0.0));
-            let q = p - vec3<f32>(st.offset.x, 0.0, -st.offset.y);
-            // Rolls of lumpy cloud; a closing deck smooths over.
-            let shape = mix(base_shape(q * vec3<f32>(1.2, 2.0, 1.2)), 1.0, 0.35 * st.cover * st.cover);
-            var d = with_cover(shape * gradient, min(c, 0.7 + 0.3 * st.cover));
-            if detailed && d > 0.0 {
-                d = erode(d, q, h, 0.5);
-            }
-            sigma += d * st.extinction;
-        }
-    }
-    return sigma * params.density_scale;
-}
-
-fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
-    let g2 = g * g;
-    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
-}
-
-// Strong forward scattering (the silver lining) with some back scattering; `scale`
-// flattens it for the higher orders of scattering.
-fn phase(cos_theta: f32, scale: f32) -> f32 {
-    return mix(
-        henyey_greenstein(cos_theta, -0.2 * scale),
-        henyey_greenstein(cos_theta, 0.8 * scale),
-        0.6,
-    );
-}
-
-// Interleaved gradient noise.
-fn ign(pixel: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
-}
-
-// Height of a point above the planet's centre, as a world height.
-fn height(p: vec3<f32>, centre: vec3<f32>) -> f32 {
-    return length(p - centre) + params.planet_centre;
-}
-
-struct Result {
-    light: vec3<f32>,
-    transmittance: f32,
-    distance: f32,
-}
-
-// Ray marches the low volumes between `t_start` and `t_end`.
-fn march(ro: vec3<f32>, rd: vec3<f32>, centre: vec3<f32>, t_start: f32, t_end: f32, jitter: f32) -> Result {
-    var r: Result;
-    r.transmittance = 1.0;
-    r.light = vec3<f32>(0.0);
-    let cos_theta = dot(rd, params.sun_direction);
-    let quality = 64.0 / f32(params.steps);
-    let low = min(params.layers[0].base, params.layers[1].base);
-    let high = max(params.layers[0].top, params.layers[1].top);
-    var weight_sum = 0.0;
-    var depth_sum = 0.0;
-    var t = t_start + clamp(t_start * STEP_SHARE, STEP_RANGE.x, STEP_RANGE.y) * quality * jitter;
-    for (var i = 0u; i < params.steps; i++) {
-        if t > t_end {
-            break;
-        }
-        let dt = clamp(t * STEP_SHARE, STEP_RANGE.x, STEP_RANGE.y) * quality;
-        let p = ro + rd * (t + 0.5 * dt);
-        let y = height(p, centre);
-        let sigma = extinction(p, y, true);
-        if sigma <= 0.0 {
-            // Empty air: stride on.
-            t += dt * 1.6;
-            continue;
-        }
-        // Optical depth towards the sun, in longer and longer steps.
-        var tau = 0.0;
-        var s = 0.0;
-        var ls = LIGHT_STEP;
-        for (var j = 0u; j < params.light_steps; j++) {
-            let q = p + params.sun_direction * (s + 0.5 * ls);
-            let yq = height(q, centre);
-            if yq > high {
-                break;
-            }
-            tau += extinction(q, yq, false) * ls;
-            s += ls;
-            ls *= LIGHT_GROWTH;
-        }
-        // Multiple scattering: octaves with less extinction and a flatter phase.
-        // Thick cloud scatters light many times over: each octave keeps more of the
-        // energy (a), spreads it more evenly (b) and reaches deeper (c).
-        var sun = 0.0;
-        var a = 1.0;
-        var b = 1.0;
-        var c = 1.0;
-        for (var k = 0; k < 4; k++) {
-            sun += a * phase(cos_theta, b) * exp(-tau * c);
-            a *= 0.6;
-            b *= 0.5;
-            c *= 0.5;
-        }
-        // Powder (Schneider): light scattered towards the viewer has to come from inside,
-        // so edges seen away from the sun are darker.
-        let powder = mix(1.0 - exp(-sigma * 300.0), 1.0, saturate(cos_theta * 0.5 + 0.5));
-        // Light scattered in from the sky above and the ground below: bright tops, grey
-        // bases (Frostbite).
-        let up = saturate((y - low) / max(high - low, 1.0));
-        let ambient = params.sky_radiance * (0.15 + 0.4 * up) + params.ground_radiance * 0.35 * (1.0 - up);
-        let scattering = params.sun_illuminance * sun * powder + ambient;
-        let step_t = exp(-sigma * dt);
-        let added = r.transmittance * (1.0 - step_t);
-        r.light += scattering * added;
-        depth_sum += t * added;
-        weight_sum += added;
-        r.transmittance *= step_t;
-        if r.transmittance < 0.01 {
-            break;
-        }
-        t += dt;
-    }
-    r.distance = depth_sum / max(weight_sum, 1e-6);
-    return r;
-}
-
-// A thin sheet (altostratus/altocumulus, cirrus) where the view ray meets its middle.
-fn sheet(i: u32, ro: vec3<f32>, rd: vec3<f32>, centre: vec3<f32>) -> Result {
-    var r: Result;
-    r.transmittance = 1.0;
-    r.light = vec3<f32>(0.0);
-    let l = params.layers[i];
-    if l.cover <= 0.001 {
-        return r;
-    }
-    let middle = 0.5 * (l.base + l.top);
-    let t = exit_sphere(ro, rd, centre, middle - params.planet_centre);
-    if t <= 0.0 || t > MAX_SHEET {
-        return r;
-    }
-    let p = ro + rd * t;
-    let c = layer_cover(i, p);
-    if c <= 0.0 {
-        return r;
-    }
-    let q = p - vec3<f32>(l.offset.x, 0.0, -l.offset.y);
-    var d: f32;
-    if i == 3u {
-        // Cirrus: fibres drawn out along the upper wind and curled by it (a warp by the
-        // coarser noise).
-        let warp = textureSampleLevel(shape_noise, shape_sampler, vec3<f32>(q.xz / 9000.0, 0.7).xzy, 0.0).gb - 0.5;
-        let w = q.xz + warp * 2500.0;
-        let along = dot(w, params.streaks);
-        let across = dot(w, vec2<f32>(-params.streaks.y, params.streaks.x));
-        let n = textureSampleLevel(
-            detail_noise, detail_sampler, vec3<f32>(along / 7000.0, across / 1400.0, 0.3), 0.0
-        );
-        let fibres = n.r * 0.5 + n.g * 0.35 + n.b * 0.15;
-        d = saturate(remap(fibres, 1.0 - c, 1.0, 0.0, 1.0)) * c;
-    } else {
-        // Altocumulus: rows of small cells while broken; altostratus: a smooth sheet.
-        let n = textureSampleLevel(shape_noise, shape_sampler, vec3<f32>(q.xz / 3000.0, 0.5).xzy, 0.0);
-        let fine = textureSampleLevel(detail_noise, detail_sampler, vec3<f32>(q.xz / 1600.0, 0.5).xzy, 0.0);
-        let cells = mix(n.g * 0.7 + n.b * 0.3, 1.0, c * c) * (0.55 + 0.45 * fine.r);
-        d = saturate(remap(cells, 1.0 - c, 1.0, 0.0, 1.0)) * c;
-    }
-    // Along the view ray through the sheet, and the sun's ray down to its middle.
-    let up = normalize(p - centre);
-    let thickness = l.top - l.base;
-    let k = d * l.extinction * SHEET_DENSITY_SCALE * thickness;
-    let tau = k / max(abs(dot(rd, up)), 0.06);
-    let tau_sun = 0.5 * k / max(dot(params.sun_direction, up), 0.06);
-    let alpha = 1.0 - exp(-tau);
-    let cos_theta = dot(rd, params.sun_direction);
-    let sun = params.sun_illuminance * (phase(cos_theta, 1.0) * exp(-tau_sun) + 0.25 * phase(cos_theta, 0.3));
-    r.light = (sun + params.sky_radiance) * alpha;
-    r.transmittance = 1.0 - alpha;
-    r.distance = t;
-    return r;
-}
-
-// Fades light seen at `distance` into the haze at the horizon.
-fn haze(light: vec3<f32>, alpha: f32, distance: f32) -> vec3<f32> {
-    let fade = exp(-distance / FADE_DISTANCE);
-    return light * fade + params.horizon_radiance * alpha * (1.0 - fade);
-}
-
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let ro = view.world_position;
-    let rd = normalize(in.world_position.xyz - ro);
-    let centre = vec3<f32>(ro.x, params.planet_centre, ro.z);
-    // No cloud below the horizon.
-    if hit_sphere(ro, rd, centre, EARTH_RADIUS) > 0.0 {
-        return vec4<f32>(0.0);
+fn fragment(@location(0) uv: vec2<f32>, @builtin(position) pixel: vec4<f32>) -> Output {
+    let rd = direction(uv);
+    var out: Output;
+    out.color = vec4<f32>(0.0,0.0,0.0,1.0);
+    out.depth = 60000.0;
+    if rd.y < -0.035 { return out; }
+    let start = shell(rd, u.params.march_base);
+    let end = min(shell(rd, 6000.0), 50000.0);
+    // Spend the view budget inside potentially occupied intervals, not in the
+    // kilometres of clear air between low cloud and the top of the domain.
+    var occupied_distance = 0.0;
+    for (var band=0u;band<32u;band++) {
+        if (u.params.occupied_bands & (1u << band)) != 0u {
+            let a = max(start,shell(rd,f32(band)*187.5));
+            let b = min(end,shell(rd,f32(band+1u)*187.5));
+            occupied_distance += max(b-a,0.0);
+        }
     }
-    var jitter = ign(in.position.xy);
-    if params.temporal > 0.5 {
-        jitter = fract(jitter + f32(globals.frame_count % 64u) * 0.618034);
-    }
-
-    // Low volumes.
+    let dt = max(occupied_distance/f32(u.params.steps), 1.0);
+    var t = start;
+    let jitter = noise(pixel.xy);
     var light = vec3<f32>(0.0);
     var transmittance = 1.0;
-    let low = min(params.layers[0].base, params.layers[1].base);
-    let high = max(params.layers[0].top, params.layers[1].top);
-    if params.layers[0].cover > 0.001 || params.layers[1].cover > 0.001 {
-        let t_start = max(exit_sphere(ro, rd, centre, low - params.planet_centre), 0.0);
-        let t_end = min(exit_sphere(ro, rd, centre, high - params.planet_centre), MAX_MARCH);
-        if t_end > t_start {
-            let r = march(ro, rd, centre, t_start, t_end, jitter);
-            light = haze(r.light, 1.0 - r.transmittance, r.distance);
-            transmittance = r.transmittance;
+    var depth_sum = 0.0;
+    var weight = 0.0;
+    let cos_theta = dot(rd,u.params.sun_direction);
+    let phase0 = phase(cos_theta,1.0);
+    let phase1 = phase(cos_theta,0.5);
+    let phase2 = phase(cos_theta,0.25);
+    var jumps = 0u;
+    for (var i=0u; i<u.params.steps;) {
+        if t >= end || transmittance < 0.01 { break; }
+        let step_length = min(dt,end-t);
+        let sample_t = t + jitter*step_length;
+        let p = u.camera.xyz + rd*sample_t;
+        let band = u32(clamp(height(p)/187.5,0.0,31.0));
+        if (u.params.occupied_bands & (1u << band)) == 0u {
+            // Jump to the next occupied height interval. Occupancy is dilated
+            // over both snapshots, so interpolation/wind cannot reveal a hole.
+            t = max(t+step_length,shell(rd,f32(band+1u)*187.5)+0.01);
+            jumps += 1u;
+            if jumps > 32u { break; }
+            continue;
+        }
+        i += 1u;
+        let footprint = max(sample_t*u.motion.w,step_length*0.5);
+        let sigma = density(p,footprint,true);
+        if sigma > 0.0 {
+            var tau = 0.0;
+            var distance = 0.0;
+            var ls = 100.0;
+            for (var j=0u;j<u.params.light_steps;j++) {
+                tau += density(p + u.params.sun_direction*(distance+ls*0.5),ls,false)*ls;
+                distance += ls;
+                ls *= 2.0;
+            }
+            let sun = phase0*exp(-tau) + 0.5*phase1*exp(-tau*0.45) + 0.25*phase2*exp(-tau*0.2);
+            let sky_visibility = exp(-field_density(p+vec3<f32>(0.0,250.0,0.0))*200.0);
+            let ambient = u.params.sky_radiance*(0.2+0.55*sky_visibility) + u.params.ground_radiance*0.18;
+            let step_t = exp(-sigma*step_length);
+            let added = transmittance*(1.0-step_t);
+            let haze = exp(-sample_t/50000.0);
+            light += added * mix(u.params.horizon_radiance,u.params.sun_illuminance*sun+ambient,haze);
+            depth_sum += sample_t*added;
+            weight += added;
+            transmittance *= step_t;
+        }
+        // Empty samples skip the expensive light march.
+        t += step_length;
+    }
+    // Thin ice cloud above the moist simulation domain.
+    let cirrus = u.params.cirrus;
+    if cirrus.cover > 0.001 && transmittance > 0.01 {
+        let ct = shell(rd,cirrus.altitude);
+        if ct < 90000.0 {
+            let p = u.camera.xyz + rd*ct;
+            let at = (vec2<f32>(p.x,-p.z)-cirrus.offset)/cirrus.scale/16384.0;
+            let map = textureSampleLevel(cloud_map,repeating,at,0.0);
+            let cover = clamp((dot(cirrus.weights,(map.rg*255.0-128.0)/32.0)-cirrus.threshold)/0.75,0.0,1.0);
+            let along = dot(p.xz,u.params.streaks)/7000.0 - u.params.cirrus_phase.x;
+            let across = dot(p.xz,vec2<f32>(-u.params.streaks.y,u.params.streaks.x))/1200.0 - u.params.cirrus_phase.y;
+            let fibres = textureSampleLevel(detail_noise,repeating,vec3<f32>(along,across,0.4),1.0).r;
+            let alpha = 1.0-exp(-cover*fibres*0.45/max(rd.y,0.12));
+            let added = transmittance*alpha;
+            light += added * mix(u.params.horizon_radiance,u.params.sky_radiance+u.params.sun_illuminance*phase1*0.4,exp(-ct/50000.0));
+            depth_sum += ct*added; weight += added; transmittance *= 1.0-alpha;
         }
     }
-    // Sheets behind them, the higher behind the lower.
-    for (var i = 2u; i < 4u; i++) {
-        if transmittance < 0.01 {
-            break;
-        }
-        let r = sheet(i, ro, rd, centre);
-        light += transmittance * haze(r.light, 1.0 - r.transmittance, r.distance);
-        transmittance *= r.transmittance;
-    }
-    let alpha = 1.0 - transmittance;
-    if alpha <= 0.0 {
-        return vec4<f32>(0.0);
-    }
-    // Premultiplied: the sky behind shows through by the transmittance.
-    return vec4<f32>(light * view.exposure, alpha);
+    out.color = vec4<f32>(light*u.camera.w, transmittance);
+    if weight > 0.0001 { out.depth = depth_sum/weight; }
+    return out;
 }
+#endif
+
+#ifdef RESOLVE
+@group(1) @binding(0) var current: texture_2d<f32>;
+@group(1) @binding(1) var current_depth: texture_2d<f32>;
+@group(1) @binding(2) var history: texture_2d<f32>;
+@group(1) @binding(3) var history_depth: texture_2d<f32>;
+@group(1) @binding(4) var linear: sampler;
+@fragment
+fn fragment(@location(0) uv: vec2<f32>, @builtin(position) pixel: vec4<f32>) -> Output {
+    let size = vec2<i32>(u.resolution.xy);
+    let at = clamp(vec2<i32>(pixel.xy),vec2<i32>(0),size-1);
+    let now = textureLoad(current,at,0);
+    let depth = textureLoad(current_depth,at,0).r;
+    var out = Output(now,depth);
+    if u.motion.y <= 0.0 { return out; }
+    let world = u.camera.xyz + direction(uv)*depth;
+    let velocity = wind(height(world));
+    let previous_world = world - vec3<f32>(velocity.x,0.0,-velocity.y)*u.motion.x;
+    let clip = u.previous_clip_from_world*vec4<f32>(previous_world,1.0);
+    let previous_uv = clip.xy/clip.w*vec2<f32>(0.5,-0.5)+0.5;
+    if clip.w <= 0.0 || any(previous_uv < vec2<f32>(0.0)) || any(previous_uv > vec2<f32>(1.0)) { return out; }
+    let old_at = clamp(vec2<i32>(previous_uv*u.resolution.xy),vec2<i32>(0),size-1);
+    let old_depth = textureLoad(history_depth,old_at,0).r;
+    let expected_depth = distance(previous_world,u.previous_camera.xyz);
+    if abs(old_depth-expected_depth) > max(200.0,depth*0.08) { return out; }
+    var old = textureSampleLevel(history,linear,previous_uv,0.0);
+    old = vec4<f32>(old.rgb*u.camera.w/max(u.previous_camera.w,1e-8),old.a);
+    var lo = now; var hi = now;
+    for(var y=-1;y<=1;y++) { for(var x=-1;x<=1;x++) {
+        let c = textureLoad(current,clamp(at+vec2<i32>(x,y),vec2<i32>(0),size-1),0);
+        lo = min(lo,c); hi = max(hi,c);
+    }}
+    let weight = u.motion.y * (1.0-smoothstep(0.04,0.25,abs(old.a-now.a)));
+    out.color = mix(now,clamp(old,lo,hi),weight);
+    return out;
+}
+#endif
+
+#ifdef COMPOSITE
+@group(1) @binding(0) var resolved: texture_2d<f32>;
+@group(1) @binding(1) var linear: sampler;
+struct Composite { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 }
+@fragment
+fn fragment(@location(0) uv: vec2<f32>) -> Composite {
+    let cloud = textureSampleLevel(resolved,linear,uv,0.0);
+    // Reverse-Z sky only, per MSAA sample: geometry silhouettes stay crisp.
+    return Composite(vec4<f32>(cloud.rgb,1.0-cloud.a),0.0);
+}
+#endif

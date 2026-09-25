@@ -32,6 +32,7 @@ pub const CELL_SOFTNESS: f64 = 0.15;
 
 #[derive(Clone, Debug)]
 pub struct CloudMap {
+    pub(super) seed: u64,
     /// Row-major, x fastest: the two patterns' potentials, the cell value and nothing.
     texels: Vec<[u8; 4]>,
 }
@@ -63,6 +64,7 @@ impl CloudMap {
         let encode = |x: f64| (ENCODE_OFFSET + x * ENCODE_SCALE).round().clamp(0.0, 255.0) as u8;
         let cells = cells(seed);
         Self {
+            seed,
             texels: (0..n * n)
                 .map(|i| {
                     let c = (cells[i] * 255.0).round().clamp(0.0, 255.0) as u8;
