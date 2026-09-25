@@ -189,6 +189,27 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveStrip` | `road`, `side`, `name` | removes a strip |
 | `PutLine` / `RemoveLine` | `road`, `line` / `name` | adds, replaces or removes a painted line |
 | `PutBarrier` / `RemoveBarrier` | `road`, `barrier` / `name` | adds, replaces or removes a barrier |
+| `PutMark` / `RemoveMark` | `road`, `mark: (name, at, length, from, to, material)` / `name` | paints a mark across the road (a start line, a grid slot, a pit speed limit line) |
+| `FitCorners` | `road` | puts the road's strips and barriers laid round corners back round them; every change to a road does this anyway |
+
+A strip or barrier may carry `style` (the strip or wall type it was made from) and
+`corner: (part, apex, shift)`: laid round a corner (`part` is `Entry`, `Apex`, `Exit` or
+`Outside`), it stays with that corner however the corners are renumbered, and is
+refitted round it whenever the road changes, `shift` metres beyond its usual place. A
+barrier may carry `model: (model, length?, bend?, flip?)`, a glTF model repeated along it
+in place of its plain shape (its +X along the wall, +Z up, +Y towards the road); cars
+still hit the plain wall. A strip's `profile` may be `Shape([(x, height)])`: any
+cross-section, points at fractions across.
+
+**Strip and wall types**
+
+| operation | fields | what it does |
+| --- | --- | --- |
+| `PutStripStyle` / `RemoveStripStyle` | `style: (name, width, profile, surface, material, fade)` / `name` | adds or replaces a kind of kerb, gravel, run-off or verge; strips and splines made from it take its look (keeping their widths) |
+| `PutWallStyle` / `RemoveWallStyle` | `style: (name, height, thickness, material, model?)` / `name` | adds or replaces a kind of wall, rail, fence or tyre stack; barriers and walls made from it take its shape and model |
+
+New projects start with kerb, flat, raised, sausage and stepped kerbs, gravel, run-off
+and grass, and concrete walls, guard rails, tyre walls and catch fences.
 
 **Splines**
 
@@ -205,6 +226,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `SetPit` | `pit: Some((...))` or `None` | sets or removes the pit lane |
 | `SetTerrain` | `terrain` | sets the terrain |
 | `SetReference` | `reference: Some((image, center, width, rotation?, height?, opacity?, visible?))` or `None` | sets or removes the image the editor shows to trace a real circuit over; not part of the track |
+| `SetGeo` | `geo: Some((lon, lat))` or `None` | sets where the project's (0, 0) lies on the Earth |
 
 **Surfaces and materials**
 
@@ -226,15 +248,33 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 `trackctl centreline <project> <file> --road <name> [--main]` lays a road along a real
 circuit's centreline from a GPS track (`.gpx`), a KML line, a GeoJSON line (as
 OpenStreetMap exports give) or a CSV of `x, y[, z]` metres or `lon, lat[, ele]` under a
-header. Longitudes and latitudes become metres east and north of the line's middle, and
-the line is thinned to the nodes a spline needs to stay within `--tolerance` metres of it.
-The editor does the same from File › Import Centreline, and can lay a satellite image or
-track map under the view to trace over (the Reference image tab; `SetReference`).
+header. Longitudes and latitudes become metres east and north of the project's place on
+the Earth (the first line sets it, `SetGeo`), so later lines line up with it. The line
+is smoothed as a smoothing spline would (GPS jitter does not make wobbly roads or false
+corners) and thinned to the nodes a spline needs to stay within `--tolerance` metres of
+it. The editor does the same from File › Import Centreline, and can lay a satellite
+image or track map (PNG, JPEG, DDS) under the view to trace over, placed by a distance
+measured on it or by the longitudes and latitudes of its edges (the Reference image tab;
+`SetReference`).
+
+`trackctl dem <project> <file> [--lines a,b] [--offset m]` puts roads' and splines'
+nodes on the ground of elevation data: an ESRI ASCII grid (`.asc`) or `x y z` points
+(`.xyz`, `.csv`), in metres or longitudes and latitudes. The editor does the same from
+File › Heights from Elevation Data.
+
+`trackctl kerbs <project> [--corners 1,4] [--style kerb] [--width m] [--no-entry]
+[--no-apex] [--no-exit] [--outside gravel] [--outside-width m] [--wall "tyre wall"]
+[--wall-offset m]` lays kerbs, gravel or run-off and a wall round the road's corners, of
+the project's types. The editor's Corners tab does the same corner by corner, or on
+every corner at once.
+
+`trackctl paint <project>` paints the start/finish line and the grid slots' lines.
 
 `trackctl pitlane <project> [--from u --to u] [--left] [--gap m] [--width m] [--boxes n]`
 lays a pit lane road beside a stretch of the main road (by default round the start line):
-it leaves the track, runs parallel to it past the boxes, and rejoins it. The editor
-offers the same in Race markers › Pit lane.
+it leaves the track, runs parallel to it past the boxes, and rejoins it, with white
+edge lines and speed limit lines across it. The editor offers the same in Race markers ›
+Pit lane.
 
 ## Working on a track
 
@@ -242,6 +282,11 @@ offers the same in Race markers › Pit lane.
 2. Change the project with `trackctl apply`, or edit `project.ron` directly.
 3. Run `trackctl check --lap` to confirm the track still drives.
 
-Warnings point out a radius under 10 m, a grade over 20 %, and a road crossing itself on the level.
+Warnings point out a radius under 10 m, a grade over 20 %, a road crossing itself or
+another road on the level, and roads whose surfaces overlap away from where one starts
+or ends on the other.
+
+`cargo run -p open-racing-track-project --example build_time -- <project>` shows how
+long each step of a rebuild takes, as the editor rebuilds on every edit.
 
 The editor reloads `project.ron` when it changes on disk, so an agent's edits show up live.

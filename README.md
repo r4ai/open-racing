@@ -63,13 +63,15 @@ cargo trackctl info my-track --json       # facts: lengths, node distances, radi
 cargo trackctl apply my-track ops.json    # edits as operations, all or nothing
 cargo trackctl preview my-track           # plan view as PNG
 cargo trackctl centreline my-track lap.gpx --road gp --main   # a real circuit from GPX/KML/GeoJSON/CSV
-cargo trackctl kerbs my-track             # kerbs round every corner (entry, apex, exit)
+cargo trackctl kerbs my-track --outside gravel --wall "tyre wall"   # every corner's kerbs, gravel and wall
+cargo trackctl dem my-track heights.asc   # nodes on the ground of elevation data
+cargo trackctl paint my-track             # the start line and grid slots
 cargo trackctl pitlane my-track           # a pit lane beside the start straight, with boxes and a pit wall
 cargo trackctl bake my-track              # package in content/tracks/my-track/, checked with a test lap
 cargo run --release -p open-racing-app -- --track my-track
 ```
 
-The editor works as Blender does: Tab switches between object mode (pick roads, kerbs, walls and props) and edit mode (their nodes), G/R/S transform, and what is selected is orange. To build a real circuit, import its centreline (File › Import Centreline) or trace it over a satellite image (the Reference image tab, scaled with the Measure tool), then work corner by corner: the Corners tab numbers the turns, lays each one's kerbs, and Page Up/Page Down step through them; in the view, drag the road's edges at selected nodes, a kerb's or wall's outer edge, and the ends of their stretches, which catch on nodes and on corners' apexes. The Checks tab lists what will not drive well as you edit, View › Walk the Track looks along the road from a driver's eye, and a backup of `project.ron` is kept every few minutes (File › Restore Backup).
+The editor works as Blender does: Tab switches between object mode (pick roads, kerbs, walls and props) and edit mode (their nodes), G/R/S transform, and what is selected is orange. To build a real circuit, import its centreline (File › Import Centreline) or trace it over a satellite image (the Reference image tab, scaled with the Measure tool), then work corner by corner: the Corners tab numbers the turns, lays each one's entry, apex and exit kerbs, gravel or run-off and wall (they stay with their corner as the road changes), and Page Up/Page Down step through them; in the view, drag the road's edges at selected nodes, a kerb's or wall's outer edge, and the ends of their stretches, which catch on nodes and on corners' apexes. The Library tab holds the kinds of kerbs, strips, walls (optionally a glTF model repeated along them), materials (PNG, JPEG or DDS textures) and surfaces, made once and used anywhere. Shift + click or a box selects several items to move or delete together. The Checks tab lists what will not drive well as you edit, View › Walk the Track looks along the road from a driver's eye, Bake drives a test lap whose path the view shows and View › Replay Test Lap replays, and a backup of `project.ron` is kept every few minutes (File › Restore Backup).
 
 Every edit in the editor is one of the operations `trackctl apply` takes, and the editor saves each one to `project.ron` straight away. When the file changes on disk, the editor reloads it, so a person and an agent can work on the same track at once. `open-racing-editor <project> --screenshot view.png` saves the 3D view and quits (with `--focus <name>`, `--corner <n>`, `--edit <nodes>` or `--top` to choose what it shows).
 
