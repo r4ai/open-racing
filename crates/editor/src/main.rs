@@ -7,12 +7,19 @@
 //! an agent using `open-racing-trackctl`) are loaded as they happen.
 
 mod assets;
+mod commands;
 mod curve_graph;
+mod edit;
 mod jobs;
 mod menus;
+mod outliner;
+mod overlay;
+mod popups;
 mod presets;
 mod preview;
 mod profile;
+mod properties;
+mod sidebar;
 mod state;
 mod ui;
 mod viewport;
@@ -117,7 +124,7 @@ fn main() {
     let mut orbit = viewport::Orbit::default();
     viewport::frame_selection(&editor, &mut orbit);
     if args.top {
-        viewport::set_view(&mut orbit, std::f32::consts::FRAC_PI_2, 1.5695);
+        viewport::look(&mut orbit, viewport::ViewDir::Top);
     }
 
     let mut app = App::new();
@@ -131,6 +138,7 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "open-racing track editor".into(),
+            resolution: (1600, 900).into(),
             ..default()
         }),
         ..default()

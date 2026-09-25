@@ -11,6 +11,9 @@
 //!   or marker grabs it. While transforming, X, Y and Z hold to an axis, Shift is fine,
 //!   Ctrl snaps, typed numbers give exact values; a click or Enter confirms, a right
 //!   click or Esc puts everything back.
+//! - Tools (the toolbar, T): with Move, Rotate or Scale the selection shows a gizmo whose
+//!   arms, middle or ring start that transform, held to the axis dragged; with Add Node
+//!   a click adds a node to the selected road or spline.
 //! - Building: E extrudes the active node, Ctrl + click (left or right) adds a node at
 //!   the pointer, X or Delete deletes, Shift + D duplicates a spline, Shift + A opens the
 //!   add menu to draw a road, kerb, wall or fence, and a right click opens a menu for
@@ -27,8 +30,8 @@ use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::{Frame, Sampled, handles};
-use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side};
+use open_racing_track_project::ops::{Curve, Op};
+use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side, StationCurve};
 use open_racing_track_render::{from_bevy, to_bevy};
 
 use std::path::PathBuf;
@@ -61,6 +64,9 @@ pub struct Orbit {
     pub pitch: f32,
     pub distance: f32,
     pub ortho: bool,
+    /// Orthographic only because a numpad view asked for it: orbiting away goes back to
+    /// perspective, as Blender's auto perspective does.
+    pub auto_ortho: bool,
 }
 
 impl Default for Orbit {
@@ -71,6 +77,7 @@ impl Default for Orbit {
             pitch: 0.9,
             distance: 700.0,
             ortho: false,
+            auto_ortho: false,
         }
     }
 }
@@ -96,6 +103,8 @@ pub enum Hit {
     Range(RangeEnd),
     /// A road's or spline's body.
     Body(Item),
+    /// A part of the active tool's gizmo: an axis, or `Free` for its middle or ring.
+    Gizmo(Axis),
 }
 
 /// A part of a road limited to stretches of it.
@@ -162,6 +171,10 @@ pub enum Mode {
     Grab,
     Rotate,
     Scale,
+    /// Alt + S: a road's width at its nodes (Blender's shrink/fatten).
+    Width,
+    /// Ctrl + T: a road's bank at its nodes (Blender's tilt).
+    Tilt,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -200,6 +213,16 @@ enum Target {
     },
     Range {
         end: RangeEnd,
+    },
+    /// A road's width or bank at some of its nodes.
+    Shape {
+        road: String,
+        count: usize,
+        closed: bool,
+        nodes: Vec<usize>,
+        left: StationCurve,
+        right: StationCurve,
+        bank: StationCurve,
     },
 }
 
@@ -246,9 +269,85 @@ pub struct Menu {
     pub add_only: bool,
 }
 
+/// The tool a left click or drag uses, picked in the toolbar (T).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolKind {
+    #[default]
+    Select,
+    Move,
+    Rotate,
+    Scale,
+    /// A click adds a node to the selected road or spline.
+    AddNode,
+}
+
+impl ToolKind {
+    pub const ALL: [ToolKind; 5] = [
+        ToolKind::Select,
+        ToolKind::Move,
+        ToolKind::Rotate,
+        ToolKind::Scale,
+        ToolKind::AddNode,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolKind::Select => "Select Box",
+            ToolKind::Move => "Move",
+            ToolKind::Rotate => "Rotate",
+            ToolKind::Scale => "Scale",
+            ToolKind::AddNode => "Add Node",
+        }
+    }
+
+    /// The transform its gizmo starts.
+    fn mode(self) -> Option<Mode> {
+        match self {
+            ToolKind::Move => Some(Mode::Grab),
+            ToolKind::Rotate => Some(Mode::Rotate),
+            ToolKind::Scale => Some(Mode::Scale),
+            ToolKind::Select | ToolKind::AddNode => None,
+        }
+    }
+}
+
+/// What the view draws besides the track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overlays {
+    /// Roads' and splines' lines and nodes.
+    pub lines: bool,
+    /// Names of roads, splines and props.
+    pub names: bool,
+    /// Numbers of the selected line's nodes.
+    pub indices: bool,
+    pub markers: bool,
+    /// Stretches of the selected road's strips and barriers.
+    pub stretches: bool,
+    pub props: bool,
+}
+
+impl Default for Overlays {
+    fn default() -> Self {
+        Self {
+            lines: true,
+            names: true,
+            indices: true,
+            markers: true,
+            stretches: true,
+            props: true,
+        }
+    }
+}
+
 /// The state of the view's tools.
 #[derive(Resource, Default)]
 pub struct Tool {
+    pub active: ToolKind,
+    pub overlays: Overlays,
+    /// The item under the pointer in the outliner, lit up in the view.
+    pub outliner_hover: Option<Item>,
+    /// A popup of the UI is open: the view takes no clicks or keys.
+    pub blocked: bool,
     pub modal: Option<Modal>,
     pub draw: Option<Draw>,
     pub hover: Option<Hit>,
@@ -397,9 +496,9 @@ pub fn place_camera(
 
 /// The camera, for turning between the view and the world.
 #[derive(Clone, Copy)]
-struct View<'a> {
-    cam: &'a Camera,
-    t: &'a GlobalTransform,
+pub struct View<'a> {
+    pub cam: &'a Camera,
+    pub t: &'a GlobalTransform,
 }
 
 impl View<'_> {
@@ -451,7 +550,7 @@ impl View<'_> {
         self.on_plane(at, 0.0)
     }
 
-    fn screen(&self, p: DVec3) -> Option<Vec2> {
+    pub fn screen(&self, p: DVec3) -> Option<Vec2> {
         self.cam.world_to_viewport(self.t, to_bevy(p)).ok()
     }
 
@@ -583,6 +682,98 @@ fn pick(
     }
     let g = ground_at?;
     body_at(editor, built, g).map(Hit::Body)
+}
+
+/// Where the selection's transform gizmo stands: a prop, or the middle of the selected
+/// nodes (all of them with none selected, as moving the whole line).
+pub fn selection_pivot(editor: &Editor, built: &Built) -> Option<DVec3> {
+    let item = editor.selection.item?;
+    if let Item::Prop(i) = item {
+        let prop = editor.project.props.get(i)?;
+        return Some(Placement::of(prop, built.ground.as_deref()).pos);
+    }
+    let (_, nodes, _) = item_line(&editor.project, item)?;
+    let picked: Vec<usize> = if editor.selection.nodes.is_empty() {
+        (0..nodes.len()).collect()
+    } else {
+        editor
+            .selection
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&n| n < nodes.len())
+            .collect()
+    };
+    if picked.is_empty() {
+        return None;
+    }
+    let sum: DVec3 = picked
+        .iter()
+        .map(|&n| shown_pos(editor, built, item, nodes[n].pos))
+        .sum();
+    Some(sum / picked.len() as f64)
+}
+
+/// The gizmo's middle and the length of its arms, about the same on screen at any
+/// distance.
+fn gizmo_frame(editor: &Editor, built: &Built, eye: Vec3) -> Option<(DVec3, f64)> {
+    let p = selection_pivot(editor, built)? + DVec3::Z * LIFT;
+    Some((p, (eye.distance(to_bevy(p)) * 0.11).max(1.0) as f64))
+}
+
+const GIZMO_AXES: [(Axis, DVec3); 3] = [
+    (Axis::X, DVec3::X),
+    (Axis::Y, DVec3::Y),
+    (Axis::Z, DVec3::Z),
+];
+
+fn axis_color(axis: Axis) -> Color {
+    match axis {
+        Axis::X => Color::srgb(0.96, 0.25, 0.33),
+        Axis::Y => Color::srgb(0.53, 0.84, 0.13),
+        Axis::Z => Color::srgb(0.18, 0.52, 1.0),
+        Axis::Free => Color::srgb(0.9, 0.9, 0.9),
+    }
+}
+
+/// Points round the rotate gizmo's ring.
+fn gizmo_ring(p: DVec3, size: f64) -> impl Iterator<Item = DVec3> {
+    (0..=48).map(move |k| {
+        let a = k as f64 / 48.0 * std::f64::consts::TAU;
+        p + DVec3::new(a.cos(), a.sin(), 0.0) * size * 0.8
+    })
+}
+
+/// The part of the active tool's gizmo under the pointer.
+fn pick_gizmo(
+    editor: &Editor,
+    built: &Built,
+    view: View,
+    tool: ToolKind,
+    at: Vec2,
+) -> Option<Axis> {
+    tool.mode()?;
+    let (p, size) = gizmo_frame(editor, built, view.t.translation())?;
+    let c = view.screen(p)?;
+    if tool == ToolKind::Rotate {
+        let ring: Vec<Vec2> = gizmo_ring(p, size).filter_map(|q| view.screen(q)).collect();
+        let near = ring
+            .windows(2)
+            .any(|w| distance_to_segment(at, w[0], w[1]) < 8.0);
+        return near.then_some(Axis::Free);
+    }
+    if c.distance(at) < 14.0 {
+        return Some(Axis::Free);
+    }
+    GIZMO_AXES
+        .iter()
+        .filter_map(|&(axis, dir)| {
+            let end = view.screen(p + dir * size)?;
+            let d = distance_to_segment(at, c + (end - c) * 0.2, end);
+            (d < 9.0).then_some((axis, d))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(axis, _)| axis)
 }
 
 fn consider_pick(best: &mut Option<(Hit, f32)>, hit: Hit, screen: Option<Vec2>, at: Vec2) {
@@ -738,8 +929,8 @@ pub fn input(
     let view = View { cam, t };
     let tool = &mut *tool;
     let editor = &mut *editor;
-    let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none();
-    let keys_free = !wants.wants_any_keyboard_input();
+    let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none() && !tool.blocked;
+    let keys_free = !wants.wants_any_keyboard_input() && !tool.blocked;
     let anywhere = window.cursor_position();
     let over = cursor(&window, &rect).filter(|_| pointer_free);
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
@@ -805,7 +996,11 @@ pub fn input(
         return;
     }
 
-    let hover = over.and_then(|at| pick(editor, &built, view, at, tool.pointer));
+    let hover = over.and_then(|at| {
+        pick_gizmo(editor, &built, view, tool.active, at)
+            .map(Hit::Gizmo)
+            .or_else(|| pick(editor, &built, view, at, tool.pointer))
+    });
     tool.hover = hover;
 
     // Left button: a click selects, a drag grabs what it began on or draws a box.
@@ -817,7 +1012,13 @@ pub fn input(
             match finish_left(tool, anywhere, over.is_some()) {
                 Some(LeftRelease::Box(rect)) => box_select(editor, &built, view, rect, shift),
                 Some(LeftRelease::Click(hit)) => {
-                    click(editor, &built, hit, tool.pointer, shift, ctrl, alt);
+                    let add = ctrl
+                        || (tool.active == ToolKind::AddNode
+                            && !matches!(
+                                hit,
+                                Some(Hit::Node(..) | Hit::Handle(..) | Hit::Gizmo(_))
+                            ));
+                    click(editor, &built, hit, tool.pointer, shift, add, alt);
                 }
                 None => {}
             }
@@ -826,6 +1027,16 @@ pub fn input(
             && from.distance(at) > DRAG_THRESHOLD
         {
             match hit {
+                Some(Hit::Gizmo(axis)) => {
+                    tool.press = None;
+                    let mode = tool.active.mode().unwrap_or(Mode::Grab);
+                    start_modal(editor, tool, &built, mode, None, from, true);
+                    if let Some(m) = &mut tool.modal
+                        && m.mode != Mode::Rotate
+                    {
+                        m.axis = axis;
+                    }
+                }
                 Some(Hit::Body(item @ Item::Prop(_))) => {
                     tool.press = None;
                     editor.selection.select(item);
@@ -869,6 +1080,10 @@ pub fn input(
         start_modal(editor, tool, &built, Mode::Grab, None, at, false);
     } else if pressed(KeyCode::KeyR) {
         start_modal(editor, tool, &built, Mode::Rotate, None, at, false);
+    } else if pressed(KeyCode::KeyS) && alt {
+        start_modal(editor, tool, &built, Mode::Width, None, at, false);
+    } else if pressed(KeyCode::KeyT) && ctrl {
+        start_modal(editor, tool, &built, Mode::Tilt, None, at, false);
     } else if pressed(KeyCode::KeyS) && !ctrl {
         start_modal(editor, tool, &built, Mode::Scale, None, at, false);
     } else if pressed(KeyCode::KeyE) {
@@ -883,6 +1098,10 @@ pub fn input(
         select_all(editor);
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
         delete(editor);
+    } else if pressed(KeyCode::NumpadAdd) && ctrl {
+        crate::edit::select_more(editor);
+    } else if pressed(KeyCode::NumpadSubtract) && ctrl {
+        crate::edit::select_less(editor);
     } else if pressed(KeyCode::Escape) {
         editor.selection.nodes.clear();
     }
@@ -916,8 +1135,7 @@ fn camera_input(
         } else if ctrl {
             orbit.distance = (orbit.distance * (1.0 + d.y * 0.005)).clamp(2.0, 15_000.0);
         } else {
-            orbit.yaw += d.x * 0.005;
-            orbit.pitch = (orbit.pitch + d.y * 0.005).clamp(-1.55, 1.5695);
+            orbit_by(orbit, d.x * 0.005, d.y * 0.005);
         }
     }
     if over.is_some() && scroll.delta.y != 0.0 {
@@ -926,22 +1144,135 @@ fn camera_input(
     }
 }
 
+/// Turns the orbit, leaving an orthographic numpad view for perspective.
+pub fn orbit_by(orbit: &mut Orbit, yaw: f32, pitch: f32) {
+    orbit.yaw += yaw;
+    orbit.pitch = (orbit.pitch + pitch).clamp(-1.5695, 1.5695);
+    if orbit.auto_ortho {
+        orbit.ortho = false;
+        orbit.auto_ortho = false;
+    }
+}
+
+/// Looking along an axis: from the top, the front and so on, as Blender's numpad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewDir {
+    Top,
+    Bottom,
+    Front,
+    Back,
+    Right,
+    Left,
+}
+
+impl ViewDir {
+    pub const ALL: [ViewDir; 6] = [
+        ViewDir::Top,
+        ViewDir::Bottom,
+        ViewDir::Front,
+        ViewDir::Back,
+        ViewDir::Right,
+        ViewDir::Left,
+    ];
+
+    /// The orbit's yaw and pitch for it.
+    pub fn angles(self) -> (f32, f32) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        match self {
+            ViewDir::Top => (FRAC_PI_2, 1.5695),
+            ViewDir::Bottom => (FRAC_PI_2, -1.5695),
+            ViewDir::Front => (FRAC_PI_2, 0.0),
+            ViewDir::Back => (-FRAC_PI_2, 0.0),
+            ViewDir::Right => (0.0, 0.0),
+            ViewDir::Left => (PI, 0.0),
+        }
+    }
+
+    pub fn opposite(self) -> ViewDir {
+        match self {
+            ViewDir::Top => ViewDir::Bottom,
+            ViewDir::Bottom => ViewDir::Top,
+            ViewDir::Front => ViewDir::Back,
+            ViewDir::Back => ViewDir::Front,
+            ViewDir::Right => ViewDir::Left,
+            ViewDir::Left => ViewDir::Right,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewDir::Top => "Top",
+            ViewDir::Bottom => "Bottom",
+            ViewDir::Front => "Front",
+            ViewDir::Back => "Back",
+            ViewDir::Right => "Right",
+            ViewDir::Left => "Left",
+        }
+    }
+
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            ViewDir::Top => "Numpad 7",
+            ViewDir::Bottom => "Ctrl Numpad 7",
+            ViewDir::Front => "Numpad 1",
+            ViewDir::Back => "Ctrl Numpad 1",
+            ViewDir::Right => "Numpad 3",
+            ViewDir::Left => "Ctrl Numpad 3",
+        }
+    }
+
+    /// The axis view the orbit is in, if any.
+    pub fn of(orbit: &Orbit) -> Option<ViewDir> {
+        let close = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(std::f32::consts::TAU);
+            d.min(std::f32::consts::TAU - d) < 1e-3
+        };
+        ViewDir::ALL.into_iter().find(|v| {
+            let (yaw, pitch) = v.angles();
+            (pitch - orbit.pitch).abs() < 1e-3 && (pitch.abs() > 1.5 || close(yaw, orbit.yaw))
+        })
+    }
+}
+
+pub fn look(orbit: &mut Orbit, dir: ViewDir) {
+    let (yaw, pitch) = dir.angles();
+    set_view(orbit, yaw, pitch);
+}
+
 /// Numpad views, framing and switching the projection; also called from the menus.
 pub fn view_keys(editor: &Editor, orbit: &mut Orbit, keys: &ButtonInput<KeyCode>) {
-    use std::f32::consts::{FRAC_PI_2, PI};
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    let side = |a: f32, b: f32| if ctrl { b } else { a };
+    let side = |a, b| if ctrl { b } else { a };
     if keys.just_pressed(KeyCode::Numpad1) {
-        set_view(orbit, side(FRAC_PI_2, -FRAC_PI_2), 0.0);
+        look(orbit, side(ViewDir::Front, ViewDir::Back));
     }
     if keys.just_pressed(KeyCode::Numpad3) {
-        set_view(orbit, side(0.0, PI), 0.0);
+        look(orbit, side(ViewDir::Right, ViewDir::Left));
     }
     if keys.just_pressed(KeyCode::Numpad7) {
-        set_view(orbit, FRAC_PI_2, side(1.5695, -1.5695));
+        look(orbit, side(ViewDir::Top, ViewDir::Bottom));
     }
     if keys.just_pressed(KeyCode::Numpad5) {
         orbit.ortho = !orbit.ortho;
+        orbit.auto_ortho = false;
+    }
+    // Steps of 15 degrees round the focus, and zooming.
+    let step = 15f32.to_radians();
+    for (key, yaw, pitch) in [
+        (KeyCode::Numpad4, -step, 0.0),
+        (KeyCode::Numpad6, step, 0.0),
+        (KeyCode::Numpad8, 0.0, step),
+        (KeyCode::Numpad2, 0.0, -step),
+    ] {
+        if keys.just_pressed(key) {
+            orbit_by(orbit, yaw, pitch);
+        }
+    }
+    if !ctrl && keys.just_pressed(KeyCode::NumpadAdd) {
+        orbit.distance = (orbit.distance / 1.2).max(2.0);
+    }
+    if !ctrl && keys.just_pressed(KeyCode::NumpadSubtract) {
+        orbit.distance = (orbit.distance * 1.2).min(15_000.0);
     }
     if keys.any_just_pressed([KeyCode::NumpadDecimal, KeyCode::KeyF]) {
         frame_selection(editor, orbit);
@@ -955,6 +1286,9 @@ pub fn view_keys(editor: &Editor, orbit: &mut Orbit, keys: &ButtonInput<KeyCode>
 pub fn set_view(orbit: &mut Orbit, yaw: f32, pitch: f32) {
     orbit.yaw = yaw;
     orbit.pitch = pitch;
+    if !orbit.ortho {
+        orbit.auto_ortho = true;
+    }
     orbit.ortho = true;
 }
 
@@ -966,7 +1300,7 @@ pub fn view_input(
     wants: Res<EguiWantsInput>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
-    if tool.modal.is_none() && !wants.wants_any_keyboard_input() {
+    if tool.modal.is_none() && !tool.blocked && !wants.wants_any_keyboard_input() {
         view_keys(&editor, &mut orbit, &keys);
     }
 }
@@ -987,10 +1321,10 @@ fn click(
     hit: Option<Hit>,
     pointer: Option<DVec3>,
     shift: bool,
-    ctrl: bool,
+    add: bool,
     alt: bool,
 ) {
-    if ctrl {
+    if add {
         add_node_at(editor, built, pointer);
         return;
     }
@@ -1019,7 +1353,7 @@ fn click(
                 editor.selection.nodes.clear();
             }
         }
-        Some(Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_)) => {}
+        Some(Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_) | Hit::Gizmo(_)) => {}
         None => {
             if !shift {
                 editor.selection.nodes.clear();
@@ -1070,7 +1404,7 @@ fn box_select(editor: &mut Editor, built: &Built, view: View, r: Rect, add: bool
     }
 }
 
-fn select_all(editor: &mut Editor) {
+pub fn select_all(editor: &mut Editor) {
     if let Some((_, nodes, _)) = editor.line() {
         let n = nodes.len();
         editor.selection.nodes = (0..n).collect();
@@ -1174,7 +1508,7 @@ pub fn add_node_at(editor: &mut Editor, built: &Built, pointer: Option<DVec3>) {
 }
 
 /// E: a new node after the active one (before it at the start of an open line), grabbed.
-fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
+pub fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
     let (Some(item), Some(n)) = (editor.selection.item, editor.selection.node()) else {
         return;
     };
@@ -1204,7 +1538,7 @@ fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
 }
 
 /// Shift + D: a copy of the selected spline or prop, grabbed.
-fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
+pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
     let p = &editor.project;
     let (op, item) = match editor.selection.item {
         Some(Item::Spline(s)) => {
@@ -1240,7 +1574,7 @@ fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
 
 /// Starts a transform of `hit`, or of the selection: its selected nodes, or all of them.
 #[allow(clippy::too_many_arguments)]
-fn start_modal(
+pub fn start_modal(
     editor: &mut Editor,
     tool: &mut Tool,
     built: &Built,
@@ -1250,6 +1584,31 @@ fn start_modal(
     by_drag: bool,
 ) {
     let target = match hit {
+        _ if matches!(mode, Mode::Width | Mode::Tilt) => {
+            let Some(r) = editor
+                .selection
+                .road()
+                .filter(|&r| r < editor.project.roads.len())
+            else {
+                editor.status = "Width and tilt change a road: select one, or its nodes".into();
+                return;
+            };
+            let road = &editor.project.roads[r];
+            let count = road.nodes.len();
+            Target::Shape {
+                road: road.name.clone(),
+                count,
+                closed: road.closed,
+                nodes: if editor.selection.nodes.is_empty() {
+                    (0..count).collect()
+                } else {
+                    editor.selection.nodes.clone()
+                },
+                left: road.width_left.clone(),
+                right: road.width_right.clone(),
+                bank: road.bank.clone(),
+            }
+        }
         Some(Hit::Handle(item, index, out)) => {
             let Some((_, nodes, closed)) = item_line(&editor.project, item) else {
                 return;
@@ -1325,6 +1684,12 @@ fn start_modal(
             mode,
             Placement::of(&editor.project.props[*index], built.ground.as_deref()).pos,
         ),
+        Target::Shape { road, nodes, .. } => {
+            let r = editor.project.road_index(road).expect("the selected road");
+            let all = &editor.project.roads[r].nodes;
+            let c = nodes.iter().map(|&n| all[n].pos).sum::<DVec3>() / nodes.len().max(1) as f64;
+            (mode, c)
+        }
     };
     if !by_drag || !editor.dragging {
         editor.begin_drag();
@@ -1362,7 +1727,12 @@ fn modal(
         (KeyCode::KeyY, Axis::Y),
         (KeyCode::KeyZ, Axis::Z),
     ] {
-        if keys.just_pressed(k) && m.mode != Mode::Rotate {
+        let allowed = match m.mode {
+            Mode::Rotate | Mode::Tilt => false,
+            Mode::Width => a != Axis::Z,
+            _ => true,
+        };
+        if keys.just_pressed(k) && allowed {
             m.axis = if m.axis == a { Axis::Free } else { a };
         }
     }
@@ -1385,13 +1755,23 @@ fn modal(
 
     let (ops, readout) = transform_ops(editor, built, view, m, cursor, typed, snap);
     let label = match m.mode {
-        Mode::Grab => "Grab",
-        Mode::Rotate => "Rotate",
-        Mode::Scale => "Scale",
+        Mode::Grab => format!("Grab {:?}", m.axis),
+        Mode::Rotate => format!("Rotate {:?}", m.axis),
+        Mode::Scale => format!("Scale {:?}", m.axis),
+        Mode::Width => match m.axis {
+            Axis::X => "Width, left side".to_string(),
+            Axis::Y => "Width, right side".to_string(),
+            _ => "Width".to_string(),
+        },
+        Mode::Tilt => "Tilt (bank)".to_string(),
+    };
+    let keys_hint = match m.mode {
+        Mode::Width => "X left only · Y right only",
+        Mode::Tilt => "",
+        _ => "X/Y/Z axis",
     };
     tool.hint = format!(
-        "{label} {:?}: {readout}{}   X/Y/Z axis · Shift fine · Ctrl snap · type a value · click/Enter confirm · right click/Esc cancel",
-        m.axis,
+        "{label}: {readout}{}   {keys_hint} · Shift fine · Ctrl snap · type a value · click/Enter confirm · right click/Esc cancel",
         if m.typed.is_empty() {
             String::new()
         } else {
@@ -1511,6 +1891,7 @@ fn transform_ops(
                         format!("×{k:.3}"),
                     )
                 }
+                Mode::Width | Mode::Tilt => return (vec![], String::new()),
             };
             let ops = start
                 .iter()
@@ -1602,6 +1983,59 @@ fn transform_ops(
             };
             (vec![op], format!("u {u:.2}, s {:.0} m", f.s))
         }
+        Target::Shape {
+            road,
+            count,
+            closed,
+            nodes,
+            left,
+            right,
+            bank,
+        } => {
+            let period = if *closed {
+                *count
+            } else {
+                count.saturating_sub(1)
+            } as f64;
+            let set = |curve: Curve, c: &StationCurve, f: &dyn Fn(f64) -> f64| Op::SetProfile {
+                road: road.clone(),
+                curve,
+                keys: crate::edit::node_keys(
+                    c,
+                    *count,
+                    *closed,
+                    &nodes
+                        .iter()
+                        .map(|&n| (n, f(c.eval(n as f64, period, *closed))))
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            if m.mode == Mode::Tilt {
+                let angle = turn(m, center, cursor, typed, snap);
+                return (
+                    vec![set(Curve::Bank, bank, &|b| b + angle)],
+                    format!("{:+.1}°", angle.to_degrees()),
+                );
+            }
+            let k = stretch(m, center, cursor, typed, snap);
+            let wider = |w: f64| (w * k).max(0.1);
+            let mut ops = Vec::new();
+            if m.axis != Axis::Y {
+                ops.push(set(Curve::WidthLeft, left, &wider));
+            }
+            if m.axis != Axis::X {
+                ops.push(set(Curve::WidthRight, right, &wider));
+            }
+            let first = nodes.first().copied().unwrap_or(0) as f64;
+            (
+                ops,
+                format!(
+                    "×{k:.3}  (node {first}: {:.2} m left, {:.2} m right)",
+                    wider(left.eval(first, period, *closed)),
+                    wider(right.eval(first, period, *closed))
+                ),
+            )
+        }
         Target::Prop {
             index,
             pos,
@@ -1646,6 +2080,7 @@ fn transform_ops(
                         format!("×{k:.3}"),
                     )
                 }
+                Mode::Width | Mode::Tilt => return (vec![], String::new()),
             };
             (vec![op], readout)
         }
@@ -1877,16 +2312,20 @@ pub fn gizmos(
     let lift = |v: DVec3| to_bevy(v + DVec3::Z * LIFT);
     let sel = &editor.selection;
     let hover = tool.hover;
+    let overlays = tool.overlays;
     for item in items(editor) {
         let Some((_, nodes, closed)) = item_line(p, item) else {
             continue;
         };
         let selected = sel.item == Some(item);
+        if !overlays.lines && !selected {
+            continue;
+        }
         let base = match item {
             Item::Road(_) => Color::srgb(0.3, 0.9, 1.0),
             Item::Spline(_) | Item::Prop(_) => Color::srgb(1.0, 0.45, 0.8),
         };
-        let hovered_body = hover == Some(Hit::Body(item));
+        let hovered_body = hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item);
         let line = if selected || hovered_body {
             base
         } else {
@@ -1955,7 +2394,7 @@ pub fn gizmos(
 
     // Stretches of the selected road's strips (orange) and barriers (grey), with their
     // ends to drag.
-    if let Some(r) = sel.road()
+    if let Some(r) = sel.road().filter(|_| overlays.stretches)
         && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
         && smp.frames.len() > 1
     {
@@ -2002,9 +2441,12 @@ pub fn gizmos(
     for (i, prop) in p.props.iter().enumerate() {
         let at = Placement::of(prop, built.ground.as_deref());
         let item = Item::Prop(i);
+        if !overlays.props && sel.item != Some(item) {
+            continue;
+        }
         let color = if sel.item == Some(item) {
             Color::srgb(1.0, 0.6, 0.1)
-        } else if hover == Some(Hit::Body(item)) {
+        } else if hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item) {
             Color::srgb(1.0, 0.95, 0.6)
         } else {
             Color::srgb(0.7, 1.0, 0.4)
@@ -2021,7 +2463,11 @@ pub fn gizmos(
     }
 
     // Markers on the main road, from the last build.
-    if let Some(main) = p.road_index(&p.main_road).and_then(|i| built.roads.get(i)) {
+    if let Some(main) = p
+        .road_index(&p.main_road)
+        .and_then(|i| built.roads.get(i))
+        .filter(|_| overlays.markers)
+    {
         let across = |gizmos: &mut Gizmos, u: f64, color: Color| {
             let f = main.frame_at(main.s_at(u));
             gizmos.line(
@@ -2097,6 +2543,52 @@ pub fn gizmos(
             gizmos.sphere(Isometry3d::from_translation(lift(p)), 0.6, Color::WHITE);
         }
     }
+    // The active tool's gizmo, hidden while transforming.
+    if let Some(mode) = tool.active.mode()
+        && tool.modal.is_none()
+        && tool.draw.is_none()
+        && let Some((c, size)) = gizmo_frame(editor, &built, eye)
+    {
+        let lit = |axis: Axis, color: Color| {
+            if hover == Some(Hit::Gizmo(axis)) {
+                Color::srgb(1.0, 0.95, 0.6)
+            } else {
+                color
+            }
+        };
+        let facing = Quat::from_rotation_arc(Vec3::Z, (eye - to_bevy(c)).normalize_or(Vec3::Y));
+        match mode {
+            Mode::Rotate => {
+                let ring: Vec<Vec3> = gizmo_ring(c, size).map(to_bevy).collect();
+                gizmos.linestrip(ring, lit(Axis::Free, axis_color(Axis::Z)));
+            }
+            Mode::Width | Mode::Tilt => {}
+            Mode::Grab | Mode::Scale => {
+                for (axis, dir) in GIZMO_AXES {
+                    let color = lit(axis, axis_color(axis));
+                    let (from, to) = (to_bevy(c + dir * size * 0.2), to_bevy(c + dir * size));
+                    if mode == Mode::Grab {
+                        gizmos
+                            .arrow(from, to, color)
+                            .with_tip_length(0.18 * size as f32);
+                    } else {
+                        gizmos.line(from, to, color);
+                        gizmos.cube(
+                            Transform::from_translation(to)
+                                .with_scale(Vec3::splat(0.1 * size as f32)),
+                            color,
+                        );
+                    }
+                }
+                gizmos.circle(
+                    Isometry3d::new(to_bevy(c), facing),
+                    0.1 * size as f32,
+                    lit(Axis::Free, Color::WHITE),
+                );
+            }
+        }
+    }
+
     // Axis lines of a transform.
     if let Some(m) = &tool.modal {
         let dir = match m.axis {
@@ -2178,6 +2670,74 @@ mod tests {
             let miss = to_origin - ray_direction * to_origin.dot(ray_direction);
             assert!(miss.length() < 1e-3);
         }
+    }
+
+    #[test]
+    fn gizmo_picks_its_middle_and_arms_for_transform_tools_only() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-gizmo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        editor.selection.select_node(Item::Road(0), 0);
+        let built = Built::default();
+        let pivot = selection_pivot(&editor, &built).expect("a node is selected");
+
+        let mut projection = perspective();
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(1200, 800),
+            scale_factor: 1.0,
+        });
+        projection.update(1200.0, 800.0);
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        let target = to_bevy(pivot);
+        let transform = GlobalTransform::from(
+            Transform::from_translation(target + Vec3::new(0.0, 60.0, 60.0))
+                .looking_at(target, Vec3::Y),
+        );
+        let view = View {
+            cam: &camera,
+            t: &transform,
+        };
+        let (c, size) = gizmo_frame(&editor, &built, transform.translation()).unwrap();
+        let middle = view.screen(c).unwrap();
+        let arm = view.screen(c + DVec3::X * size * 0.8).unwrap();
+        let pick = |tool, at| pick_gizmo(&editor, &built, view, tool, at);
+        assert_eq!(pick(ToolKind::Move, middle), Some(Axis::Free));
+        assert_eq!(pick(ToolKind::Move, arm), Some(Axis::X));
+        assert_eq!(pick(ToolKind::Scale, arm), Some(Axis::X));
+        assert_eq!(pick(ToolKind::Move, middle + Vec2::new(0.0, 300.0)), None);
+        assert_eq!(pick(ToolKind::Select, middle), None);
+        let ring = view.screen(c + DVec3::Y * size * 0.8).unwrap();
+        assert_eq!(pick(ToolKind::Rotate, ring), Some(Axis::Free));
+        assert_eq!(pick(ToolKind::Rotate, middle), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn view_dirs_are_recognised_and_left_for_perspective() {
+        let mut orbit = Orbit::default();
+        assert_eq!(ViewDir::of(&orbit), None);
+        for v in ViewDir::ALL {
+            look(&mut orbit, v);
+            assert_eq!(ViewDir::of(&orbit), Some(v));
+            assert_eq!(
+                ViewDir::of(&orbit)
+                    .map(ViewDir::opposite)
+                    .map(ViewDir::opposite),
+                Some(v)
+            );
+        }
+        assert!(orbit.ortho);
+        orbit_by(&mut orbit, 0.1, 0.0);
+        assert!(
+            !orbit.ortho,
+            "orbiting away from a numpad view goes back to perspective"
+        );
+        orbit.ortho = true;
+        orbit.auto_ortho = false;
+        orbit_by(&mut orbit, 0.1, 0.0);
+        assert!(orbit.ortho, "an orthographic view chosen by hand stays");
     }
 
     #[test]

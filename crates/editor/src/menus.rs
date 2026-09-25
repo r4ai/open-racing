@@ -1,103 +1,169 @@
-//! The 3D view's header, the menus opened in it (right click, Shift + A) and the box
-//! being dragged out to select.
+//! The 3D view's header with its menus, the menu a right click opens for what is under
+//! the pointer (Shift + A: the add menu), and the box being dragged out to select.
 
 use bevy_egui::egui;
 use open_racing_track_project::ops::Op;
+use open_racing_track_project::project::HandleMode;
 
+use crate::commands::{self, Cmd, Ctx, entry};
+use crate::edit;
 use crate::presets::PRESETS;
-use crate::preview::Built;
-use crate::state::{Editor, Item, item_line};
-use crate::viewport::{
-    Draw, DrawKind, Hit, Marker, Menu, Orbit, Part, RangeEnd, Tool, add_node_at, delete, frame_all,
-    frame_selection, set_view,
-};
+use crate::sidebar::overlay_checks;
+use crate::state::{Item, item_line};
+use crate::viewport::{Hit, Marker, Menu, Part, RangeEnd, ToolKind, ViewDir, add_node_at};
 
-const HELP: &str = "\
-Select: click · Shift+click: add to it · drag over empty space: box · A: all · Alt+A: none
-Change: G move · R rotate · S scale · drag a node, handle or marker to move it
-  while changing: X/Y/Z axis · Shift fine · Ctrl snap · type a value · click/Enter done · right click/Esc undo
-Build: E extrude a node · Ctrl+click: add a node · X/Delete: delete · Shift+D: duplicate · Shift+A: add
-  Alt+click a handle: automatic · right click: menu
-View: middle drag orbit · Shift+middle pan · wheel/Ctrl+middle zoom · right or Alt+left drag orbit too
-  numpad 1/3/7 front/right/top (Ctrl: opposite) · numpad 5 ortho · F or numpad . frame selection · Home all · N sidebar";
-
-/// The strip above the 3D view: the add and view menus, snapping, and what the view is
-/// doing.
-pub fn header(root: &mut egui::Ui, editor: &mut Editor, tool: &mut Tool, orbit: &mut Orbit) {
+/// The strip above the 3D view: its menus, what a transform is doing, snapping, the
+/// projection and the overlays.
+pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
     egui::Panel::top("view header").show(root, |ui| {
-        ui.horizontal(|ui| {
-            ui.menu_button("Add", |ui| add_items(ui, tool));
-            ui.menu_button("View", |ui| view_items(ui, editor, orbit));
-            ui.toggle_value(&mut tool.snap, "Snap").on_hover_text(
-                "Snap to whole metres, 5° and tenths (Ctrl while moving inverts it)",
-            );
-            ui.toggle_value(&mut orbit.ortho, "Ortho")
-                .on_hover_text("Orthographic view (numpad 5)");
+        egui::MenuBar::new().ui(ui, |ui| {
+            let tool = c.tool.active;
+            egui::ComboBox::from_id_salt("active tool")
+                .selected_text(tool.label())
+                .width(96.0)
+                .show_ui(ui, |ui| {
+                    for t in ToolKind::ALL {
+                        ui.selectable_value(&mut c.tool.active, t, t.label());
+                    }
+                })
+                .response
+                .on_hover_text("The tool a click or drag in the view uses (toolbar: T)");
             ui.separator();
-            if tool.hint.is_empty() {
-                ui.weak("Shortcuts (hover)").on_hover_text(HELP);
-            } else {
-                ui.colored_label(egui::Color32::from_rgb(255, 215, 30), &tool.hint);
+            ui.menu_button("View", |ui| view_menu(ui, c));
+            ui.menu_button("Select", |ui| {
+                for cmd in [
+                    Cmd::SelectAll,
+                    Cmd::SelectNone,
+                    Cmd::SelectInvert,
+                    Cmd::SelectMore,
+                    Cmd::SelectLess,
+                ] {
+                    entry(ui, c, cmd);
+                }
+            });
+            ui.menu_button("Add", |ui| add_menu(ui, c));
+            match c.editor.selection.item {
+                Some(item @ (Item::Road(_) | Item::Spline(_))) => {
+                    ui.menu_button("Node", |ui| node_menu(ui, c));
+                    ui.menu_button(edit::item_kind(item), |ui| object_menu(ui, c, item));
+                }
+                Some(item @ Item::Prop(_)) => {
+                    ui.menu_button("Prop", |ui| object_menu(ui, c, item));
+                }
+                None => {}
             }
+            if !c.tool.hint.is_empty() {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(255, 215, 30), &c.tool.hint);
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Overlays ⏷", |ui| overlay_checks(ui, c));
+                let projection = if c.orbit.ortho { "Ortho" } else { "Persp" };
+                if ui
+                    .selectable_label(c.orbit.ortho, projection)
+                    .on_hover_text("Perspective/Orthographic (Numpad 5)")
+                    .clicked()
+                {
+                    commands::run(Cmd::ToggleOrtho, c);
+                }
+                ui.toggle_value(&mut c.tool.snap, "Snap").on_hover_text(
+                    "Snap to whole metres, 5° and tenths (Ctrl while moving does the opposite)",
+                );
+            });
         });
     });
 }
 
-fn add_items(ui: &mut egui::Ui, tool: &mut Tool) {
-    let mut start = |kind| {
-        tool.draw = Some(Draw {
-            kind,
-            points: Vec::new(),
-        });
-        tool.menu = None;
-    };
-    if ui.button("Road").clicked() {
-        start(DrawKind::Road);
-        ui.close();
-    }
+fn view_menu(ui: &mut egui::Ui, c: &mut Ctx) {
+    entry(ui, c, Cmd::ToggleToolbar);
+    entry(ui, c, Cmd::ToggleSidebar);
+    entry(ui, c, Cmd::ToggleMaximize);
     ui.separator();
-    for (i, p) in PRESETS.iter().enumerate() {
-        if ui.button(p.label).clicked() {
-            start(DrawKind::Spline(i));
-            ui.close();
+    entry(ui, c, Cmd::FrameSelected);
+    entry(ui, c, Cmd::FrameAll);
+    ui.separator();
+    ui.menu_button("Viewpoint", |ui| {
+        for v in ViewDir::ALL {
+            entry(ui, c, Cmd::View(v));
         }
-    }
+    });
+    entry(ui, c, Cmd::ToggleOrtho);
+    entry(ui, c, Cmd::ViewPie);
+    ui.separator();
+    entry(ui, c, Cmd::Search);
+    entry(ui, c, Cmd::Shortcuts);
 }
 
-fn view_items(ui: &mut egui::Ui, editor: &Editor, orbit: &mut Orbit) {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    for (label, yaw, pitch) in [
-        ("Top (numpad 7)", FRAC_PI_2, 1.5695),
-        ("Front (numpad 1)", FRAC_PI_2, 0.0),
-        ("Right (numpad 3)", 0.0, 0.0),
-        ("Back (Ctrl+numpad 1)", -FRAC_PI_2, 0.0),
-        ("Left (Ctrl+numpad 3)", PI, 0.0),
-    ] {
-        if ui.button(label).clicked() {
-            set_view(orbit, yaw, pitch);
-            ui.close();
+pub fn add_menu(ui: &mut egui::Ui, c: &mut Ctx) {
+    ui.set_min_width(170.0);
+    entry(ui, c, Cmd::DrawRoad);
+    ui.separator();
+    ui.weak("Kerbs & run-off");
+    for (i, p) in PRESETS.iter().enumerate() {
+        if p.is_band(&c.editor.project) {
+            entry(ui, c, Cmd::DrawSpline(i));
+        }
+    }
+    ui.weak("Walls & fences");
+    for (i, p) in PRESETS.iter().enumerate() {
+        if !p.is_band(&c.editor.project) {
+            entry(ui, c, Cmd::DrawSpline(i));
         }
     }
     ui.separator();
-    if ui.button("Frame selected (F)").clicked() {
-        frame_selection(editor, orbit);
-        ui.close();
+    entry(ui, c, Cmd::PlaceProp);
+}
+
+fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
+    ui.set_min_width(200.0);
+    for cmd in [Cmd::Grab, Cmd::Rotate, Cmd::Scale] {
+        entry(ui, c, cmd);
     }
-    if ui.button("Frame all (Home)").clicked() {
-        frame_all(editor, orbit);
+    if c.editor.selection.road().is_some() {
+        ui.separator();
+        entry(ui, c, Cmd::Width);
+        entry(ui, c, Cmd::Tilt);
+    }
+    ui.separator();
+    for cmd in [Cmd::Extrude, Cmd::Subdivide, Cmd::Delete] {
+        entry(ui, c, cmd);
+    }
+    ui.separator();
+    ui.menu_button("Handle Type", |ui| {
+        for m in [HandleMode::Auto, HandleMode::Aligned, HandleMode::Free] {
+            commands::button_as(ui, c, Cmd::Handles(m), commands::handle_label(m));
+        }
+    });
+    entry(ui, c, Cmd::ToggleClosed);
+}
+
+fn object_menu(ui: &mut egui::Ui, c: &mut Ctx, item: Item) {
+    ui.set_min_width(200.0);
+    entry(ui, c, Cmd::Rename);
+    entry(ui, c, Cmd::Duplicate);
+    if matches!(item, Item::Road(_)) {
+        entry(ui, c, Cmd::SetMain);
+        ui.separator();
+        entry(ui, c, Cmd::Width);
+        entry(ui, c, Cmd::Tilt);
+        ui.separator();
+    }
+    entry(ui, c, Cmd::FrameSelected);
+    ui.separator();
+    if ui
+        .button(format!("Delete {}", edit::item_kind(item)))
+        .clicked()
+    {
+        c.editor.selection.nodes.clear();
+        crate::viewport::delete(c.editor);
         ui.close();
     }
 }
 
 /// The box being dragged out and the open menu, in window coordinates.
-pub fn overlay(
-    ctx: &egui::Context,
-    editor: &mut Editor,
-    tool: &mut Tool,
-    built: &Built,
-    orbit: &mut Orbit,
-) {
-    if let Some((a, b)) = tool.boxing {
+pub fn overlay(ctx: &egui::Context, c: &mut Ctx) {
+    if let Some((a, b)) = c.tool.boxing {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             "box select".into(),
@@ -113,17 +179,18 @@ pub fn overlay(
         );
     }
 
-    let Some(menu) = tool.menu.take() else {
+    let Some(menu) = c.tool.menu.take() else {
         return;
     };
     let mut close = false;
     let resp = egui::Area::new("view menu".into())
         .fixed_pos(egui::pos2(menu.at.x, menu.at.y))
         .order(egui::Order::Foreground)
+        .constrain(true)
         .show(ctx, |ui| {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_min_width(170.0);
-                close = menu_items(ui, editor, tool, built, orbit, &menu);
+                ui.set_min_width(200.0);
+                close = menu_items(ui, c, &menu);
             })
         });
     let elsewhere = ctx.input(|i| i.pointer.any_pressed())
@@ -132,70 +199,69 @@ pub fn overlay(
     let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     // Opening a submenu keeps the menu; a click outside everything closes it.
     let in_submenu = ctx.is_pointer_over_egui() && !resp.response.contains_pointer();
-    if !(close || escape || (elsewhere && !in_submenu)) && tool.draw.is_none() {
-        tool.menu = Some(menu);
+    if !(close || escape || (elsewhere && !in_submenu)) && c.tool.draw.is_none() {
+        c.tool.menu = Some(menu);
     }
 }
 
+/// A button in the right-click menu, with a shortcut beside it.
+fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
+    ui.add(egui::Button::new(label).shortcut_text(shortcut))
+        .clicked()
+}
+
+/// A command in the right-click menu.
+fn command(ui: &mut egui::Ui, c: &mut Ctx, cmd: Cmd) -> bool {
+    commands::button(ui, c, cmd)
+}
+
 /// The right-click menu for what was under the pointer; true once an entry is used.
-fn menu_items(
-    ui: &mut egui::Ui,
-    editor: &mut Editor,
-    tool: &mut Tool,
-    built: &Built,
-    orbit: &mut Orbit,
-    menu: &Menu,
-) -> bool {
+fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
     if menu.add_only {
         ui.strong("Add");
-        add_items(ui, tool);
-        return tool.draw.is_some();
+        ui.separator();
+        return add_items(ui, c);
     }
     let mut used = false;
-    let mut entry = |ui: &mut egui::Ui, label: &str| {
-        let clicked = ui.button(label).clicked();
-        used |= clicked;
-        clicked
-    };
     match menu.hit {
-        Some(Hit::Node(item, n)) => {
-            let name = item_line(&editor.project, item)
+        Some(Hit::Node(it, n)) => {
+            let name = item_line(&c.editor.project, it)
                 .map_or("", |l| l.0)
                 .to_string();
-            ui.strong(format!("Node {n} of \"{name}\""));
-            if entry(ui, "Delete node") {
-                editor.selection.select_node(item, n);
-                delete(editor);
+            if !(c.editor.selection.item == Some(it) && c.editor.selection.nodes.contains(&n)) {
+                c.editor.selection.select_node(it, n);
             }
-            if entry(ui, "Automatic handle") {
-                editor.apply(
-                    vec![Op::SetNodeHandles {
-                        line: name.clone(),
-                        index: n,
-                        mode: open_racing_track_project::HandleMode::Auto,
-                        incoming: glam::DVec3::ZERO,
-                        outgoing: glam::DVec3::ZERO,
-                    }],
-                    None,
-                );
+            ui.strong(format!("Node {n} of {name}"));
+            ui.separator();
+            for cmd in [Cmd::Grab, Cmd::Extrude, Cmd::Subdivide] {
+                used |= command(ui, c, cmd);
             }
-            if entry(ui, "Select all its nodes (A)") {
-                let count = item_line(&editor.project, item).map_or(0, |l| l.1.len());
-                editor.selection.item = Some(item);
-                editor.selection.nodes = (0..count).collect();
+            if matches!(it, Item::Road(_)) {
+                used |= command(ui, c, Cmd::Width);
+                used |= command(ui, c, Cmd::Tilt);
             }
+            ui.menu_button("Handle Type", |ui| {
+                for m in [HandleMode::Auto, HandleMode::Aligned, HandleMode::Free] {
+                    used |= commands::button_as(ui, c, Cmd::Handles(m), commands::handle_label(m));
+                }
+            });
+            used |= command(ui, c, Cmd::SelectAll);
+            ui.separator();
+            used |= commands::button_as(ui, c, Cmd::Delete, "Delete Nodes");
         }
-        Some(Hit::Handle(item, n, _)) => {
-            let name = item_line(&editor.project, item)
+        Some(Hit::Handle(it, n, _)) => {
+            let name = item_line(&c.editor.project, it)
                 .map_or("", |l| l.0)
                 .to_string();
             ui.strong(format!("Handle of node {n}"));
-            if entry(ui, "Automatic handle") {
-                editor.apply(
+            ui.separator();
+            if item(ui, "Automatic handle", "Alt+click") {
+                used = true;
+                c.editor.apply(
                     vec![Op::SetNodeHandles {
                         line: name,
                         index: n,
-                        mode: open_racing_track_project::HandleMode::Auto,
+                        mode: HandleMode::Auto,
                         incoming: glam::DVec3::ZERO,
                         outgoing: glam::DVec3::ZERO,
                     }],
@@ -205,66 +271,100 @@ fn menu_items(
         }
         Some(Hit::Marker(Marker::Sector(i))) => {
             ui.strong(format!("Sector {}", i + 2));
-            if entry(ui, "Remove sector") {
-                let mut sectors = editor.project.markers.sectors.clone();
+            ui.separator();
+            if item(ui, "Remove sector", "") {
+                used = true;
+                let mut sectors = c.editor.project.markers.sectors.clone();
                 sectors.remove(i);
-                set_markers(editor, None, Some(sectors));
+                set_markers(c, None, Some(sectors));
             }
         }
         Some(Hit::Marker(Marker::Start)) => {
             ui.strong("Start/finish line");
-            ui.label("Drag it along the road.");
+            ui.separator();
+            ui.weak("Drag it along the road.");
         }
-        Some(Hit::Body(item)) => {
-            let name = item_line(&editor.project, item)
-                .map_or("", |l| l.0)
+        Some(Hit::Body(it)) => {
+            let name = edit::item_name(&c.editor.project, it)
+                .unwrap_or_default()
                 .to_string();
-            ui.strong(&name);
-            if entry(ui, "Insert node here") {
-                editor.selection.select(item);
-                add_node_at(editor, built, menu.world);
+            if c.editor.selection.item != Some(it) {
+                c.editor.selection.select(it);
             }
-            if let (Item::Road(r), Some(at)) = (item, menu.world)
-                && name == editor.project.main_road
-                && let Some(u) = built.roads.get(r).map(|s| s.frames[s.nearest(at)].u)
+            ui.strong(format!("{} {name}", edit::item_kind(it)));
+            ui.separator();
+            if !matches!(it, Item::Prop(_)) && item(ui, "Insert node here", "Ctrl+click") {
+                used = true;
+                add_node_at(c.editor, c.built, menu.world);
+            }
+            if let (Item::Road(r), Some(at)) = (it, menu.world)
+                && name == c.editor.project.main_road
+                && let Some(u) = c.built.roads.get(r).map(|s| s.frames[s.nearest(at)].u)
             {
-                if entry(ui, "Start/finish line here") {
-                    set_markers(editor, Some(u), None);
+                if item(ui, "Start/finish line here", "") {
+                    used = true;
+                    set_markers(c, Some(u), None);
                 }
-                if entry(ui, "Sector boundary here") {
-                    let mut sectors = editor.project.markers.sectors.clone();
+                if item(ui, "Sector boundary here", "") {
+                    used = true;
+                    let mut sectors = c.editor.project.markers.sectors.clone();
                     sectors.push(u);
-                    set_markers(editor, None, Some(sectors));
+                    set_markers(c, None, Some(sectors));
                 }
             }
-            if entry(ui, &format!("Delete \"{name}\"")) {
-                editor.selection.select(item);
-                delete(editor);
+            for cmd in [Cmd::Rename, Cmd::Duplicate] {
+                used |= command(ui, c, cmd);
+            }
+            if matches!(it, Item::Road(_)) {
+                used |= command(ui, c, Cmd::SetMain);
+            }
+            ui.separator();
+            if item(ui, &format!("Delete {}", edit::item_kind(it)), "X") {
+                used = true;
+                c.editor.selection.select(it);
+                crate::viewport::delete(c.editor);
             }
         }
         Some(Hit::Range(end)) => {
             ui.strong("Stretch end");
-            if entry(ui, "Remove this stretch") {
-                remove_stretch(editor, end);
+            ui.separator();
+            if item(ui, "Remove this stretch", "") {
+                used = true;
+                remove_stretch(c, end);
             }
         }
-        None => {}
+        Some(Hit::Gizmo(_)) | None => {}
     }
-    ui.separator();
-    ui.menu_button("Add", |ui| add_items(ui, tool));
+    if menu.hit.is_some() {
+        ui.separator();
+    }
+    ui.menu_button("Add", |ui| used |= add_items(ui, c));
     if let Some(p) = menu.world
-        && entry(ui, "Look here")
+        && item(ui, "Look here", "")
     {
-        orbit.focus = open_racing_track_render::to_bevy(p);
+        used = true;
+        c.orbit.focus = open_racing_track_render::to_bevy(p);
     }
-    if entry(ui, "Frame selected") {
-        frame_selection(editor, orbit);
-    }
-    used || tool.draw.is_some()
+    used |= command(ui, c, Cmd::FrameSelected);
+    used |= command(ui, c, Cmd::ViewPie);
+    used || c.tool.draw.is_some() || c.shell.popup.is_some()
 }
 
-fn set_markers(editor: &mut Editor, start: Option<f64>, sectors: Option<Vec<f64>>) {
-    editor.apply(
+/// The add menu's entries, without closing an egui menu (the view's menu is an area);
+/// true once one is used.
+fn add_items(ui: &mut egui::Ui, c: &mut Ctx) -> bool {
+    ui.set_min_width(170.0);
+    let mut used = command(ui, c, Cmd::DrawRoad);
+    ui.separator();
+    for i in 0..PRESETS.len() {
+        used |= command(ui, c, Cmd::DrawSpline(i));
+    }
+    ui.separator();
+    used | command(ui, c, Cmd::PlaceProp)
+}
+
+fn set_markers(c: &mut Ctx, start: Option<f64>, sectors: Option<Vec<f64>>) {
+    c.editor.apply(
         vec![Op::SetMarkers {
             start,
             sectors,
@@ -276,8 +376,8 @@ fn set_markers(editor: &mut Editor, start: Option<f64>, sectors: Option<Vec<f64>
 
 /// Removes a stretch of a road's strip or barrier, or the part itself with its last
 /// stretch (no stretches would mean everywhere).
-fn remove_stretch(editor: &mut Editor, end: RangeEnd) {
-    let Some(road) = editor.project.roads.get(end.road) else {
+fn remove_stretch(c: &mut Ctx, end: RangeEnd) {
+    let Some(road) = c.editor.project.roads.get(end.road) else {
         return;
     };
     let name = road.name.clone();
@@ -316,5 +416,5 @@ fn remove_stretch(editor: &mut Editor, end: RangeEnd) {
             }
         }
     };
-    editor.apply(vec![op], None);
+    c.editor.apply(vec![op], None);
 }
