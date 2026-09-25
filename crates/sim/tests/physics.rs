@@ -57,6 +57,18 @@ fn shift_for(car: &Car) -> Shift {
     }
 }
 
+/// Steering wheel angle that holds the car on the centreline of a wide, gentle circle,
+/// as a driver would on a straight; without it, a long run leaves the road for the grass.
+fn keep_on_line(car: &Car, track: &Track, hint: &mut usize) -> f64 {
+    let q = track.query(car.state.position, *hint);
+    *hint = q.index;
+    let fwd = car.state.orientation * DVec3::X;
+    let heading_err = q.tangent.truncate().perp_dot(fwd.truncate()).asin();
+    // Softer at speed, where the same wheel angle turns the car harder.
+    let gain = 1.0 / car.speed().max(10.0);
+    -(0.5 * q.d + 5.0 * heading_err) * gain * car.model.params.steering.ratio
+}
+
 #[test]
 fn settles_at_static_ride_height() {
     let track = circle(5000.0);
@@ -92,14 +104,16 @@ fn acceleration_and_top_speed() {
     let track = circle(5000.0);
     let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
     let mut clutch = ClutchAssist::default();
-    let mut t100 = None;
+    let (mut t100, mut hint) = (None, 0);
     for _ in 0..70_000 {
         let shift = shift_for(&car);
+        let steer_wheel_angle = keep_on_line(&car, &track, &mut hint);
         step_with_clutch(
             &mut car,
             &track,
             &mut clutch,
             Controls {
+                steer_wheel_angle,
                 throttle: 1.0,
                 shift,
                 ..Default::default()
@@ -111,9 +125,45 @@ fn acceleration_and_top_speed() {
     }
     let t100 = t100.expect("reaches 100 km/h");
     let top = car.speed() * 3.6;
-    // GT3: 0-100 in roughly 3-4 s (traction limited), top speed ~270-290 km/h.
+    let off = track.query(car.state.position, hint).d.abs();
+    assert!(off < 2.0, "{off:.2} m off the line");
+    // GT3: 0-100 in roughly 3-4 s (traction limited), top speed ~280-300 km/h, where
+    // the gearing runs out.
     assert!((2.8..4.2).contains(&t100), "0-100 km/h in {t100:.2} s");
-    assert!((255.0..300.0).contains(&top), "top speed {top:.1} km/h");
+    assert!((275.0..305.0).contains(&top), "top speed {top:.1} km/h");
+}
+
+#[test]
+fn free_wheels_roll_against_only_their_rolling_resistance() {
+    // At speed on the asphalt, the undriven, unbraked front wheels hold back the car
+    // with their rolling resistance alone once the car has reached its top speed.
+    let track = circle(5000.0);
+    let model = gt3();
+    let gear = model.params.gearbox.ratios.len() as i32;
+    let mut car = Car::new(model, &track, 0.0, 0.0, 250.0 / 3.6, gear);
+    let mut hint = 0;
+    while car.state.time < 30.0 {
+        let steer_wheel_angle = keep_on_line(&car, &track, &mut hint);
+        car.step(
+            &track,
+            &Controls {
+                steer_wheel_angle,
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+    }
+    for i in [FL, FR] {
+        let w = &car.telemetry.wheels[i];
+        assert_eq!(w.surface, Surface::Asphalt);
+        let resistance = car.model.tire(i).rolling_resistance(w.pressure) * w.load;
+        assert!(
+            (w.fx + resistance).abs() < 0.1 * resistance,
+            "wheel {i}: fx {:.1} N vs rolling resistance {resistance:.1} N at {:.0} N",
+            w.fx,
+            w.load
+        );
+    }
 }
 
 #[test]
@@ -537,9 +587,10 @@ fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
     let track = circle(5000.0);
     let mut car = Car::new(model, &track, 0.0, 0.0, 0.0, 1);
     let mut clutch = ClutchAssist::default();
-    let mut t100 = None;
+    let (mut t100, mut hint) = (None, 0);
     while car.state.time < seconds {
         let shift = shift_for(&car);
+        let steer_wheel_angle = keep_on_line(&car, &track, &mut hint);
         let spin = (0..4)
             .filter(|&i| car.model.corners[i].driven)
             .map(|i| car.state.wheels[i].kappa)
@@ -549,6 +600,7 @@ fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
             &track,
             &mut clutch,
             Controls {
+                steer_wheel_angle,
                 throttle: (1.0 - 8.0 * (spin - 0.1)).clamp(0.0, 1.0),
                 shift,
                 ..Default::default()
@@ -558,6 +610,8 @@ fn launch(model: Arc<CarModel>, seconds: f64) -> (Option<f64>, f64) {
             t100 = Some(car.state.time);
         }
     }
+    let off = track.query(car.state.position, hint).d.abs();
+    assert!(off < 2.0, "{off:.2} m off the line");
     (t100, car.speed() * 3.6)
 }
 
