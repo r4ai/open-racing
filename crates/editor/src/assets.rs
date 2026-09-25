@@ -198,7 +198,10 @@ pub fn panel(
     ui.horizontal(|ui| {
         if ui.button("Import…").clicked()
             && let Some(files) = rfd::FileDialog::new()
-                .add_filter("textures and models", &["png", "dds", "glb", "gltf"])
+                .add_filter(
+                    "textures and models",
+                    &["png", "jpg", "jpeg", "dds", "glb", "gltf"],
+                )
                 .pick_files()
         {
             for f in files {

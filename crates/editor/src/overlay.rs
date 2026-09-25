@@ -9,7 +9,6 @@ use open_racing_track_render::to_bevy;
 
 use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
-use crate::presets::PRESETS;
 use crate::state::{Item, item_line};
 use crate::theme;
 use crate::viewport::{DrawKind, Orbit, ToolKind, View, ViewDir, look, orbit_by, shown_pos};
@@ -109,9 +108,9 @@ fn info(ctx: &egui::Context, r: egui::Rect, c: &Ctx) {
         egui::Color32::from_gray(225),
     );
     if let Some(d) = &c.tool.draw {
-        let kind = match d.kind {
-            DrawKind::Road => "road",
-            DrawKind::Spline(i) => PRESETS[i].label,
+        let kind = match &d.kind {
+            DrawKind::Road => "road".to_string(),
+            DrawKind::Spline(p) => p.name().to_string(),
         };
         let text = format!("Drawing a {kind}: {} points", d.points.len());
         outlined(
@@ -341,7 +340,7 @@ fn toolbar(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx) {
                         }
                     }
                     ui.separator();
-                    let drawing = c.tool.draw.as_ref().map(|d| d.kind);
+                    let drawing = c.tool.draw.as_ref().map(|d| d.kind.clone());
                     if tool_button(ui, drawing == Some(DrawKind::Road), Icon::Road, "Draw a road\nClick points · Enter finishes · Esc cancels").clicked() {
                         commands::run(Cmd::DrawRoad, c);
                     }
@@ -349,7 +348,7 @@ fn toolbar(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx) {
                     let resp = tool_button(ui, spline, Icon::Glyph("〰"), "Draw a kerb, wall or fence…");
                     egui::Popup::menu(&resp).show(|ui| {
                         ui.set_min_width(150.0);
-                        for i in 0..PRESETS.len() {
+                        for i in 0..crate::presets::list(&c.editor.project).len() {
                             commands::entry(ui, c, Cmd::DrawSpline(i));
                         }
                     });

@@ -7,7 +7,7 @@ use open_racing_track_project::project::HandleMode;
 
 use crate::commands::{self, Cmd, Ctx, entry};
 use crate::edit;
-use crate::presets::PRESETS;
+use crate::presets;
 use crate::sidebar::overlay_checks;
 use crate::state::{Item, item_line};
 use crate::viewport::{Hit, Marker, Menu, Part, RangeEnd, ToolKind, ViewDir, add_node_at};
@@ -124,15 +124,16 @@ pub fn add_menu(ui: &mut egui::Ui, c: &mut Ctx) {
     ui.set_min_width(170.0);
     entry(ui, c, Cmd::DrawRoad);
     ui.separator();
+    let list = presets::list(&c.editor.project);
     ui.weak("Kerbs & run-off");
-    for (i, p) in PRESETS.iter().enumerate() {
-        if p.is_band(&c.editor.project) {
+    for (i, p) in list.iter().enumerate() {
+        if p.is_band() {
             entry(ui, c, Cmd::DrawSpline(i));
         }
     }
     ui.weak("Walls & fences");
-    for (i, p) in PRESETS.iter().enumerate() {
-        if !p.is_band(&c.editor.project) {
+    for (i, p) in list.iter().enumerate() {
+        if !p.is_band() {
             entry(ui, c, Cmd::DrawSpline(i));
         }
     }
@@ -380,7 +381,7 @@ fn add_items(ui: &mut egui::Ui, c: &mut Ctx) -> bool {
     ui.set_min_width(170.0);
     let mut used = command(ui, c, Cmd::DrawRoad);
     ui.separator();
-    for i in 0..PRESETS.len() {
+    for i in 0..presets::list(&c.editor.project).len() {
         used |= command(ui, c, Cmd::DrawSpline(i));
     }
     ui.separator();

@@ -38,11 +38,12 @@ use std::path::PathBuf;
 
 use open_racing_track_project::model::Placement;
 
-use crate::presets::{PRESETS, unique_name, unique_prop_name};
+use crate::presets::{Preset, unique_name, unique_prop_name};
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
 use crate::theme;
-use open_racing_track_project::corners::Corner;
+use open_racing_track_project::corners::{self, Corner};
+use open_racing_track_project::project::Anchor;
 
 mod camera;
 mod geometry;
@@ -243,11 +244,11 @@ pub struct Modal {
 }
 
 /// What the draw tool is laying out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DrawKind {
     Road,
-    /// A spline of `PRESETS[i]`.
-    Spline(usize),
+    /// A kerb, band or wall of a strip or wall type.
+    Spline(Preset),
 }
 
 /// The draw tool: a click adds a point, Enter or a right click finishes.
@@ -651,12 +652,7 @@ mod tests {
             std::env::temp_dir().join(format!("open-racing-editor-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let editor = Editor::open(dir.clone()).unwrap();
-        let scene = open_racing_track_project::bake::build(&editor.project);
-        let built = Built {
-            roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
-            corners: vec![],
-            ..default()
-        };
+        let built = built_of(&editor);
         let mut projection = perspective();
         let mut camera = Camera::default();
         camera.computed.target_info = Some(RenderTargetInfo {
@@ -670,6 +666,72 @@ mod tests {
             Transform::from_translation(target + Vec3::Y * 300.0).looking_at(target, Vec3::NEG_Z),
         );
         (editor, built, camera, t, dir)
+    }
+
+    /// What a build of the editor's project knows.
+    fn built_of(editor: &Editor) -> Built {
+        let scene = open_racing_track_project::bake::build(&editor.project);
+        Built {
+            corners: (0..editor.project.roads.len())
+                .map(|i| corners::of_road(&editor.project, i).1)
+                .collect(),
+            roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
+            ..default()
+        }
+    }
+
+    #[test]
+    fn dragging_a_corner_kerb_s_end_keeps_it_there_as_the_corner_changes() {
+        let (mut editor, _, camera, t, dir) = top_down("corner end", DVec3::new(450.0, 130.0, 0.0));
+        let (smp, cs) = corners::of_road(&editor.project, 0);
+        let kit = corners::Kit::kerbs(&editor.project, None, 1.5);
+        let ops = corners::kit_ops(&editor.project, "circuit", &smp, &cs, &cs[0], &kit);
+        assert!(editor.apply(ops, None));
+        let built = built_of(&editor);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        let road = &editor.project.roads[0];
+        let i = road.left.iter().position(|s| s.name == "T1 apex").unwrap();
+        let before = road.left[i].ranges[0];
+        let part = Part::Strip(Side::Left, i);
+        let smp = &built.roads[0];
+        let at = view
+            .screen(range_end_pos(road, smp, part, before.to))
+            .unwrap();
+        editor.selection.select(Item::Road(0));
+        let mut tool = Tool::default();
+        let end = RangeEnd {
+            road: 0,
+            part,
+            range: 0,
+            to: true,
+        };
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            Some(Hit::Range(end)),
+            at,
+            true,
+        );
+        // Its end 20 m further along the road; refitting keeps it there.
+        let f = smp.frame_at(smp.s_at(before.to) + 20.0);
+        let to = view.screen(f.pos).unwrap();
+        let m = tool.modal.as_ref().unwrap();
+        let (ops, _) = transform_ops(&editor, &built, view, m, to, None, false, true);
+        assert!(editor.apply(ops, None));
+        let s = &editor.project.roads[0].left[i];
+        let moved = smp.s_at(s.ranges[0].to) - smp.s_at(before.to);
+        assert!((moved - 20.0).abs() < 3.0, "moved {moved}");
+        let shift = s.corner.unwrap().shift;
+        assert!(
+            shift[0] == 0.0 && (shift[1] - 20.0).abs() < 3.0,
+            "{shift:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -748,10 +810,13 @@ mod tests {
 
         // A wall's node near the circuit's right edge.
         let mut editor = editor;
-        let spline = crate::presets::PRESETS[4].spline(
-            &editor.project,
-            vec![DVec3::new(100.0, -20.0, 0.0), DVec3::new(150.0, -20.0, 0.0)],
-        );
+        let spline = crate::presets::named(&editor.project, "concrete wall")
+            .unwrap()
+            .spline(
+                &editor.project,
+                vec![DVec3::new(100.0, -20.0, 0.0), DVec3::new(150.0, -20.0, 0.0)],
+            )
+            .unwrap();
         assert!(editor.apply(vec![Op::PutSpline { spline }], None));
         // 1.5 m outside the right edge, halfway along the first straight.
         let f = smp.frame_at(smp.s_at(0.5));
@@ -804,10 +869,13 @@ mod tests {
     #[test]
     fn delete_in_edit_mode_without_nodes_keeps_the_line() {
         let (mut editor, _, _, _, dir) = top_down("delete-edit", DVec3::ZERO);
-        let spline = crate::presets::PRESETS[4].spline(
-            &editor.project,
-            vec![DVec3::new(0.0, -30.0, 0.0), DVec3::new(50.0, -30.0, 0.0)],
-        );
+        let spline = crate::presets::named(&editor.project, "concrete wall")
+            .unwrap()
+            .spline(
+                &editor.project,
+                vec![DVec3::new(0.0, -30.0, 0.0), DVec3::new(50.0, -30.0, 0.0)],
+            )
+            .unwrap();
         assert!(editor.apply(vec![Op::PutSpline { spline }], None));
         editor.selection.select(Item::Spline(0));
         delete_selected(&mut editor, &Tool::editing(true));

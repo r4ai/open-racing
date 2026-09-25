@@ -1,16 +1,16 @@
 //! Working corner by corner on a long track: each road's turns numbered from the start
 //! line, labelled in the view, stepped through with Page Up and Page Down, and a tab
-//! that gives each its kerbs and shows the stretches of strips and barriers round it.
+//! that gives each its kerbs, gravel or run-off and wall, of the Library's types.
 
 use bevy_egui::egui;
 use glam::DVec3;
-use open_racing_track_project::corners::{Corner, Kerb, Kerbs, kerb_ops};
+use open_racing_track_project::corners::{Corner, CornerPart, Kit, kit_ops};
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{Profile, Road, Side};
+use open_racing_track_project::project::{Road, Side};
 use open_racing_track_render::to_bevy;
 
 use crate::commands::Ctx;
-use crate::properties::{drag, row, section};
+use crate::properties::{row, section};
 use crate::state::Item;
 use crate::ui::{Focus, PropTab};
 use crate::viewport::View;
@@ -145,29 +145,109 @@ fn summary(k: &Corner) -> String {
     )
 }
 
-/// The corner kerbs a road has for corner `number`, as a `Kerbs`.
-fn kerbs_of(road: &Road, number: usize) -> Kerbs {
-    let strip = |kerb: Kerb| {
-        let name = kerb.strip_name(number);
-        road.left.iter().chain(&road.right).find(|s| s.name == name)
+/// What each corner of the road worked on has, as a `Kit`.
+fn kits(c: &Ctx, r: usize) -> Vec<Kit> {
+    let (Some(road), Some(corners), Some(smp)) = (
+        c.editor.project.roads.get(r),
+        c.built.corners.get(r),
+        c.built.roads.get(r),
+    ) else {
+        return vec![];
     };
-    let any = Kerb::ALL.iter().find_map(|&k| strip(k));
-    let d = Kerbs::default();
-    Kerbs {
-        entry: strip(Kerb::Entry).is_some(),
-        apex: strip(Kerb::Apex).is_some(),
-        exit: strip(Kerb::Exit).is_some(),
-        width: any.map_or(d.width, |s| s.width),
-        profile: any.map_or(d.profile, |s| s.profile),
-    }
+    corners
+        .iter()
+        .map(|k| Kit::of(road, smp, corners, k))
+        .collect()
 }
 
-/// Whether a strip is one of the kerbs laid per corner.
-fn is_corner_kerb(name: &str) -> bool {
-    name.starts_with('T')
-        && Kerb::ALL
-            .iter()
-            .any(|k| name.ends_with(&format!(" {}", k.label())))
+/// A part of a kit: on or off, its type and its width (or distance from the edge).
+fn part_ui(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug + Copy,
+    label: &str,
+    part: &mut Option<(String, f64)>,
+    styles: &[String],
+    fallback: (&str, f64),
+    distance: bool,
+) -> bool {
+    let mut changed = false;
+    row(ui, label, |ui| {
+        let mut on = part.is_some();
+        if ui.checkbox(&mut on, "").changed() {
+            *part = on.then(|| {
+                let style = styles
+                    .iter()
+                    .find(|s| *s == fallback.0)
+                    .or(styles.first())
+                    .cloned()
+                    .unwrap_or_default();
+                (style, fallback.1)
+            });
+            changed = true;
+        }
+        if let Some((style, width)) = part {
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(style.as_str())
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for s in styles {
+                        changed |= ui.selectable_value(style, s.clone(), s).changed();
+                    }
+                });
+            let suffix = if distance { " m out" } else { " m" };
+            changed |= ui
+                .add(
+                    egui::DragValue::new(width)
+                        .speed(0.05)
+                        .range(0.1..=200.0)
+                        .suffix(suffix),
+                )
+                .changed();
+        }
+    });
+    changed
+}
+
+/// Which kerbs, what outside them and what wall a corner has.
+fn kit_ui(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug + Copy,
+    kit: &mut Kit,
+    project: &open_racing_track_project::Project,
+) -> bool {
+    let strips: Vec<String> = project
+        .strip_styles
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    let walls: Vec<String> = project.wall_styles.iter().map(|s| s.name.clone()).collect();
+    let mut changed = false;
+    for (part, label, fallback) in [
+        (CornerPart::Entry, "Entry kerb", ("kerb", 1.5)),
+        (CornerPart::Apex, "Apex kerb", ("kerb", 1.5)),
+        (CornerPart::Exit, "Exit kerb", ("kerb", 1.5)),
+        (CornerPart::Outside, "Outside", ("gravel", 12.0)),
+    ] {
+        changed |= part_ui(
+            ui,
+            (id, part),
+            label,
+            kit.strip_mut(part),
+            &strips,
+            fallback,
+            false,
+        );
+    }
+    changed |= part_ui(
+        ui,
+        (id, "wall"),
+        "Wall",
+        &mut kit.wall,
+        &walls,
+        ("tyre wall", 25.0),
+        true,
+    );
+    changed
 }
 
 /// The Corners tab of a road.
@@ -184,59 +264,98 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
         return;
     };
     ui.weak(format!(
-        "{} corners, numbered from the start line. Page Up / Page Down in the view steps through them; click a T label to look at one.",
+        "{} corners, numbered from the start line. Page Up / Page Down in the view steps through them; click a T label to look at one. What is laid round a corner stays with it as the road changes.",
         corners.len()
     ));
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .button("Kerbs on every corner")
-            .on_hover_text(
-                "Entry and exit kerbs outside, apex kerbs inside, on each corner that has none",
-            )
-            .clicked()
-        {
-            let mut ops = Vec::new();
-            for k in &corners {
-                let has = kerbs_of(&road, k.number);
-                if !(has.entry || has.apex || has.exit) {
-                    ops.extend(kerb_ops(
-                        &c.editor.project,
-                        &road.name,
-                        &smp,
-                        k,
-                        &Kerbs::default(),
-                    ));
+    let have = kits(c, r);
+
+    // One kit for many corners at once.
+    let id = ui.make_persistent_id("corner kit for all");
+    let mut all: Kit = ui
+        .data(|d| d.get_temp::<Kit>(id))
+        .unwrap_or_else(|| Kit::kerbs(&c.editor.project, None, 1.5));
+    section(ui, "Every corner", "corners all", false, |ui| {
+        kit_ui(ui, "all", &mut all, &c.editor.project);
+        ui.horizontal_wrapped(|ui| {
+            let bare = have.iter().filter(|k| k.is_empty()).count();
+            let lay = |c: &mut Ctx, only_bare: bool| {
+                let ops: Vec<Op> = corners
+                    .iter()
+                    .zip(&have)
+                    .filter(|(_, k)| !only_bare || k.is_empty())
+                    .flat_map(|(k, _)| {
+                        kit_ops(&c.editor.project, &road.name, &smp, &corners, k, &all)
+                    })
+                    .collect();
+                if !ops.is_empty() && c.editor.apply(ops, None) {
+                    c.editor.status = "laid round the corners".into();
+                }
+            };
+            if ui
+                .add_enabled(
+                    bare > 0,
+                    egui::Button::new(format!("Lay on {bare} bare corners")),
+                )
+                .on_hover_text("Corners with nothing laid round them yet")
+                .clicked()
+            {
+                lay(c, true);
+            }
+            if ui
+                .button(format!("Lay on all {}", corners.len()))
+                .on_hover_text(
+                    "Every corner gets this, keeping where each part's ends were dragged",
+                )
+                .clicked()
+            {
+                lay(c, false);
+            }
+            if ui.button("Clear all corners").clicked() {
+                let ops: Vec<Op> = corners
+                    .iter()
+                    .flat_map(|k| {
+                        kit_ops(
+                            &c.editor.project,
+                            &road.name,
+                            &smp,
+                            &corners,
+                            k,
+                            &Kit::default(),
+                        )
+                    })
+                    .collect();
+                if !ops.is_empty() {
+                    c.editor.apply(ops, None);
                 }
             }
-            if !ops.is_empty() && c.editor.apply(ops, None) {
-                c.editor.status = "kerbs laid round the corners".into();
-            }
-        }
-        if ui.button("Remove corner kerbs").clicked() {
-            let mut ops = Vec::new();
-            for side in [Side::Left, Side::Right] {
-                for s in road.strips(side).iter().filter(|s| is_corner_kerb(&s.name)) {
-                    ops.push(Op::RemoveStrip {
-                        road: road.name.clone(),
-                        side,
-                        name: s.name.clone(),
-                    });
-                }
-            }
-            if !ops.is_empty() {
-                c.editor.apply(ops, None);
-            }
-        }
+        });
     });
-    for k in &corners {
+    ui.data_mut(|d| d.insert_temp(id, all));
+
+    for (k, kit) in corners.iter().zip(&have) {
         let current = c.shell.corner == Some((r, k.number));
+        let parts = [
+            kit.entry.is_some(),
+            kit.apex.is_some(),
+            kit.exit.is_some(),
+            kit.outside.is_some(),
+            kit.wall.is_some(),
+        ]
+        .iter()
+        .filter(|&&p| p)
+        .count();
         let title = format!(
-            "T{}  {}  ·  {:.0}°  ·  R {:.0} m  ·  {:.0} m long",
+            "T{}  {}  ·  {:.0}°  ·  R {:.0} m  ·  {:.0} m{}",
             k.number,
             arrow(k),
             k.angle.to_degrees(),
             k.radius,
-            k.length(smp.length)
+            k.length(smp.length),
+            if parts > 0 {
+                format!("  ·  {parts} parts")
+            } else {
+                String::new()
+            }
         );
         let text = if current {
             egui::RichText::new(title).color(crate::theme::SELECTED_UI)
@@ -247,7 +366,7 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
             .id_salt(("corner", r, k.number))
             .open(current.then_some(true))
             .show_background(true)
-            .show(ui, |ui| corner_ui(ui, c, r, &road, &smp, k));
+            .show(ui, |ui| corner_ui(ui, c, r, &road, &smp, &corners, k, kit));
         if current && resp.header_response.clicked() {
             c.shell.corner = None;
         } else if resp.header_response.clicked() {
@@ -256,59 +375,36 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn corner_ui(
     ui: &mut egui::Ui,
     c: &mut Ctx,
     r: usize,
     road: &Road,
     smp: &open_racing_track_project::curve::Sampled,
+    corners: &[Corner],
     k: &Corner,
+    kit: &Kit,
 ) {
-    if ui.small_button("🔍 Look at it").clicked() {
-        look(c, r, k.number);
-    }
-    row(ui, "Places", |ui| {
+    ui.horizontal(|ui| {
+        if ui.small_button("🔍 Look at it").clicked() {
+            look(c, r, k.number);
+        }
         ui.weak(format!(
             "entry {:.0} m · apex {:.0} m · exit {:.0} m",
             k.entry.rem_euclid(smp.length),
             k.apex.rem_euclid(smp.length),
             k.exit.rem_euclid(smp.length)
-        ))
+        ));
     });
-    section(ui, "Kerbs", ("corner kerbs", r, k.number), true, |ui| {
-        let before = kerbs_of(road, k.number);
-        let mut kerbs = before;
-        row(ui, "Outside", |ui| {
-            ui.checkbox(&mut kerbs.entry, "entry");
-            ui.checkbox(&mut kerbs.exit, "exit");
-        });
-        row(ui, "Inside", |ui| ui.checkbox(&mut kerbs.apex, "apex"));
-        drag(ui, "Width m", &mut kerbs.width, 0.05, 0.2..=6.0);
-        row(ui, "Kind", |ui| {
-            for (label, profile) in [
-                ("Flat", Profile::Flat),
-                ("Rounded", Profile::Crown(0.03)),
-                ("Raised", Profile::Crown(0.08)),
-                ("Sausage", Profile::Crown(0.15)),
-            ] {
-                if ui
-                    .selectable_label(kerbs.profile == profile, label)
-                    .clicked()
-                {
-                    kerbs.profile = profile;
-                }
-            }
-        });
-        if kerbs != before {
-            let ops = kerb_ops(&c.editor.project, &road.name, smp, k, &kerbs);
-            c.editor.apply(
-                ops,
-                Some(&format!("corner kerbs {} {}", road.name, k.number)),
-            );
-        }
-        ui.weak("Drag a kerb's ends or its width handle in the view to fit it.");
-    });
-    // Other parts limited to stretches round here: kerbs, gravel, walls.
+    let mut want = kit.clone();
+    if kit_ui(ui, ("corner", r, k.number), &mut want, &c.editor.project) {
+        let ops = kit_ops(&c.editor.project, &road.name, smp, corners, k, &want);
+        c.editor
+            .apply(ops, Some(&format!("corner kit {} {}", road.name, k.number)));
+    }
+    ui.weak("Drag a part's ends or its outer edge in the view to fit it: it keeps that as the corner changes.");
+    // Other parts limited to stretches round here, not laid with the corner.
     let near = |from: f64, to: f64| {
         let (a, b) = (smp.s_at(from), smp.s_at(to));
         let inside = if b >= a {
@@ -323,9 +419,9 @@ fn corner_ui(
     let mut parts: Vec<(String, PropTab, Focus)> = Vec::new();
     for side in [Side::Left, Side::Right] {
         for (i, s) in road.strips(side).iter().enumerate() {
-            if s.ranges.iter().any(|g| near(g.from, g.to)) {
+            if s.corner.is_none() && s.ranges.iter().any(|g| near(g.from, g.to)) {
                 parts.push((
-                    format!("☰ {} ({side:?}, {:.1} m {})", s.name, s.width, s.surface),
+                    format!("☰ {} ({side:?}, {:.1} m)", s.name, s.width),
                     PropTab::Strips,
                     Focus::Strip(side, i),
                 ));
@@ -333,7 +429,7 @@ fn corner_ui(
         }
     }
     for (i, b) in road.barriers.iter().enumerate() {
-        if b.ranges.iter().any(|g| near(g.from, g.to)) {
+        if b.corner.is_none() && b.ranges.iter().any(|g| near(g.from, g.to)) {
             parts.push((
                 format!("🚧 {} ({:?}, {:.1} m out)", b.name, b.side, b.offset),
                 PropTab::Barriers,
@@ -342,7 +438,7 @@ fn corner_ui(
         }
     }
     if !parts.is_empty() {
-        ui.label("Stretches here:");
+        ui.label("Also here:");
         for (label, tab, focus) in parts {
             if ui
                 .add(egui::Button::new(label).frame(false))

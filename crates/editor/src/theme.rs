@@ -29,3 +29,4 @@ pub const START: Color = Color::srgb(0.25, 0.9, 0.4);
 pub const SELECTED_UI: Color32 = Color32::from_rgb(255, 160, 40);
 pub const SELECTED_NODE_UI: Color32 = Color32::from_rgb(255, 115, 0);
 pub const UNSELECTED_UI: Color32 = Color32::from_gray(215);
+pub const STRIP_UI: Color32 = Color32::from_rgb(51, 217, 191);

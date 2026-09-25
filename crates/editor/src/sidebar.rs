@@ -8,7 +8,7 @@ use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::HandleMode;
 use open_racing_track_render::{from_bevy, to_bevy};
 
-use crate::commands::{self, Cmd, Ctx, handle_label};
+use crate::commands::{Ctx, handle_label};
 use crate::edit;
 use crate::properties::{number, prop_fields, row, section, vector};
 use crate::state::Item;
@@ -116,19 +116,6 @@ fn item_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             handles_ui(ui, c, &name, &nodes, closed, n);
         });
     }
-    section(ui, "Edit", "sidebar edit", true, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for cmd in [
-                Cmd::Extrude,
-                Cmd::Subdivide,
-                Cmd::Delete,
-                Cmd::SelectAll,
-                Cmd::ToggleClosed,
-            ] {
-                commands::button(ui, c, cmd);
-            }
-        });
-    });
 }
 
 /// The road's width either side and its bank at the selected nodes, as Blender's radius

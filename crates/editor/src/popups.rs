@@ -65,9 +65,9 @@ fn search(
     mut text: String,
     mut selected: usize,
 ) -> (Option<Popup>, Option<Cmd>) {
-    let found: Vec<Cmd> = Cmd::all()
+    let found: Vec<Cmd> = Cmd::all(&c.editor.project)
         .into_iter()
-        .filter(|cmd| cmd.enabled(c) && matches(&cmd.search_label(), &text))
+        .filter(|cmd| cmd.enabled(c) && matches(&cmd.search_label(&c.editor.project), &text))
         .take(16)
         .collect();
     let (down, up, enter) = ctx.input(|i| {
@@ -99,7 +99,7 @@ fn search(
         }
         for (i, cmd) in found.iter().enumerate() {
             let resp = ui.add(
-                egui::Button::selectable(i == selected, cmd.search_label())
+                egui::Button::selectable(i == selected, cmd.search_label(&c.editor.project))
                     .shortcut_text(cmd.shortcut())
                     .min_size(egui::vec2(ui.available_width(), 0.0)),
             );

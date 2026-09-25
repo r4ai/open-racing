@@ -194,7 +194,12 @@ pub(super) fn pick_gizmo(
         .map(|(axis, _)| axis)
 }
 
-pub(super) fn consider_pick(best: &mut Option<(Hit, f32)>, hit: Hit, screen: Option<Vec2>, at: Vec2) {
+pub(super) fn consider_pick(
+    best: &mut Option<(Hit, f32)>,
+    hit: Hit,
+    screen: Option<Vec2>,
+    at: Vec2,
+) {
     if let Some(distance) = screen.map(|p| p.distance(at))
         && distance < PICK_RADIUS
         && best.is_none_or(|(_, current)| distance < current)

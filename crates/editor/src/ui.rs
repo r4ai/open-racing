@@ -36,8 +36,8 @@ pub enum PropTab {
     Markers,
     Terrain,
     Reference,
-    Surfaces,
-    Materials,
+    /// Strip and wall types, materials and surfaces.
+    Library,
     #[default]
     Object,
     Corners,

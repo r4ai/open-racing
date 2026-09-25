@@ -1,5 +1,6 @@
 //! The outliner, as Blender's: the track's roads, kerbs and walls, and props as a tree,
-//! with each road's strips, lines and barriers under it, and the track's settings.
+//! with each road's strips, lines and barriers under it. The track's settings are the
+//! properties editor's first tabs.
 //! Click selects, double-click (or F2) renames, right click opens a menu; what the
 //! pointer is over lights up in the 3D view.
 
@@ -8,7 +9,6 @@ use open_racing_track_project::project::Side;
 
 use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
-use crate::presets::PRESETS;
 use crate::state::Item;
 use crate::ui::{Focus, PropTab};
 
@@ -30,7 +30,7 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
             ui.set_min_width(180.0);
             commands::entry(ui, c, Cmd::DrawRoad);
             ui.separator();
-            for i in 0..PRESETS.len() {
+            for i in 0..crate::presets::list(&c.editor.project).len() {
                 commands::entry(ui, c, Cmd::DrawSpline(i));
             }
             ui.separator();
@@ -73,7 +73,6 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                 .filter(|(_, x)| shown(&x.name))
                 .map(|(i, x)| (i, x.name.clone()))
                 .collect();
-            let (n_surfaces, n_materials) = (p.surfaces.len(), p.materials.len());
             let main = p.main_road.clone();
 
             category(ui, "Roads", roads.len(), |ui| {
@@ -118,19 +117,6 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                     ui.weak("   Place models from Assets");
                 }
             });
-            ui.separator();
-            for (tab, label) in [
-                (PropTab::Track, "🏁 Track".to_string()),
-                (PropTab::Markers, "🚩 Race markers".to_string()),
-                (PropTab::Terrain, "🗻 Terrain".to_string()),
-                (PropTab::Reference, "🗺 Reference image".to_string()),
-                (PropTab::Surfaces, format!("◎ Surfaces ({n_surfaces})")),
-                (PropTab::Materials, format!("🎨 Materials ({n_materials})")),
-            ] {
-                if ui.selectable_label(c.shell.tab == tab, label).clicked() {
-                    c.shell.tab = tab;
-                }
-            }
         });
 }
 
@@ -225,26 +211,51 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
     let Some(road) = c.editor.project.roads.get(r) else {
         return;
     };
-    let mut parts: Vec<(Focus, PropTab, String)> = Vec::new();
+    let mut parts: Vec<(Option<Focus>, PropTab, String)> = Vec::new();
+    // What was laid round corners is one entry: on a long track there are dozens.
+    let cornered = road
+        .left
+        .iter()
+        .chain(&road.right)
+        .filter(|s| s.corner.is_some())
+        .count()
+        + road.barriers.iter().filter(|b| b.corner.is_some()).count();
+    if cornered > 0 {
+        parts.push((
+            None,
+            PropTab::Corners,
+            format!("↩ Corner kerbs, gravel & walls ({cornered})"),
+        ));
+    }
     for side in [Side::Left, Side::Right] {
         let s = match side {
             Side::Left => "L",
             Side::Right => "R",
         };
         for (i, strip) in road.strips(side).iter().enumerate() {
+            if strip.corner.is_some() {
+                continue;
+            }
             parts.push((
-                Focus::Strip(side, i),
+                Some(Focus::Strip(side, i)),
                 PropTab::Strips,
                 format!("☰ {} ({s})", strip.name),
             ));
         }
     }
     for (i, line) in road.lines.iter().enumerate() {
-        parts.push((Focus::Line(i), PropTab::Lines, format!("✏ {}", line.name)));
+        parts.push((
+            Some(Focus::Line(i)),
+            PropTab::Lines,
+            format!("✏ {}", line.name),
+        ));
     }
     for (i, b) in road.barriers.iter().enumerate() {
+        if b.corner.is_some() {
+            continue;
+        }
         parts.push((
-            Focus::Barrier(i),
+            Some(Focus::Barrier(i)),
             PropTab::Barriers,
             format!("🚧 {}", b.name),
         ));
@@ -262,7 +273,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
                 c.editor.selection.select(Item::Road(r));
             }
             c.shell.tab = tab;
-            c.shell.focus = Some(focus);
+            c.shell.focus = focus;
         }
     }
 }

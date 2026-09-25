@@ -1,0 +1,510 @@
+//! A road's tabs: the road itself, and the strips, painted lines and barriers along it.
+//! What was laid round corners is worked on in the Corners tab and only counted here.
+
+use super::*;
+
+pub(super) fn road_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
+    let Some(r) = c
+        .editor
+        .selection
+        .road()
+        .filter(|&r| r < c.editor.project.roads.len())
+    else {
+        return;
+    };
+    let road = c.editor.project.roads[r].clone();
+    let name = road.name.clone();
+    let (surfaces, materials) = names(&c.editor.project);
+    let period = road.period();
+
+    section(ui, "Road", ("road", r), true, |ui| {
+        name_row(ui, c, state, Item::Road(r));
+        if name == c.editor.project.main_road {
+            row(ui, "", |ui| ui.label("★ The main road: the circuit"));
+        } else {
+            row(ui, "", |ui| commands::button(ui, c, Cmd::SetMain));
+        }
+        let length = c.built.roads.get(r).map_or(0.0, |s| s.length);
+        row(ui, "Length", |ui| {
+            ui.label(format!("{length:.0} m, {} nodes", road.nodes.len()))
+        });
+        let (mut closed, mut crown, mut resolution) = (road.closed, road.crown, road.resolution);
+        let (mut surface, mut material) = (road.surface.clone(), road.material.clone());
+        let mut changed = check(ui, &mut closed, "Closed loop");
+        changed |= drag(ui, "Crown m", &mut crown, 0.005, -0.5..=0.5);
+        changed |= drag(ui, "Resolution m", &mut resolution, 0.1, 0.25..=10.0);
+        changed |= combo_row(ui, "Surface", ("road surface", r), &mut surface, &surfaces);
+        changed |= combo_row(
+            ui,
+            "Material",
+            ("road material", r),
+            &mut material,
+            &materials,
+        );
+        if changed {
+            c.editor.apply(
+                vec![Op::SetRoad {
+                    road: name.clone(),
+                    closed: Some(closed),
+                    crown: Some(crown),
+                    surface: Some(surface),
+                    material: Some(material),
+                    resolution: Some(resolution),
+                }],
+                Some(&format!("road props {name}")),
+            );
+        }
+    });
+
+    // The keys themselves, for exact values: widths and bank are shaped in the view
+    // (Alt S, Ctrl T, dragging the edges), in the sidebar (N) and in the Curves graph.
+    section(ui, "Width & bank keys", ("keys", r), false, |ui| {
+        ui.weak("Exact values at node numbers (u). Shape them more easily in the view (drag a selected node's edges, Alt S, Ctrl T), the sidebar (N) or the Curves graph below.");
+        let id = ui.make_persistent_id(("key curve", r));
+        let mut which: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+        row(ui, "Curve", |ui| {
+            for (i, label) in ["Left width", "Right width", "Bank"].iter().enumerate() {
+                ui.selectable_value(&mut which, i, *label);
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(id, which));
+        let (curve, title, scale) = [
+            (Curve::WidthLeft, "left width", 1.0),
+            (Curve::WidthRight, "right width", 1.0),
+            (Curve::Bank, "bank", 180.0 / std::f64::consts::PI),
+        ][which];
+        let cv = edit::profile(&road, curve);
+        let mut keys = cv.keys.clone();
+        let mut changed = false;
+        let mut remove = None;
+        for (i, k) in keys.iter_mut().enumerate() {
+            row(ui, &format!("Key {i}"), |ui| {
+                ui.label("u");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut k.u)
+                            .speed(0.01)
+                            .range(0.0..=period),
+                    )
+                    .changed();
+                let mut v = k.value * scale;
+                let unit = if scale == 1.0 { " m" } else { "°" };
+                if ui
+                    .add(egui::DragValue::new(&mut v).speed(0.05).suffix(unit))
+                    .changed()
+                {
+                    k.value = v / scale;
+                    changed = true;
+                }
+                if cv.keys.len() > 1 && ui.small_button("✖").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            keys.remove(i);
+            changed = true;
+        }
+        if let Some(n) = c.editor.selection.node()
+            && ui.small_button(format!("+ Key at node {n}")).clicked()
+        {
+            let v = cv.eval(n as f64, period, road.closed);
+            keys.push(Key::new(n as f64, v));
+            changed = true;
+        }
+        if changed {
+            c.editor.apply(
+                vec![Op::SetProfile {
+                    road: name.clone(),
+                    curve,
+                    keys,
+                }],
+                Some(&format!("profile {name} {title}")),
+            );
+        }
+    });
+}
+
+/// "12 more laid round corners", with a button to the Corners tab.
+fn cornered(ui: &mut egui::Ui, c: &mut Ctx, count: usize, what: &str) {
+    if count == 0 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.weak(format!("{count} {what} laid round corners"));
+        if ui
+            .small_button("↩ Corners")
+            .on_hover_text("Kerbs, gravel and walls round each corner are set in the Corners tab")
+            .clicked()
+        {
+            c.shell.tab = PropTab::Corners;
+        }
+    });
+}
+
+pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
+    let Some(r) = c.editor.selection.road() else {
+        return;
+    };
+    let Some(road) = c.editor.project.roads.get(r).cloned() else {
+        return;
+    };
+    let name = road.name.clone();
+    let (surfaces, materials) = names(&c.editor.project);
+    let (strip_styles, _) = style_names(&c.editor.project);
+    let node = c.editor.selection.node();
+    let period = road.period();
+    ui.weak("Bands beside the road, from its edge outwards: kerbs, run-off, gravel, verges.");
+    for side in [Side::Left, Side::Right] {
+        let title = match side {
+            Side::Left => "Left side",
+            Side::Right => "Right side",
+        };
+        section(ui, title, ("strips", r, side as u8), true, |ui| {
+            let strips = road.strips(side).clone();
+            cornered(
+                ui,
+                c,
+                strips.iter().filter(|s| s.corner.is_some()).count(),
+                "more",
+            );
+            for (i, strip) in strips.iter().enumerate() {
+                if strip.corner.is_some() {
+                    continue;
+                }
+                let mut s = strip.clone();
+                let (mut changed, mut removed) = (false, false);
+                let open = focused(c, Focus::Strip(side, i));
+                let kind = s.style.as_deref().unwrap_or("custom");
+                let resp =
+                    egui::CollapsingHeader::new(format!("{}  ·  {kind}, {:.1} m", s.name, s.width))
+                        .id_salt(("strip", r, side as u8, i))
+                        .open(open)
+                        .show(ui, |ui| {
+                            let mut style = s.style.clone();
+                            if row(ui, "Type", |ui| {
+                                style_combo(
+                                    ui,
+                                    ("stype", r, side as u8, i),
+                                    &mut style,
+                                    &strip_styles,
+                                    "custom",
+                                )
+                            }) {
+                                match style
+                                    .as_deref()
+                                    .and_then(|n| c.editor.project.strip_style(n))
+                                {
+                                    Some(t) => t.restyle(&mut s),
+                                    None => s.style = None,
+                                }
+                                changed = true;
+                            }
+                            changed |= drag(ui, "Width m", &mut s.width, 0.05, 0.0..=200.0);
+                            // Its own look: changing any of it leaves its type.
+                            let look = (
+                                s.surface.clone(),
+                                s.material.clone(),
+                                s.profile.clone(),
+                                s.fade,
+                            );
+                            combo_row(
+                                ui,
+                                "Surface",
+                                ("ss", r, side as u8, i),
+                                &mut s.surface,
+                                &surfaces,
+                            );
+                            combo_row(
+                                ui,
+                                "Material",
+                                ("sm", r, side as u8, i),
+                                &mut s.material,
+                                &materials,
+                            );
+                            profile_ui(ui, &mut s.profile, (r, side as u8, i));
+                            drag(ui, "Fade m", &mut s.fade, 0.1, 0.0..=100.0);
+                            if look
+                                != (
+                                    s.surface.clone(),
+                                    s.material.clone(),
+                                    s.profile.clone(),
+                                    s.fade,
+                                )
+                            {
+                                s.style = None;
+                                changed = true;
+                            }
+                            changed |= ranges_ui(ui, &mut s.ranges, node, period, road.closed);
+                            removed = row(ui, "", |ui| ui.button("Remove strip").clicked());
+                        });
+                if open.is_some() {
+                    resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+                }
+                if removed {
+                    c.editor.apply(
+                        vec![Op::RemoveStrip {
+                            road: name.clone(),
+                            side,
+                            name: s.name,
+                        }],
+                        None,
+                    );
+                    return;
+                }
+                if changed {
+                    c.editor.apply(
+                        vec![Op::PutStrip {
+                            road: name.clone(),
+                            side,
+                            strip: s,
+                            at: None,
+                        }],
+                        Some(&format!("strip {name} {side:?} {i}")),
+                    );
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Add");
+                let styles = c.editor.project.strip_styles.clone();
+                for style in styles {
+                    if ui
+                        .small_button(format!("+ {}", style.name))
+                        .on_hover_text(match node {
+                            Some(n) => format!("Round node {n}; drag its ends in the view"),
+                            None => "Along the whole road".into(),
+                        })
+                        .clicked()
+                    {
+                        let sname = crate::presets::free_name(&style.name, |n| {
+                            strips.iter().any(|s| s.name == n)
+                        });
+                        let strip = style.strip(&sname, stretch_round(node, period, road.closed));
+                        // Kerbs go against the road; the rest outermost.
+                        let kerb =
+                            c.editor
+                                .project
+                                .surface_index(&style.surface)
+                                .is_some_and(|k| {
+                                    c.editor.project.surfaces[k].props.kind == Surface::Kerb
+                                });
+                        c.editor.apply(
+                            vec![Op::PutStrip {
+                                road: name.clone(),
+                                side,
+                                strip,
+                                at: kerb.then_some(0),
+                            }],
+                            None,
+                        );
+                    }
+                }
+            });
+        });
+    }
+}
+
+pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
+    let Some(r) = c.editor.selection.road() else {
+        return;
+    };
+    let Some(road) = c.editor.project.roads.get(r).cloned() else {
+        return;
+    };
+    let name = road.name.clone();
+    let (_, materials) = names(&c.editor.project);
+    let node = c.editor.selection.node();
+    let period = road.period();
+    for (i, line) in road.lines.iter().enumerate() {
+        let mut l = line.clone();
+        let (mut changed, mut removed) = (false, false);
+        let open = focused(c, Focus::Line(i));
+        let resp = egui::CollapsingHeader::new(&l.name)
+            .id_salt(("line", r, i))
+            .default_open(true)
+            .show_background(true)
+            .open(open)
+            .show(ui, |ui| {
+                changed |= drag(ui, "Offset m", &mut l.offset, 0.05, -100.0..=100.0);
+                changed |= drag(ui, "Width m", &mut l.width, 0.01, 0.01..=5.0);
+                changed |= combo_row(ui, "Material", ("lm", r, i), &mut l.material, &materials);
+                let mut dashed = l.dash.is_some();
+                if check(ui, &mut dashed, "Dashed") {
+                    l.dash = dashed.then_some((3.0, 9.0));
+                    changed = true;
+                }
+                if let Some((on, off)) = &mut l.dash {
+                    changed |= drag(ui, "Dash m", on, 0.1, 0.1..=100.0);
+                    changed |= drag(ui, "Gap m", off, 0.1, 0.1..=100.0);
+                }
+                changed |= ranges_ui(ui, &mut l.ranges, node, period, road.closed);
+                removed = row(ui, "", |ui| ui.button("Remove line").clicked());
+            });
+        if open.is_some() {
+            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+        }
+        if removed {
+            c.editor.apply(
+                vec![Op::RemoveLine {
+                    road: name.clone(),
+                    name: l.name,
+                }],
+                None,
+            );
+            return;
+        }
+        if changed {
+            c.editor.apply(
+                vec![Op::PutLine {
+                    road: name.clone(),
+                    line: l,
+                }],
+                Some(&format!("line {name} {i}")),
+            );
+        }
+    }
+    ui.weak("Offsets are from the road's centre, positive to the left.");
+    if ui.button("+ Line").clicked() {
+        let n = (1..)
+            .map(|k| format!("line {k}"))
+            .find(|n| road.lines.iter().all(|l| &l.name != n))
+            .expect("some name is free");
+        let line = PaintLine {
+            name: n,
+            offset: 0.0,
+            width: 0.12,
+            material: "paint".into(),
+            ranges: vec![],
+            dash: Some((3.0, 9.0)),
+        };
+        c.editor.apply(
+            vec![Op::PutLine {
+                road: name.clone(),
+                line,
+            }],
+            None,
+        );
+    }
+}
+
+pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
+    let Some(r) = c.editor.selection.road() else {
+        return;
+    };
+    let Some(road) = c.editor.project.roads.get(r).cloned() else {
+        return;
+    };
+    let name = road.name.clone();
+    let (_, materials) = names(&c.editor.project);
+    let (_, wall_styles) = style_names(&c.editor.project);
+    let node = c.editor.selection.node();
+    let period = road.period();
+    cornered(
+        ui,
+        c,
+        road.barriers.iter().filter(|b| b.corner.is_some()).count(),
+        "more",
+    );
+    for (i, barrier) in road.barriers.iter().enumerate() {
+        if barrier.corner.is_some() {
+            continue;
+        }
+        let mut b = barrier.clone();
+        let (mut changed, mut removed) = (false, false);
+        let open = focused(c, Focus::Barrier(i));
+        let kind = b.style.as_deref().unwrap_or("custom");
+        let resp = egui::CollapsingHeader::new(format!("{}  ·  {kind}, {:?}", b.name, b.side))
+            .id_salt(("barrier", r, i))
+            .default_open(true)
+            .show_background(true)
+            .open(open)
+            .show(ui, |ui| {
+                let mut style = b.style.clone();
+                if row(ui, "Type", |ui| {
+                    style_combo(ui, ("btype", r, i), &mut style, &wall_styles, "custom")
+                }) {
+                    match style
+                        .as_deref()
+                        .and_then(|n| c.editor.project.wall_style(n))
+                    {
+                        Some(t) => t.restyle(&mut b),
+                        None => b.style = None,
+                    }
+                    changed = true;
+                }
+                changed |= row(ui, "Side", |ui| {
+                    choice(
+                        ui,
+                        &mut b.side,
+                        &[(Side::Left, "Left"), (Side::Right, "Right")],
+                    )
+                });
+                changed |= drag(ui, "From edge m", &mut b.offset, 0.1, 0.0..=500.0);
+                // Its own shape and look: changing any of it leaves its type.
+                let look = (b.height, b.thickness, b.material.clone(), b.model.clone());
+                drag(ui, "Height m", &mut b.height, 0.05, 0.1..=20.0);
+                drag(ui, "Thickness m", &mut b.thickness, 0.05, 0.0..=5.0);
+                combo_row(ui, "Material", ("bm", r, i), &mut b.material, &materials);
+                model_ui(ui, ("barrier", r, i), &mut b.model, library);
+                if look != (b.height, b.thickness, b.material.clone(), b.model.clone()) {
+                    b.style = None;
+                    changed = true;
+                }
+                changed |= ranges_ui(ui, &mut b.ranges, node, period, road.closed);
+                removed = row(ui, "", |ui| ui.button("Remove barrier").clicked());
+            });
+        if open.is_some() {
+            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+        }
+        if removed {
+            c.editor.apply(
+                vec![Op::RemoveBarrier {
+                    road: name.clone(),
+                    name: b.name,
+                }],
+                None,
+            );
+            return;
+        }
+        if changed {
+            c.editor.apply(
+                vec![Op::PutBarrier {
+                    road: name.clone(),
+                    barrier: b,
+                }],
+                Some(&format!("barrier {name} {i}")),
+            );
+        }
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Add");
+        let styles = c.editor.project.wall_styles.clone();
+        for style in styles {
+            if ui
+                .small_button(format!("+ {}", style.name))
+                .on_hover_text(match node {
+                    Some(n) => format!("Round node {n}, on the left; drag it in the view"),
+                    None => "Along the whole road, on the left".into(),
+                })
+                .clicked()
+            {
+                let n = crate::presets::free_name(&style.name, |n| {
+                    road.barriers.iter().any(|b| b.name == n)
+                });
+                let barrier = style.barrier(
+                    &n,
+                    Side::Left,
+                    10.0,
+                    stretch_round(node, period, road.closed),
+                );
+                c.editor.apply(
+                    vec![Op::PutBarrier {
+                        road: name.clone(),
+                        barrier,
+                    }],
+                    None,
+                );
+            }
+        }
+    });
+}

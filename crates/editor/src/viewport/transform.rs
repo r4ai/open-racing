@@ -4,7 +4,12 @@
 use super::*;
 
 /// Move one handle while keeping the other independent or aligned as requested.
-pub(super) fn dragged_handles(mode: HandleMode, out: bool, moved: DVec3, other: DVec3) -> (DVec3, DVec3) {
+pub(super) fn dragged_handles(
+    mode: HandleMode,
+    out: bool,
+    moved: DVec3,
+    other: DVec3,
+) -> (DVec3, DVec3) {
     if out {
         let incoming = if mode == HandleMode::Free {
             other
@@ -576,11 +581,24 @@ pub(super) fn transform_ops(
                     }
                 }
             };
+            // A part laid round a corner keeps where its end now is from the corner,
+            // so that it stays there as the corner changes.
+            let anchored = |anchor: &mut Option<Anchor>| {
+                if let Some(a) = anchor
+                    && let Some(c) = built
+                        .corners
+                        .get(end.road)
+                        .and_then(|cs| corners::owner(smp, cs, a))
+                {
+                    a.shift[end.to as usize] = corners::shift_to(smp, c, a, end.to, smp.s_at(u));
+                }
+            };
             let name = road.name.clone();
             let op = match end.part {
                 Part::Strip(side, i) => {
                     let mut strip = road.strips(side)[i].clone();
                     set(&mut strip.ranges);
+                    anchored(&mut strip.corner);
                     Op::PutStrip {
                         road: name,
                         side,
@@ -591,6 +609,7 @@ pub(super) fn transform_ops(
                 Part::Barrier(i) => {
                     let mut barrier = road.barriers[i].clone();
                     set(&mut barrier.ranges);
+                    anchored(&mut barrier.corner);
                     Op::PutBarrier {
                         road: name,
                         barrier,
@@ -743,7 +762,11 @@ pub(super) const CATCH: f64 = 4.0;
 
 /// The node or corner place within `CATCH` of `s` along a road, as its spline
 /// parameter and a name for it.
-pub(super) fn range_snap(smp: &Sampled, corners: Option<&Vec<Corner>>, s: f64) -> Option<(f64, String)> {
+pub(super) fn range_snap(
+    smp: &Sampled,
+    corners: Option<&Vec<Corner>>,
+    s: f64,
+) -> Option<(f64, String)> {
     let gap = |a: f64| {
         let d = (a - s).abs();
         if smp.closed {
@@ -847,7 +870,13 @@ pub(super) fn snap_node(
 
 /// The turn a rotation has reached, radians anticlockwise seen from above: typed in
 /// degrees, or the pointer's angle round the pivot on screen.
-pub(super) fn turn(m: &Modal, center: Option<Vec2>, cursor: Vec2, typed: Option<f64>, snap: bool) -> f64 {
+pub(super) fn turn(
+    m: &Modal,
+    center: Option<Vec2>,
+    cursor: Vec2,
+    typed: Option<f64>,
+    snap: bool,
+) -> f64 {
     let angle = match (typed, center) {
         (Some(deg), _) => return deg.to_radians(),
         (None, Some(c)) => {
@@ -867,7 +896,13 @@ pub(super) fn turn(m: &Modal, center: Option<Vec2>, cursor: Vec2, typed: Option<
 
 /// The factor a scaling has reached: typed, or the pointer's distance from the pivot on
 /// screen against where it began.
-pub(super) fn stretch(m: &Modal, center: Option<Vec2>, cursor: Vec2, typed: Option<f64>, snap: bool) -> f64 {
+pub(super) fn stretch(
+    m: &Modal,
+    center: Option<Vec2>,
+    cursor: Vec2,
+    typed: Option<f64>,
+    snap: bool,
+) -> f64 {
     let k = match (typed, center) {
         (Some(k), _) => return k,
         (None, Some(c)) => (cursor.distance(c) / m.start_cursor.distance(c).max(1.0)) as f64,

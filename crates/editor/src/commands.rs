@@ -4,11 +4,12 @@
 
 use bevy::math::Vec2;
 use bevy_egui::egui;
+use open_racing_track_project::Project;
 use open_racing_track_project::project::HandleMode;
 
 use crate::edit;
 use crate::jobs::Jobs;
-use crate::presets::PRESETS;
+use crate::presets;
 use crate::preview::Built;
 use crate::state::{Editor, Item};
 use crate::ui::{BottomTab, Popup, Shell};
@@ -81,7 +82,7 @@ pub struct Ctx<'a> {
 
 impl Cmd {
     /// Every command, for the search.
-    pub fn all() -> Vec<Cmd> {
+    pub fn all(project: &Project) -> Vec<Cmd> {
         use Cmd::*;
         let mut all = vec![
             Undo,
@@ -128,12 +129,12 @@ impl Cmd {
             SetMain,
         ];
         all.extend(ViewDir::ALL.map(View));
-        all.extend((0..PRESETS.len()).map(DrawSpline));
+        all.extend((0..presets::list(project).len()).map(DrawSpline));
         all.extend(ToolKind::ALL.map(UseTool));
         all
     }
 
-    pub fn label(self) -> String {
+    pub fn label(self, project: &Project) -> String {
         use Cmd::*;
         match self {
             Undo => "Undo".into(),
@@ -161,7 +162,9 @@ impl Cmd {
             SelectMore => "Select More".into(),
             SelectLess => "Select Less".into(),
             DrawRoad => "Road".into(),
-            DrawSpline(i) => PRESETS[i].label.into(),
+            DrawSpline(i) => presets::list(project)
+                .get(i)
+                .map_or("(gone)".into(), |p| p.label()),
             PlaceProp => "Prop (from Assets)…".into(),
             Grab => "Move".into(),
             Rotate => "Rotate".into(),
@@ -185,7 +188,7 @@ impl Cmd {
     }
 
     /// The label the search matches and lists: with the menu it lives in.
-    pub fn search_label(self) -> String {
+    pub fn search_label(self, project: &Project) -> String {
         use Cmd::*;
         let menu = match self {
             DrawRoad | DrawSpline(_) | PlaceProp => "Add",
@@ -200,9 +203,9 @@ impl Cmd {
             _ => "",
         };
         if menu.is_empty() {
-            self.label()
+            self.label(project)
         } else {
-            format!("{menu} › {}", self.label())
+            format!("{menu} › {}", self.label(project))
         }
     }
 
@@ -341,7 +344,11 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         SelectMore => edit::select_more(c.editor),
         SelectLess => edit::select_less(c.editor),
         DrawRoad => start_draw(c.tool, DrawKind::Road),
-        DrawSpline(i) => start_draw(c.tool, DrawKind::Spline(i)),
+        DrawSpline(i) => {
+            if let Some(p) = presets::list(&c.editor.project).get(i) {
+                start_draw(c.tool, DrawKind::Spline(p.clone()))
+            }
+        }
         PlaceProp => {
             c.shell.maximized = false;
             c.shell.bottom_open = true;
@@ -372,7 +379,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
 /// A menu entry for a command, with its shortcut; runs it and closes the menu when
 /// clicked.
 pub fn entry(ui: &mut egui::Ui, c: &mut Ctx, cmd: Cmd) -> bool {
-    let clicked = button_as(ui, c, cmd, &cmd.label());
+    let clicked = button_as(ui, c, cmd, &cmd.label(&c.editor.project));
     if clicked {
         ui.close();
     }
@@ -381,7 +388,7 @@ pub fn entry(ui: &mut egui::Ui, c: &mut Ctx, cmd: Cmd) -> bool {
 
 /// A button for a command in a panel.
 pub fn button(ui: &mut egui::Ui, c: &mut Ctx, cmd: Cmd) -> bool {
-    button_as(ui, c, cmd, &cmd.label())
+    button_as(ui, c, cmd, &cmd.label(&c.editor.project))
 }
 
 /// A button for a command under another name, with its shortcut.

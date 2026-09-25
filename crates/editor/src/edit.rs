@@ -510,10 +510,13 @@ mod tests {
 
         // Splines keep their place, and a taken name leaves everything as it was.
         for (name, y) in [("a", 0.0), ("b", 5.0)] {
-            let spline = crate::presets::PRESETS[0].spline(
-                &e.project,
-                vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
-            );
+            let spline = crate::presets::named(&e.project, "kerb")
+                .unwrap()
+                .spline(
+                    &e.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
+                )
+                .unwrap();
             let spline = open_racing_track_project::project::Spline {
                 name: name.into(),
                 ..spline
@@ -533,10 +536,13 @@ mod tests {
     fn deleting_a_whole_item_selects_nothing() {
         let (mut e, dir) = editor("delete");
         for y in [0.0, 5.0] {
-            let spline = crate::presets::PRESETS[0].spline(
-                &e.project,
-                vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
-            );
+            let spline = crate::presets::named(&e.project, "kerb")
+                .unwrap()
+                .spline(
+                    &e.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(10.0, y, 0.0)],
+                )
+                .unwrap();
             assert!(e.apply(vec![Op::PutSpline { spline }], None));
         }
         e.selection.select(Item::Spline(0));

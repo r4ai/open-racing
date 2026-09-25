@@ -320,7 +320,14 @@ pub(super) fn click(
     }
 }
 
-pub(super) fn box_select(editor: &mut Editor, built: &Built, view: View, r: Rect, add: bool, edit: bool) {
+pub(super) fn box_select(
+    editor: &mut Editor,
+    built: &Built,
+    view: View,
+    r: Rect,
+    add: bool,
+    edit: bool,
+) {
     // In edit mode the nodes of the line being edited; in object mode the line with
     // most nodes in the box.
     let inside = |item: Item| -> Vec<usize> {
@@ -426,7 +433,11 @@ pub fn delete(editor: &mut Editor) {
 
 /// Where a node goes along a line so that the line passes through `pos`: before the
 /// node after the nearest segment's middle.
-pub(super) fn insert_index(nodes: &[open_racing_track_project::Node], closed: bool, pos: DVec3) -> usize {
+pub(super) fn insert_index(
+    nodes: &[open_racing_track_project::Node],
+    closed: bool,
+    pos: DVec3,
+) -> usize {
     let n = nodes.len();
     let segs = segments(n, closed);
     let mid = |i: usize| (nodes[i].pos + nodes[(i + 1) % n].pos) * 0.5;
@@ -541,17 +552,22 @@ pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) 
 
 /// Where the draw tool would put a point: the ground under the pointer, or for a band,
 /// beside the nearest road edge within reach (Ctrl frees it).
-pub(super) fn draw_point(editor: &Editor, built: &Built, kind: DrawKind, pointer: DVec3, ctrl: bool) -> DVec3 {
-    let DrawKind::Spline(i) = kind else {
+pub(super) fn draw_point(
+    editor: &Editor,
+    built: &Built,
+    kind: &DrawKind,
+    pointer: DVec3,
+    ctrl: bool,
+) -> DVec3 {
+    let DrawKind::Spline(preset) = kind else {
         return pointer;
     };
-    let preset = &PRESETS[i];
-    if ctrl || !preset.is_band(&editor.project) {
+    if ctrl || !preset.is_band() {
         return pointer;
     }
-    let half = match (preset.shape)(&editor.project) {
-        Shape::Band { width, .. } => 0.5 * width,
-        Shape::Wall { .. } => 0.0,
+    let half = match preset.shape(&editor.project) {
+        Some((Shape::Band { width, .. }, _)) => 0.5 * width,
+        _ => 0.0,
     };
     let mut best: Option<(DVec3, f64)> = None;
     for smp in &built.roads {
@@ -582,10 +598,10 @@ pub(super) fn draw(
     ctrl: bool,
     keys_free: bool,
 ) {
-    let kind = tool.draw.as_ref().map(|d| d.kind).expect("drawing");
+    let kind = tool.draw.as_ref().map(|d| d.kind.clone()).expect("drawing");
     tool.draw_at = tool
         .pointer
-        .map(|p| draw_point(editor, built, kind, p, ctrl));
+        .map(|p| draw_point(editor, built, &kind, p, ctrl));
     tool.hint = "Draw: click to add points · Backspace removes the last · Enter or right click finishes · Esc cancels · Ctrl: no snapping".into();
     let d = tool.draw.as_mut().expect("drawing");
     if over.is_some()
@@ -629,8 +645,11 @@ pub(super) fn draw(
                     .select(Item::Road(editor.project.roads.len() - 1));
             }
         }
-        DrawKind::Spline(i) => {
-            let spline = PRESETS[i].spline(&editor.project, d.points);
+        DrawKind::Spline(preset) => {
+            let Some(spline) = preset.spline(&editor.project, d.points) else {
+                editor.status = format!("there is no type \"{}\" any more", preset.name());
+                return;
+            };
             if editor.apply(vec![Op::PutSpline { spline }], None) {
                 editor
                     .selection
