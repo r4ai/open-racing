@@ -223,9 +223,13 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
         .left
         .iter()
         .chain(&road.right)
-        .filter(|s| s.corner.is_some())
+        .filter(|s| crate::corners::held(c.built, r, &s.corner))
         .count()
-        + road.barriers.iter().filter(|b| b.corner.is_some()).count();
+        + road
+            .barriers
+            .iter()
+            .filter(|b| crate::corners::held(c.built, r, &b.corner))
+            .count();
     if cornered > 0 {
         parts.push((
             None,
@@ -239,7 +243,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
             Side::Right => "R",
         };
         for (i, strip) in road.strips(side).iter().enumerate() {
-            if strip.corner.is_some() {
+            if crate::corners::held(c.built, r, &strip.corner) {
                 continue;
             }
             parts.push((
@@ -257,7 +261,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
         ));
     }
     for (i, b) in road.barriers.iter().enumerate() {
-        if b.corner.is_some() {
+        if crate::corners::held(c.built, r, &b.corner) {
             continue;
         }
         parts.push((

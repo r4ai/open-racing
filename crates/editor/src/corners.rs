@@ -6,7 +6,7 @@ use bevy_egui::egui;
 use glam::DVec3;
 use open_racing_track_project::corners::{Corner, CornerPart, Kit, kit_ops};
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{Road, Side};
+use open_racing_track_project::project::{Anchor, Road, Side};
 use open_racing_track_render::to_bevy;
 
 use crate::commands::Ctx;
@@ -14,6 +14,16 @@ use crate::properties::{row, section};
 use crate::state::Item;
 use crate::ui::{Focus, PropTab};
 use crate::viewport::View;
+
+/// Whether a strip or barrier of road `r` is held round one of its corners, as last
+/// built. One whose corner is gone (the road was straightened) is edited as any other.
+pub fn held(built: &crate::preview::Built, r: usize, anchor: &Option<Anchor>) -> bool {
+    let (Some(a), Some(smp), Some(corners)) = (anchor, built.roads.get(r), built.corners.get(r))
+    else {
+        return false;
+    };
+    open_racing_track_project::corners::owner(smp, corners, a).is_some()
+}
 
 /// The road whose corners are worked on: the selected one, or else the main road.
 fn road_index(c: &Ctx) -> Option<usize> {

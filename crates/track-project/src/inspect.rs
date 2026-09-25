@@ -256,6 +256,39 @@ pub fn issues(project: &Project, scene: &Scene) -> Vec<Issue> {
             }
         }
     }
+    // Parts laid round a corner that is no longer there stay where they were.
+    for (road, b) in project.roads.iter().zip(&scene.roads) {
+        if !road.has_corner_parts() {
+            continue;
+        }
+        let smp = &b.sampled;
+        let start = if road.name == project.main_road {
+            smp.s_at(project.markers.start)
+        } else {
+            0.0
+        };
+        let corners = crate::corners::find(smp, start);
+        let parts = road
+            .left
+            .iter()
+            .chain(&road.right)
+            .map(|s| (&s.name, &s.corner))
+            .chain(road.barriers.iter().map(|b| (&b.name, &b.corner)));
+        for (name, anchor) in parts {
+            if let Some(a) = anchor
+                && crate::corners::owner(smp, &corners, a).is_none()
+            {
+                out.push(Issue::at(
+                    &road.name,
+                    smp.s_at(a.apex),
+                    format!(
+                        "road \"{}\": \"{name}\" was laid round a corner that is no longer there",
+                        road.name
+                    ),
+                ));
+            }
+        }
+    }
     let m = &project.markers;
     if let Some(main) = project.road(&project.main_road) {
         let period = main.period();
@@ -683,6 +716,19 @@ mod tests {
             w.iter().any(|w| w.contains("runs into \"beside\"")),
             "{w:?}"
         );
+    }
+
+    #[test]
+    fn a_part_whose_corner_is_gone_is_pointed_out() {
+        let mut p = Project::new("orphan");
+        // A kerb held round a place on the straight, where there is no corner.
+        p.roads[0].left[0].corner = Some(crate::project::Anchor {
+            part: crate::project::CornerPart::Apex,
+            apex: 0.5,
+            shift: [0.0; 2],
+        });
+        let w = summarize(&p, &crate::bake::build(&p)).warnings;
+        assert!(w.iter().any(|w| w.contains("no longer there")), "{w:?}");
     }
 
     #[test]

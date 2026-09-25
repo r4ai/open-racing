@@ -165,11 +165,14 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             cornered(
                 ui,
                 c,
-                strips.iter().filter(|s| s.corner.is_some()).count(),
+                strips
+                    .iter()
+                    .filter(|s| crate::corners::held(c.built, r, &s.corner))
+                    .count(),
                 "more",
             );
             for (i, strip) in strips.iter().enumerate() {
-                if strip.corner.is_some() {
+                if crate::corners::held(c.built, r, &strip.corner) {
                     continue;
                 }
                 let mut s = strip.clone();
@@ -490,11 +493,14 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     cornered(
         ui,
         c,
-        road.barriers.iter().filter(|b| b.corner.is_some()).count(),
+        road.barriers
+            .iter()
+            .filter(|b| crate::corners::held(c.built, r, &b.corner))
+            .count(),
         "more",
     );
     for (i, barrier) in road.barriers.iter().enumerate() {
-        if barrier.corner.is_some() {
+        if crate::corners::held(c.built, r, &barrier.corner) {
             continue;
         }
         let mut b = barrier.clone();
