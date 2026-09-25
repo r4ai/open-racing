@@ -226,7 +226,7 @@ fn bundled_varied_tracks_support_a_simple_driver() {
     for name in ["redwood_oval", "pine_ridge_club", "harbor_street"] {
         let track = load_track(name).unwrap();
         let length = track.length;
-        let spec = EnvSpec::new(
+        let mut spec = EnvSpec::new(
             track,
             CarModel::gt3(),
             EnvConfig {
@@ -236,11 +236,15 @@ fn bundled_varied_tracks_support_a_simple_driver() {
                 ..Default::default()
             },
         );
+        spec.termination = std::sync::Arc::new(DefaultTermination {
+            max_time: 360.0,
+            ..Default::default()
+        });
         let mut env = spec.make_vec_env(1);
         let mut policy = PurePursuit::new(env.observation_space());
         let mut obs = env.reset(0).to_vec();
         let mut actions = [0.0; 3];
-        for step in 0..(50 * 150) {
+        for step in 0..(50 * 300) {
             policy.act(&obs, &mut actions);
             let result = env.step(&actions);
             assert_eq!(
@@ -249,10 +253,19 @@ fn bundled_varied_tracks_support_a_simple_driver() {
             );
             obs.copy_from_slice(result.obs);
         }
-        let progress = env.episode_stats().next().unwrap().progress;
+        let stats = env.episode_stats().next().unwrap();
         assert!(
-            progress > length,
-            "{name}: progress {progress:.0} m of {length:.0} m"
+            stats.laps >= 1,
+            "{name}: completed {} laps with {:.0} m of progress on a {:.0} m track",
+            stats.laps,
+            stats.progress,
+            length
+        );
+        assert!(
+            stats.progress > length,
+            "{name}: progress {:.0} m of {:.0} m",
+            stats.progress,
+            length
         );
     }
 }
