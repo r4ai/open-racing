@@ -34,8 +34,8 @@ pub enum Op {
     },
 
     /// Adds a road through `nodes`. It takes its cross-section (widths, banking, crown,
-    /// surfaces, strips, lines, barriers) from the road `like`, without the stretches
-    /// those are limited to, or else a plain 12 m asphalt road.
+    /// surfaces, and the strips, lines and barriers that run its whole length) from the
+    /// road `like`, or else a plain 12 m asphalt road.
     AddRoad {
         name: String,
         closed: bool,
@@ -363,17 +363,17 @@ impl Op {
                 let road = match like {
                     Some(like) => {
                         let mut r = p.road(&like).ok_or_else(|| missing("road", &like))?.clone();
-                        // Profiles become constant at their first value, and strips,
-                        // lines and barriers run the whole way.
+                        // Profiles become constant at their first value; strips, lines
+                        // and barriers limited to stretches (a corner's kerbs, a gravel
+                        // trap) belong to that road's corners and stay behind.
                         for c in [&mut r.width_left, &mut r.width_right, &mut r.bank] {
                             let v = c.keys.first().map_or(0.0, |k| k.value);
                             *c = StationCurve::constant(v);
                         }
-                        for s in r.left.iter_mut().chain(r.right.iter_mut()) {
-                            s.ranges.clear();
-                        }
-                        r.lines.iter_mut().for_each(|l| l.ranges.clear());
-                        r.barriers.iter_mut().for_each(|b| b.ranges.clear());
+                        r.left.retain(|s| s.ranges.is_empty());
+                        r.right.retain(|s| s.ranges.is_empty());
+                        r.lines.retain(|l| l.ranges.is_empty());
+                        r.barriers.retain(|b| b.ranges.is_empty());
                         Road {
                             name,
                             closed,
@@ -766,7 +766,7 @@ mod tests {
         .unwrap();
         apply_all(&mut p, &ops).unwrap();
         assert_eq!(p.main_road, "gp");
-        assert_eq!(p.roads[1].left.len(), 2, "pit lane copies the strips");
+        assert_eq!(p.roads[1].left.len(), 1, "the grass, not the corner kerbs");
         assert_eq!(p.roads[0].left[2].profile, Profile::Slope(0.2));
         assert_eq!(
             p.roads[0].left[2].ranges,

@@ -8,6 +8,7 @@
 
 mod assets;
 mod commands;
+mod corners;
 mod curve_graph;
 mod edit;
 mod jobs;
@@ -49,7 +50,14 @@ struct Args {
     /// View from above.
     #[arg(long)]
     top: bool,
+    /// Look at this corner of the focused road (or the main road), by its number.
+    #[arg(long)]
+    corner: Option<usize>,
 }
+
+/// A corner to look at once the first build has found the corners.
+#[derive(Resource)]
+pub struct StartCorner(pub usize);
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -129,6 +137,9 @@ fn main() {
     }
 
     let mut app = App::new();
+    if let Some(n) = args.corner {
+        app.insert_resource(StartCorner(n));
+    }
     if let Some(path) = args.screenshot {
         app.insert_resource(AutoScreenshot {
             path,

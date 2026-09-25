@@ -391,7 +391,7 @@ pub fn backups(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "ron"))
         .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
         .collect();
-    list.sort_by(|a, b| b.1.cmp(&a.1));
+    list.sort_by_key(|b| std::cmp::Reverse(b.1));
     list
 }
 

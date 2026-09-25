@@ -11,6 +11,7 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use open_racing_sim::GroundMesh;
+use open_racing_track_project::corners::{self, Corner};
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::inspect::{self, Issue};
 use open_racing_track_project::model::{Model, Placement};
@@ -43,6 +44,8 @@ pub struct Built {
     pub ground: Option<Arc<GroundMesh>>,
     /// What will not drive well, as of the last build.
     pub issues: Vec<Issue>,
+    /// Each road's corners.
+    pub corners: Vec<Vec<Corner>>,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -53,6 +56,7 @@ struct Meshes {
     splines: Vec<Sampled>,
     ground: Option<Arc<GroundMesh>>,
     issues: Vec<Issue>,
+    corners: Vec<Vec<Corner>>,
     /// (material, mesh, casts shadows)
     meshes: Vec<(usize, Mesh, bool)>,
 }
@@ -82,6 +86,19 @@ fn to_mesh(m: MeshData) -> Mesh {
 fn build(project: Project) -> Meshes {
     let scene = bake::build(&project);
     let issues = inspect::issues(&project, &scene);
+    let corners = project
+        .roads
+        .iter()
+        .zip(&scene.roads)
+        .map(|(road, b)| {
+            let start = if road.name == project.main_road {
+                b.sampled.s_at(project.markers.start)
+            } else {
+                0.0
+            };
+            corners::find(&b.sampled, start)
+        })
+        .collect();
     let terrain = project
         .material_index(&project.terrain.material)
         .unwrap_or(0);
@@ -98,6 +115,7 @@ fn build(project: Project) -> Meshes {
         roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
         splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
         issues,
+        corners,
         meshes,
     }
 }
@@ -165,6 +183,7 @@ pub fn rebuild(
         built.splines = done.splines;
         built.ground = done.ground;
         built.issues = done.issues;
+        built.corners = done.corners;
         built.count += 1;
     }
 

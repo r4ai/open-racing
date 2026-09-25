@@ -420,6 +420,12 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
     run_if(Cmd::ToggleToolbar, Key::T, none, c);
     run_if(Cmd::ToggleSidebar, Key::N, none, c);
     if over_view {
+        if pressed(Key::PageDown, none) {
+            crate::corners::step(c, 1);
+        }
+        if pressed(Key::PageUp, none) {
+            crate::corners::step(c, -1);
+        }
         run_if(Cmd::HandleMenu, Key::V, none, c);
         run_if(Cmd::ToggleClosed, Key::C, Modifiers::ALT, c);
         run_if(Cmd::SelectInvert, Key::I, Modifiers::COMMAND, c);

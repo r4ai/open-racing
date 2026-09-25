@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use open_racing_track_project::{
-    Cache, Error, Project, Side, assets, bake, centreline, inspect, ops, pitlane, preview, validate,
+    Cache, Error, Project, Side, assets, bake, centreline, corners, curve, inspect, ops, pitlane,
+    preview, validate,
 };
 
 #[derive(Parser)]
@@ -114,6 +115,26 @@ enum Command {
         width: f64,
         #[arg(long, default_value_t = 12)]
         boxes: usize,
+    },
+    /// Lays kerbs round a road's corners (as `info` numbers them): outside at entry and
+    /// exit, inside at the apex. Replaces the kerbs these corners had.
+    Kerbs {
+        project: String,
+        /// Defaults to the main road.
+        #[arg(long)]
+        road: Option<String>,
+        /// Only these corners (by number); all by default.
+        #[arg(long, value_delimiter = ',')]
+        corners: Vec<usize>,
+        #[arg(long, default_value_t = 1.5)]
+        width: f64,
+        /// Leave out the entry, apex or exit kerbs.
+        #[arg(long)]
+        no_entry: bool,
+        #[arg(long)]
+        no_apex: bool,
+        #[arg(long)]
+        no_exit: bool,
     },
     /// Bakes the project and checks the package, without saving it.
     Check {
@@ -310,6 +331,46 @@ fn run(cli: Cli) -> Result<(), Error> {
                 plan.from, plan.to
             );
         }
+        Command::Kerbs {
+            project,
+            road,
+            corners: only,
+            width,
+            no_entry,
+            no_apex,
+            no_exit,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let name = road.unwrap_or_else(|| p.main_road.clone());
+            let r = p
+                .road(&name)
+                .ok_or_else(|| Error::Invalid(format!("no road named \"{name}\"")))?;
+            let smp = curve::Sampled::new(r, r.resolution);
+            let start = if name == p.main_road {
+                smp.s_at(p.markers.start)
+            } else {
+                0.0
+            };
+            let kerbs = corners::Kerbs {
+                entry: !no_entry,
+                apex: !no_apex,
+                exit: !no_exit,
+                width,
+                ..Default::default()
+            };
+            let found = corners::find(&smp, start);
+            let mut list = Vec::new();
+            for c in found
+                .iter()
+                .filter(|c| only.is_empty() || only.contains(&c.number))
+            {
+                list.extend(corners::kerb_ops(&p, &name, &smp, c, &kerbs));
+            }
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            println!("kerbed {} corners of \"{name}\"", found.len());
+        }
         Command::Check { project, lap } => {
             let dir = resolve(&project);
             let p = Project::load(&dir)?;
@@ -391,6 +452,12 @@ fn print_summary(s: &inspect::Summary) {
         }
         if !r.barriers.is_empty() {
             println!("  barriers: {}", r.barriers.join(", "));
+        }
+        for c in &r.corners {
+            println!(
+                "  turn {}: {:?}, {:.0}° at radius {:.0} m, s = {:.0}..{:.0} m (apex {:.0})",
+                c.number, c.dir, c.angle, c.radius, c.entry, c.exit, c.apex
+            );
         }
     }
     for sp in &s.splines {

@@ -55,6 +55,11 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
         Some(Item::Road(_)) => tabs.extend([
             (PropTab::Object, "🚗", "Road"),
             (
+                PropTab::Corners,
+                "↩",
+                "Corners: kerbs and stretches round each turn",
+            ),
+            (
                 PropTab::Strips,
                 "☰",
                 "Strips: kerbs, grass, gravel and run-off beside the road",
@@ -152,6 +157,7 @@ pub fn show(
                     Some(Item::Prop(_)) => prop_tab(ui, c, state, library),
                     None => {}
                 },
+                PropTab::Corners => crate::corners::tab(ui, c),
                 PropTab::Strips => strips_tab(ui, c),
                 PropTab::Lines => lines_tab(ui, c),
                 PropTab::Barriers => barriers_tab(ui, c),

@@ -157,7 +157,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `AddRoad` | `name`, `closed`, `nodes: [(x, y, z)]`, `like?` | adds a road. With `like`, it copies that road's cross-section, running along the whole road. |
+| `AddRoad` | `name`, `closed`, `nodes: [(x, y, z)]`, `like?` | adds a road. With `like`, it copies that road's cross-section: widths, banking, and the strips, lines and barriers that run its whole length (not those limited to stretches). |
 | `RemoveRoad` | `road` | removes a road |
 | `RenameRoad` | `road`, `to` | renames a road and every reference to it |
 | `SetRoad` | `road`, `closed?`, `crown?`, `surface?`, `material?`, `resolution?` | sets the given properties |

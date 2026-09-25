@@ -46,6 +46,21 @@ pub struct RoadSummary {
     pub strips_right: Vec<StripSummary>,
     pub lines: Vec<String>,
     pub barriers: Vec<String>,
+    /// Its corners, numbered from the start line on the main road.
+    pub corners: Vec<CornerSummary>,
+}
+
+/// A corner: which way, where (m along the road), how tight and how far it turns.
+#[derive(Serialize)]
+pub struct CornerSummary {
+    pub number: usize,
+    pub dir: Side,
+    pub entry: f64,
+    pub apex: f64,
+    pub exit: f64,
+    pub radius: f64,
+    /// Degrees.
+    pub angle: f64,
 }
 
 /// A kerb, wall or fence on its own line.
@@ -350,6 +365,25 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
                 strips_right: strips(Side::Right),
                 lines: road.lines.iter().map(|l| l.name.clone()).collect(),
                 barriers: road.barriers.iter().map(|b| b.name.clone()).collect(),
+                corners: {
+                    let start = if road.name == project.main_road {
+                        smp.s_at(project.markers.start)
+                    } else {
+                        0.0
+                    };
+                    crate::corners::find(smp, start)
+                        .into_iter()
+                        .map(|c| CornerSummary {
+                            number: c.number,
+                            dir: c.dir,
+                            entry: c.entry,
+                            apex: c.apex,
+                            exit: c.exit,
+                            radius: c.radius,
+                            angle: c.angle.to_degrees(),
+                        })
+                        .collect()
+                },
             }
         })
         .collect();

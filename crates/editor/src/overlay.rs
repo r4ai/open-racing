@@ -15,6 +15,7 @@ use crate::viewport::{DrawKind, Orbit, ToolKind, View, ViewDir, look, orbit_by, 
 
 pub fn view(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx, view: View) {
     labels(ctx, r, c, view);
+    crate::corners::labels(ctx, r, c, view);
     info(ctx, r, c);
     if c.shell.toolbar {
         toolbar(ctx, r, c);

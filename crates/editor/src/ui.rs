@@ -40,6 +40,7 @@ pub enum PropTab {
     Materials,
     #[default]
     Object,
+    Corners,
     Strips,
     Lines,
     Barriers,
@@ -90,6 +91,8 @@ pub struct Shell {
     pub tab: PropTab,
     pub sidebar_tab: sidebar::Tab,
     pub focus: Option<Focus>,
+    /// The corner looked at last: its road and number.
+    pub corner: Option<(usize, usize)>,
     pub popup: Option<Popup>,
     /// The keyboard shortcuts window.
     pub shortcuts: bool,
@@ -107,6 +110,7 @@ impl Default for Shell {
             tab: PropTab::default(),
             sidebar_tab: sidebar::Tab::default(),
             focus: None,
+            corner: None,
             popup: None,
             shortcuts: false,
             quit: false,
@@ -152,6 +156,8 @@ pub fn ui(
     mut library: ResMut<Library>,
     props: Res<Props>,
     reference: Res<crate::reference::Shown>,
+    start_corner: Option<Res<crate::StartCorner>>,
+    mut cmds: Commands,
     mut state: Local<UiState>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
     mut exit: MessageWriter<AppExit>,
@@ -191,6 +197,10 @@ pub fn ui(
         shell,
         pointer,
     };
+    if let Some(n) = start_corner.filter(|_| c.built.count > 0) {
+        crate::corners::step_to(&mut c, n.0);
+        cmds.remove_resource::<crate::StartCorner>();
+    }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
 
