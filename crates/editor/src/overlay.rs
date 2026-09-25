@@ -178,6 +178,22 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             }
         }
     }
+    // The measured distance, at the middle of the line.
+    if c.tool.active == ToolKind::Measure
+        && let Some(&a) = c.tool.measure.first()
+        && let Some(b) = c.tool.measure.get(1).copied().or(c.tool.pointer)
+        && let Some(at) = screen(0.5 * (a + b))
+    {
+        let d = b - a;
+        outlined(
+            &painter,
+            at + egui::vec2(0.0, -8.0),
+            egui::Align2::CENTER_BOTTOM,
+            &format!("{:.1} m  (Δz {:+.1} m)", d.truncate().length(), d.z),
+            14.0,
+            egui::Color32::from_rgb(255, 215, 50),
+        );
+    }
     if o.indices
         && let Some(item) = sel.item
         && let Some((_, nodes, _)) = item_line(p, item)
@@ -291,6 +307,7 @@ fn toolbar(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx) {
                         (ToolKind::Rotate, Icon::Glyph("⟲"), "Rotate\nDrag the gizmo's ring (R rotates at any time)"),
                         (ToolKind::Scale, Icon::Scale, "Scale\nDrag the gizmo's handles (S scales at any time)"),
                         (ToolKind::AddNode, Icon::Glyph("✚"), "Add Node\nClick: add a node to the selected road or spline (Ctrl+click at any time)"),
+                        (ToolKind::Measure, Icon::Glyph("📏"), "Measure\nClick two points for the distance between them; scale the reference image by it in the sidebar (N)"),
                     ] {
                         if tool_button(ui, c.tool.active == t, icon, tip).clicked() {
                             c.tool.active = t;

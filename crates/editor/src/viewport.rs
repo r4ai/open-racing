@@ -279,15 +279,18 @@ pub enum ToolKind {
     Scale,
     /// A click adds a node to the selected road or spline.
     AddNode,
+    /// Clicks measure the distance between two points.
+    Measure,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 5] = [
+    pub const ALL: [ToolKind; 6] = [
         ToolKind::Select,
         ToolKind::Move,
         ToolKind::Rotate,
         ToolKind::Scale,
         ToolKind::AddNode,
+        ToolKind::Measure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -297,6 +300,7 @@ impl ToolKind {
             ToolKind::Rotate => "Rotate",
             ToolKind::Scale => "Scale",
             ToolKind::AddNode => "Add Node",
+            ToolKind::Measure => "Measure",
         }
     }
 
@@ -306,7 +310,7 @@ impl ToolKind {
             ToolKind::Move => Some(Mode::Grab),
             ToolKind::Rotate => Some(Mode::Rotate),
             ToolKind::Scale => Some(Mode::Scale),
-            ToolKind::Select | ToolKind::AddNode => None,
+            ToolKind::Select | ToolKind::AddNode | ToolKind::Measure => None,
         }
     }
 }
@@ -363,6 +367,8 @@ pub struct Tool {
     pub hint: String,
     /// A model to place with the next click.
     pub place: Option<PathBuf>,
+    /// The points the measure tool was clicked at: none, the start, or both ends.
+    pub measure: Vec<DVec3>,
     /// Where the left button went down, on what, and whether it went down with Alt
     /// (orbiting).
     press: Option<(Vec2, Option<Hit>, bool)>,
@@ -1014,6 +1020,14 @@ pub fn input(
         if !buttons.pressed(MouseButton::Left) {
             match finish_left(tool, anywhere, over.is_some()) {
                 Some(LeftRelease::Box(rect)) => box_select(editor, &built, view, rect, shift),
+                Some(LeftRelease::Click(_)) if tool.active == ToolKind::Measure => {
+                    if let Some(p) = tool.pointer {
+                        if tool.measure.len() >= 2 {
+                            tool.measure.clear();
+                        }
+                        tool.measure.push(p);
+                    }
+                }
                 Some(LeftRelease::Click(hit)) => {
                     let add = ctrl
                         || (tool.active == ToolKind::AddNode
@@ -2514,6 +2528,27 @@ pub fn gizmos(
                     Color::srgb(1.0, 0.5, 0.1),
                 );
             }
+        }
+    }
+
+    // What the measure tool measured, or is measuring to the pointer.
+    if tool.active == ToolKind::Measure
+        && let Some(&a) = tool.measure.first()
+    {
+        let b = tool.measure.get(1).copied().or(tool.pointer);
+        let color = Color::srgb(1.0, 0.85, 0.2);
+        gizmos.sphere(
+            Isometry3d::from_translation(lift(a)),
+            node_size(eye, a),
+            color,
+        );
+        if let Some(b) = b {
+            gizmos.line(lift(a), lift(b), color);
+            gizmos.sphere(
+                Isometry3d::from_translation(lift(b)),
+                node_size(eye, b),
+                color,
+            );
         }
     }
 

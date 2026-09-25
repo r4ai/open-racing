@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 use crate::project::{
     Barrier, Grid, HandleMode, Key, MaterialDef, NamedSurface, Node, NodeHandles, PaintLine, Pit,
-    Project, Prop, Road, Side, Spline, StationCurve, Strip, Terrain,
+    Project, Prop, Reference, Road, Side, Spline, StationCurve, Strip, Terrain,
 };
 
 /// Which profile along a road.
@@ -207,6 +207,10 @@ pub enum Op {
     },
     SetTerrain {
         terrain: Terrain,
+    },
+    /// Sets or removes the reference image the editor shows to trace over.
+    SetReference {
+        reference: Option<Reference>,
     },
 
     PutSurface {
@@ -622,6 +626,7 @@ impl Op {
             }
             Op::SetPit { pit } => p.markers.pit = pit,
             Op::SetTerrain { terrain } => p.terrain = terrain,
+            Op::SetReference { reference } => p.reference = reference,
             Op::PutSurface { surface } => put(&mut p.surfaces, surface, |s| &s.name, None),
             Op::RemoveSurface { name } => remove(&mut p.surfaces, "surface", &name, |s| &s.name)?,
             Op::PutMaterial { material } => put(&mut p.materials, material, |m| &m.name, None),
@@ -689,6 +694,7 @@ impl Op {
             Op::SetMarkers { .. } => "SetMarkers",
             Op::SetPit { .. } => "SetPit",
             Op::SetTerrain { .. } => "SetTerrain",
+            Op::SetReference { .. } => "SetReference",
             Op::PutSurface { .. } => "PutSurface",
             Op::RemoveSurface { .. } => "RemoveSurface",
             Op::PutMaterial { .. } => "PutMaterial",

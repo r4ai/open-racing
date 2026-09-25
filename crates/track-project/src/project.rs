@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use open_racing_sim::{Surface, SurfaceProps};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,32 @@ pub struct Project {
     pub main_road: String,
     pub markers: Markers,
     pub terrain: Terrain,
+    /// A picture of the real place (a satellite image, a track map) laid flat in the
+    /// editor to trace the roads over. Not part of the track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Reference>,
+}
+
+/// An image laid flat over the ground in the editor, for tracing a real circuit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Reference {
+    /// A PNG or DDS, relative to the project's directory.
+    pub image: PathBuf,
+    /// Where the image's middle lies, m.
+    pub center: DVec2,
+    /// How wide the image is on the ground, m; its height follows its aspect.
+    pub width: f64,
+    /// Turn anticlockwise seen from above, radians.
+    #[serde(default)]
+    pub rotation: f64,
+    /// Height it is drawn at, m.
+    #[serde(default)]
+    pub height: f64,
+    /// 0 (invisible) to 1 (opaque).
+    #[serde(default = "one")]
+    pub opacity: f64,
+    #[serde(default = "yes")]
+    pub visible: bool,
 }
 
 /// Physical properties of a surface, with a name for the editor.
@@ -722,6 +748,7 @@ impl Project {
                 },
                 pit: None,
             },
+            reference: None,
         }
     }
 
@@ -885,6 +912,18 @@ impl Project {
                 "the pit lane \"{}\" must be a road other than the main road",
                 p.road
             ));
+        }
+        if let Some(r) = &self.reference
+            && !(r.width > 0.0
+                && r.width.is_finite()
+                && r.center.is_finite()
+                && r.rotation.is_finite()
+                && r.height.is_finite()
+                && (0.0..=1.0).contains(&r.opacity))
+        {
+            return invalid(
+                "reference image: the width must be positive and the opacity 0 to 1".into(),
+            );
         }
         if self.surface_index(&self.terrain.surface).is_none()
             || self.material_index(&self.terrain.material).is_none()

@@ -19,6 +19,7 @@ mod presets;
 mod preview;
 mod profile;
 mod properties;
+mod reference;
 mod sidebar;
 mod state;
 mod ui;
@@ -154,6 +155,7 @@ fn main() {
     .init_resource::<preview::SharedCache>()
     .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
+    .init_resource::<reference::Shown>()
     .add_systems(Startup, viewport::setup)
     .add_systems(EguiPrimaryContextPass, ui::ui)
     .add_systems(
@@ -162,6 +164,7 @@ fn main() {
             state::watch_file,
             assets::watch,
             assets::dropped,
+            reference::show,
             viewport::input,
             viewport::view_input,
             preview::rebuild,

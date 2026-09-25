@@ -35,6 +35,7 @@ pub enum PropTab {
     Track,
     Markers,
     Terrain,
+    Reference,
     Surfaces,
     Materials,
     #[default]
@@ -150,6 +151,7 @@ pub fn ui(
     built: Res<Built>,
     mut library: ResMut<Library>,
     props: Res<Props>,
+    reference: Res<crate::reference::Shown>,
     mut state: Local<UiState>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
     mut exit: MessageWriter<AppExit>,
@@ -216,7 +218,7 @@ pub fn ui(
                     .size_range(80.0..=900.0)
                     .show(ui, |ui| outliner::show(ui, &mut c, out_state));
                 egui::CentralPanel::default().show(ui, |ui| {
-                    properties::show(ui, &mut c, prop_state, &library);
+                    properties::show(ui, &mut c, prop_state, &library, &reference);
                 });
             });
         let mut open = c.shell.bottom_open;
@@ -447,6 +449,10 @@ fn mouse_hints(c: &Ctx) -> String {
     };
     let tool = match t.active {
         ToolKind::AddNode => "Click: add node",
+        ToolKind::Measure => match t.measure.len() {
+            1 => "Click: measure to here",
+            _ => "Click: measure from here",
+        },
         _ => "Click: select · Drag: box",
     };
     match t.hover {

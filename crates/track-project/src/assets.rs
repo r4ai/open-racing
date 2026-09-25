@@ -76,6 +76,9 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for p in &project.props {
         refs.push((portable(&p.model), format!("prop {}", p.name)));
     }
+    if let Some(r) = &project.reference {
+        refs.push((portable(&r.image), "reference image".into()));
+    }
     refs
 }
 
@@ -245,6 +248,16 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
             p.model = to.clone();
             ops.push(Op::PutProp { prop: p });
         }
+    }
+    if let Some(r) = &project.reference
+        && portable(&r.image) == from
+    {
+        ops.push(Op::SetReference {
+            reference: Some(crate::project::Reference {
+                image: to.clone(),
+                ..r.clone()
+            }),
+        });
     }
     ops
 }

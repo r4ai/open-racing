@@ -244,10 +244,16 @@ fn tool_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                 ToolKind::Rotate => "Rotate: drag the gizmo's ring",
                 ToolKind::Scale => "Scale: drag the gizmo's handles",
                 ToolKind::AddNode => "Add Node: click to add to the selected line",
+                ToolKind::Measure => "Measure: click two points",
             };
             ui.radio_value(&mut c.tool.active, t, text);
         }
     });
+    if c.tool.active == ToolKind::Measure {
+        section(ui, "Measure", "sidebar measure", true, |ui| {
+            measure_ui(ui, c);
+        });
+    }
     section(ui, "Snapping", "sidebar snap", true, |ui| {
         ui.checkbox(&mut c.tool.snap, "Snap while transforming");
         ui.weak("Whole metres, 5° and tenths. Holding Ctrl while moving does the opposite.");
@@ -255,6 +261,53 @@ fn tool_tab(ui: &mut egui::Ui, c: &mut Ctx) {
     section(ui, "Draw", "sidebar draw", true, |ui| {
         ui.weak("Shift A in the view, or the toolbar, draws a road, kerb, wall or fence: click points, Enter finishes. Kerbs snap to road edges (Ctrl: free).");
     });
+}
+
+/// The distance measured, and scaling the reference image so that it comes out as a
+/// distance known on the real circuit.
+fn measure_ui(ui: &mut egui::Ui, c: &mut Ctx) {
+    let [a, b] = match c.tool.measure[..] {
+        [a, b] => [a, b],
+        _ => {
+            ui.weak("Click two points in the view.");
+            return;
+        }
+    };
+    let d = b - a;
+    row(ui, "Distance", |ui| {
+        ui.label(format!("{:.2} m", d.truncate().length()))
+    });
+    row(ui, "Height", |ui| ui.label(format!("{:+.2} m", d.z)));
+    if d.truncate().length() > 1e-6 {
+        row(ui, "Grade", |ui| {
+            ui.label(format!("{:+.1} %", 100.0 * d.z / d.truncate().length()))
+        });
+    }
+    if ui.button("Clear").clicked() {
+        c.tool.measure.clear();
+    }
+    let Some(r) = c.editor.project.reference.clone() else {
+        return;
+    };
+    ui.separator();
+    ui.weak("Measured on the reference image, a distance you know on the real circuit (a straight, a pit building) scales the image to size.");
+    let id = ui.make_persistent_id("known distance");
+    let mut known: f64 = ui
+        .data_mut(|m| m.get_temp(id))
+        .unwrap_or_else(|| d.truncate().length().round());
+    row(ui, "Real length", |ui| number(ui, &mut known, 0.5, " m"));
+    ui.data_mut(|m| m.insert_temp(id, known));
+    if ui.button("Scale the reference image").clicked() {
+        match crate::reference::calibrated(&r, a, b, known) {
+            Some(r) => {
+                crate::reference::set(c.editor, Some(r), None);
+                // The same points on the image are now `known` apart.
+                c.tool.measure[1] = a + (b - a) * (known / d.truncate().length());
+                c.editor.status = format!("reference image scaled: that is {known} m now");
+            }
+            None => c.editor.status = "measure a distance first".into(),
+        }
+    }
 }
 
 fn view_tab(ui: &mut egui::Ui, c: &mut Ctx) {

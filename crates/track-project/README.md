@@ -204,6 +204,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `SetMarkers` | `start?`, `sectors?`, `grid?` | sets the race markers |
 | `SetPit` | `pit: Some((...))` or `None` | sets or removes the pit lane |
 | `SetTerrain` | `terrain` | sets the terrain |
+| `SetReference` | `reference: Some((image, center, width, rotation?, height?, opacity?, visible?))` or `None` | sets or removes the image the editor shows to trace a real circuit over; not part of the track |
 
 **Surfaces and materials**
 

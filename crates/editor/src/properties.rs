@@ -41,6 +41,11 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
             "Race markers: start, sectors, grid, pit lane",
         ),
         (PropTab::Terrain, "🗻", "Terrain round the roads"),
+        (
+            PropTab::Reference,
+            "🗺",
+            "Reference image: a picture of the real circuit to trace",
+        ),
         (PropTab::Surfaces, "◎", "Surfaces: what the tyres feel"),
         (PropTab::Materials, "🎨", "Materials: how things look"),
     ];
@@ -62,7 +67,13 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
     tabs
 }
 
-pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, library: &Library) {
+pub fn show(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    state: &mut State,
+    library: &Library,
+    reference: &crate::reference::Shown,
+) {
     let tabs = tabs(c);
     let selected = c.editor.selection.item.is_some();
     if !tabs.iter().any(|(t, ..)| *t == c.shell.tab) {
@@ -87,7 +98,7 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, library: &Library
         )
         .show(ui, |ui| {
             for (i, (tab, icon, tip)) in tabs.iter().enumerate() {
-                if i == 5 {
+                if i == 6 {
                     ui.separator();
                 }
                 let button = egui::Button::selectable(c.shell.tab == *tab, *icon);
@@ -130,6 +141,7 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, library: &Library
                 PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor),
                 PropTab::Terrain => terrain_tab(ui, c.editor),
+                PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Surfaces => surfaces_tab(ui, c.editor, state),
                 PropTab::Materials => materials_tab(ui, c.editor, state, library),
                 PropTab::Object => match c.editor.selection.item {
@@ -1235,6 +1247,108 @@ fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor) {
             editor.apply(vec![Op::SetPit { pit }], Some("pit"));
         }
     });
+}
+
+fn reference_tab(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    library: &Library,
+    shown: &crate::reference::Shown,
+) {
+    use crate::reference;
+    ui.weak("Trace a real circuit: lay a satellite image or track map (PNG) under the view, line it up, scale it by a distance you know, then draw the roads over it. It is not part of the track.");
+    let current = c.editor.project.reference.clone();
+    // Import, or pick among the project's textures.
+    let mut picked: Option<std::path::PathBuf> = None;
+    ui.horizontal(|ui| {
+        if ui.button("Import image…").clicked()
+            && let Some(file) = rfd::FileDialog::new()
+                .add_filter("images", &["png", "dds"])
+                .pick_file()
+        {
+            match open_racing_track_project::assets::import(&c.editor.dir, &file) {
+                Ok(rel) => picked = Some(rel),
+                Err(e) => c.editor.status = e.to_string(),
+            }
+        }
+        let text = current
+            .as_ref()
+            .map_or("choose a texture".to_string(), |r| {
+                r.image.to_string_lossy().into_owned()
+            });
+        egui::ComboBox::from_id_salt("reference image")
+            .selected_text(text)
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for a in library.textures() {
+                    let on = current.as_ref().is_some_and(|r| r.image == a.path);
+                    if ui.selectable_label(on, a.path.to_string_lossy()).clicked() {
+                        picked = Some(a.path.clone());
+                    }
+                }
+            });
+    });
+    if let Some(image) = picked {
+        let r = match &current {
+            Some(r) => open_racing_track_project::project::Reference { image, ..r.clone() },
+            None => reference::new_reference(c.editor, image),
+        };
+        reference::set(c.editor, Some(r), None);
+        crate::viewport::look(c.orbit, crate::viewport::ViewDir::Top);
+        return;
+    }
+    let Some(before) = current else {
+        return;
+    };
+    if let Some(e) = shown.error() {
+        ui.colored_label(egui::Color32::from_rgb(255, 110, 90), e);
+    }
+    let mut r = before.clone();
+    let mut changed = false;
+    section(ui, "Placement", "reference placement", true, |ui| {
+        changed |= check(ui, &mut r.visible, "Show it");
+        let mut percent = r.opacity * 100.0;
+        if drag(ui, "Opacity %", &mut percent, 1.0, 0.0..=100.0) {
+            r.opacity = percent / 100.0;
+            changed = true;
+        }
+        changed |= row(ui, "Middle X", |ui| number(ui, &mut r.center.x, 1.0, " m"));
+        changed |= row(ui, "Y", |ui| number(ui, &mut r.center.y, 1.0, " m"));
+        changed |= drag(ui, "Width m", &mut r.width, 1.0, 1.0..=100_000.0);
+        let mut deg = r.rotation.to_degrees();
+        if row(ui, "Rotation", |ui| number(ui, &mut deg, 0.1, "°")) {
+            r.rotation = deg.to_radians();
+            changed = true;
+        }
+        changed |= drag(ui, "Height m", &mut r.height, 0.1, -1000.0..=10_000.0);
+        if let Some(size) = shown.size() {
+            row(ui, "Resolution", |ui| {
+                ui.weak(format!(
+                    "{} × {} px, {:.2} m per pixel",
+                    size.x,
+                    size.y,
+                    r.width / size.x as f64
+                ))
+            });
+        }
+    });
+    if changed {
+        reference::set(c.editor, Some(r), Some("reference"));
+    }
+    section(ui, "Scale", "reference scale", true, |ui| {
+        ui.weak("With the Measure tool, click both ends of something whose length you know on the image, then enter it in the sidebar (N) › Tool.");
+        if ui.button("📏 Measure on the image").clicked() {
+            c.tool.active = crate::viewport::ToolKind::Measure;
+            c.tool.measure.clear();
+            c.shell.sidebar = true;
+            c.shell.sidebar_tab = crate::sidebar::Tab::Tool;
+            crate::viewport::look(c.orbit, crate::viewport::ViewDir::Top);
+        }
+        ui.weak("Hiding the terrain (Terrain tab) while tracing keeps it from covering the image.");
+    });
+    if ui.button("Remove reference image").clicked() {
+        reference::set(c.editor, None, None);
+    }
 }
 
 fn terrain_tab(ui: &mut egui::Ui, editor: &mut Editor) {

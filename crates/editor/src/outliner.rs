@@ -123,6 +123,7 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                 (PropTab::Track, "🏁 Track".to_string()),
                 (PropTab::Markers, "🚩 Race markers".to_string()),
                 (PropTab::Terrain, "🗻 Terrain".to_string()),
+                (PropTab::Reference, "🗺 Reference image".to_string()),
                 (PropTab::Surfaces, format!("◎ Surfaces ({n_surfaces})")),
                 (PropTab::Materials, format!("🎨 Materials ({n_materials})")),
             ] {
