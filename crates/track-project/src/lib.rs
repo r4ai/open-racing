@@ -167,6 +167,16 @@ mod tests {
 
         let report = validate::check(&package, true);
         assert!(report.ok(), "{report}");
+        // The lap's path, to replay: in time order, round the whole lap, on the track.
+        let path = &report.drive.as_ref().unwrap().path;
+        assert!(path.windows(2).all(|w| w[1].t > w[0].t));
+        assert!(path.iter().all(|p| !p.off));
+        let covered: f64 = path.windows(2).map(|w| w[0].pos.distance(w[1].pos)).sum();
+        assert!(
+            covered > track.length * 0.95,
+            "{covered} of {}",
+            track.length
+        );
     }
 
     #[test]

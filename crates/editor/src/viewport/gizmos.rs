@@ -7,6 +7,8 @@ pub fn gizmos(
     editor: Res<Editor>,
     built: Res<Built>,
     tool: Res<Tool>,
+    jobs: Res<crate::jobs::Jobs>,
+    orbit: Res<Orbit>,
     camera: Single<&GlobalTransform, With<EditorCamera>>,
     mut gizmos: Gizmos,
 ) {
@@ -356,6 +358,33 @@ pub fn gizmos(
                 );
             }
         }
+    }
+
+    // The last test lap: where the car went, red where it was off the track, and the
+    // car itself while it is replayed.
+    if overlays.markers && jobs.lap.len() > 1 {
+        let lift_car = |p: DVec3| to_bevy(p + DVec3::Z * 0.6);
+        for w in jobs.lap.windows(2) {
+            let color = if w[0].off {
+                theme::OFF_TRACK
+            } else {
+                theme::LAP
+            };
+            gizmos.line(lift_car(w[0].pos), lift_car(w[1].pos), color);
+        }
+    }
+    if let Some(car) = orbit.replay.and_then(|t| lap_at(&jobs.lap, t)) {
+        let turn = Quat::from_rotation_y(car.heading as f32);
+        gizmos.cube(
+            Transform::from_translation(to_bevy(car.pos + DVec3::Z * 0.6))
+                .with_rotation(turn)
+                .with_scale(Vec3::new(4.6, 1.2, 2.0)),
+            if car.off {
+                theme::OFF_TRACK
+            } else {
+                theme::SELECTED
+            },
+        );
     }
 
     // What a grabbed node or stretch end has caught on.

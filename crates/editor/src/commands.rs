@@ -29,6 +29,8 @@ pub enum Cmd {
     View(ViewDir),
     ToggleOrtho,
     Walk,
+    /// Replays the last bake's test lap, following the car.
+    Replay,
     FrameSelected,
     FrameAll,
     ViewPie,
@@ -93,6 +95,7 @@ impl Cmd {
             Quit,
             ToggleOrtho,
             Walk,
+            Replay,
             FrameSelected,
             FrameAll,
             ViewPie,
@@ -147,6 +150,7 @@ impl Cmd {
             View(v) => format!("View {}", v.label()),
             ToggleOrtho => "Perspective/Orthographic".into(),
             Walk => "Walk the Track".into(),
+            Replay => "Replay Test Lap".into(),
             FrameSelected => "Frame Selected".into(),
             FrameAll => "Frame All".into(),
             ViewPie => "View Pie…".into(),
@@ -198,8 +202,8 @@ impl Cmd {
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
             | HandleMenu | ToggleClosed | Duplicate | SetMain | Rename | SmoothHeights
             | SmoothShape | Flatten | EvenGrade => "Edit",
-            View(_) | ToggleOrtho | Walk | FrameSelected | FrameAll | ViewPie | ToggleToolbar
-            | ToggleSidebar | ToggleMaximize | ToggleSnap => "View",
+            View(_) | ToggleOrtho | Walk | Replay | FrameSelected | FrameAll | ViewPie
+            | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap => "View",
             _ => "",
         };
         if menu.is_empty() {
@@ -255,6 +259,7 @@ impl Cmd {
             Undo => e.can_undo(),
             Redo => e.can_redo(),
             Bake | BakeDrive => !c.jobs.running(),
+            Replay => !c.jobs.lap.is_empty(),
             Rename | Grab | Rotate | Scale | Delete => sel.item.is_some(),
             FrameSelected => sel.item.is_some(),
             ToggleEdit => line || c.tool.edit,
@@ -275,6 +280,7 @@ impl Cmd {
         match self {
             ToggleOrtho => Some(c.orbit.ortho),
             Walk => Some(c.orbit.walk.is_some()),
+            Replay => Some(c.orbit.replay.is_some()),
             ToggleToolbar => Some(c.shell.toolbar),
             ToggleSidebar => Some(c.shell.sidebar),
             ToggleMaximize => Some(c.shell.maximized),
@@ -325,6 +331,14 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         Quit => c.shell.quit = true,
         View(v) => look(c.orbit, v),
         Walk => viewport::toggle_walk(c.editor, c.built, c.orbit),
+        Replay => {
+            c.orbit.walk = None;
+            c.orbit.replay = match c.orbit.replay {
+                Some(_) => None,
+                None => Some(0.0),
+            };
+            c.orbit.distance = c.orbit.distance.min(120.0);
+        }
         ToggleOrtho => {
             c.orbit.ortho = !c.orbit.ortho;
             c.orbit.auto_ortho = false;

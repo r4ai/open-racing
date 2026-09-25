@@ -12,6 +12,8 @@ pub struct Report {
     pub lines: Vec<String>,
     /// Problems that make the track unfit to drive.
     pub errors: Vec<String>,
+    /// The test lap, when one was driven.
+    pub drive: Option<Drive>,
 }
 
 impl Report {
@@ -33,7 +35,7 @@ impl std::fmt::Display for Report {
 }
 
 /// Result of driving round a track.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Drive {
     /// Distance covered along the centreline, m.
     pub distance: f64,
@@ -41,7 +43,26 @@ pub struct Drive {
     pub off_track: f64,
     /// Where the car left the ground (s, m), if it did.
     pub fell_off: Option<f64>,
+    /// Where the car was, twenty times a second, to replay the lap.
+    pub path: Vec<LapSample>,
 }
+
+/// The car at a moment of a test lap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LapSample {
+    /// Seconds from the start.
+    pub t: f64,
+    pub pos: glam::DVec3,
+    /// Which way it points: forward, level.
+    pub heading: f64,
+    /// m/s.
+    pub speed: f64,
+    /// Every wheel off the track.
+    pub off: bool,
+}
+
+/// Steps of the simulation between samples of the path.
+const SAMPLE_EVERY: usize = 50;
 
 /// Follows the centreline in a GT3 car at a steady `speed` for `seconds`.
 pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
@@ -55,6 +76,7 @@ pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
         distance: 0.0,
         off_track: 0.0,
         fell_off: None,
+        path: Vec::new(),
     };
     let steps = (seconds / open_racing_sim::DT) as usize;
     for k in 0..steps {
@@ -81,8 +103,19 @@ pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
             out.fell_off = Some(q.s);
             break;
         }
-        if car.telemetry.wheels.iter().all(|w| w.surface.off_track()) {
+        let off = car.telemetry.wheels.iter().all(|w| w.surface.off_track());
+        if off {
             out.off_track += open_racing_sim::DT;
+        }
+        if k % SAMPLE_EVERY == 0 {
+            let forward = car.state.orientation * glam::DVec3::X;
+            out.path.push(LapSample {
+                t: k as f64 * open_racing_sim::DT,
+                pos: p,
+                heading: forward.y.atan2(forward.x),
+                speed: car.speed(),
+                off,
+            });
         }
     }
     out
@@ -167,6 +200,7 @@ pub fn check(package: &TrackPackage, lap: bool) -> Report {
                 d.off_track
             ));
         }
+        r.drive = Some(d);
     }
     r
 }

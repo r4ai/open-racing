@@ -114,6 +114,7 @@ fn view_menu(ui: &mut egui::Ui, c: &mut Ctx) {
     });
     entry(ui, c, Cmd::ToggleOrtho);
     entry(ui, c, Cmd::Walk);
+    entry(ui, c, Cmd::Replay);
     entry(ui, c, Cmd::ViewPie);
     ui.separator();
     entry(ui, c, Cmd::Search);

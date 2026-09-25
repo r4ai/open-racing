@@ -86,6 +86,8 @@ pub struct Orbit {
     pub auto_ortho: bool,
     /// Walking the main road at a driver's eye height: how far along it, m.
     pub walk: Option<f64>,
+    /// Replaying the last test lap: how far into it, s. The view follows the car.
+    pub replay: Option<f64>,
 }
 
 impl Default for Orbit {
@@ -98,6 +100,7 @@ impl Default for Orbit {
             ortho: false,
             auto_ortho: false,
             walk: None,
+            replay: None,
         }
     }
 }

@@ -6,6 +6,7 @@ use std::process::Command;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
+use open_racing_track_project::validate::LapSample;
 use open_racing_track_project::{Cache, Project, bake, validate};
 
 pub struct Baked {
@@ -13,6 +14,7 @@ pub struct Baked {
     pub dir: PathBuf,
     pub report: String,
     pub ok: bool,
+    pub lap: Vec<LapSample>,
 }
 
 #[derive(Resource, Default)]
@@ -22,6 +24,8 @@ pub struct Jobs {
     pub report: Option<String>,
     /// Whether the last bake passed its checks.
     pub passed: Option<bool>,
+    /// The last bake's test lap, to show and replay in the view.
+    pub lap: Vec<LapSample>,
 }
 
 impl Jobs {
@@ -47,6 +51,7 @@ impl Jobs {
                 dir: out,
                 report: report.to_string(),
                 ok: report.ok(),
+                lap: report.drive.map(|d| d.path).unwrap_or_default(),
             })
         });
         self.bake = Some((task, play));
@@ -69,6 +74,7 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
             editor.status = format!("baked into {}", b.dir.display());
             jobs.report = Some(b.report);
             jobs.passed = Some(b.ok);
+            jobs.lap = b.lap;
             if play && b.ok {
                 match launch(&b.name) {
                     Ok(how) => editor.status = format!("driving \"{}\" ({how})", b.name),

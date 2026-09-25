@@ -331,9 +331,30 @@ pub fn set_view(orbit: &mut Orbit, yaw: f32, pitch: f32) {
 }
 
 /// The view keys, outside of transforms and text fields.
+/// The car at `t` seconds into a test lap, between its samples.
+pub fn lap_at(
+    lap: &[open_racing_track_project::validate::LapSample],
+    t: f64,
+) -> Option<open_racing_track_project::validate::LapSample> {
+    let i = lap.partition_point(|s| s.t <= t);
+    let (a, b) = (lap.get(i.checked_sub(1)?)?, lap.get(i).or(lap.last())?);
+    let k = ((t - a.t) / (b.t - a.t).max(1e-9)).clamp(0.0, 1.0);
+    let turn = (b.heading - a.heading + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+        - std::f64::consts::PI;
+    Some(open_racing_track_project::validate::LapSample {
+        t,
+        pos: a.pos.lerp(b.pos, k),
+        heading: a.heading + turn * k,
+        speed: a.speed + (b.speed - a.speed) * k,
+        off: a.off,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn view_input(
     editor: Res<Editor>,
     built: Res<Built>,
+    jobs: Res<crate::jobs::Jobs>,
     mut orbit: ResMut<Orbit>,
     mut tool: ResMut<Tool>,
     wants: Res<EguiWantsInput>,
@@ -341,6 +362,29 @@ pub fn view_input(
     time: Res<Time>,
 ) {
     let free = tool.modal.is_none() && !tool.blocked && !wants.wants_any_keyboard_input();
+    // Replaying the test lap: the view follows the car, at the lap's own pace (Shift
+    // four times as fast); Esc stops.
+    if let Some(t) = orbit.replay {
+        let Some(last) = jobs.lap.last() else {
+            orbit.replay = None;
+            return;
+        };
+        let fast = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let t = t + time.delta_secs_f64() * if fast { 4.0 } else { 1.0 };
+        if t > last.t || (free && keys.just_pressed(KeyCode::Escape)) {
+            orbit.replay = None;
+            return;
+        }
+        orbit.replay = Some(t);
+        if let Some(car) = lap_at(&jobs.lap, t) {
+            orbit.focus = to_bevy(car.pos);
+            tool.hint = format!(
+                "Test lap: {t:.0} s · {:.0} km/h{} · Shift fast · Esc stops",
+                car.speed * 3.6,
+                if car.off { " · OFF TRACK" } else { "" }
+            );
+        }
+    }
     if let Some(s) = orbit.walk {
         let Some(smp) = main_sampled(&editor, &built) else {
             orbit.walk = None;
@@ -435,4 +479,28 @@ pub(super) fn frame(orbit: &mut Orbit, points: &[Vec3]) {
     });
     orbit.focus = (lo + hi) * 0.5;
     orbit.distance = ((hi - lo).length() * 1.1).max(40.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_racing_track_project::validate::LapSample;
+
+    #[test]
+    fn a_replayed_car_eases_between_samples_the_short_way_round() {
+        let at = |t: f64, x: f64, heading: f64| LapSample {
+            t,
+            pos: DVec3::new(x, 0.0, 0.0),
+            heading,
+            speed: 10.0 * t,
+            off: false,
+        };
+        let pi = std::f64::consts::PI;
+        let lap = [at(0.0, 0.0, pi - 0.1), at(1.0, 10.0, -pi + 0.1)];
+        let car = lap_at(&lap, 0.5).unwrap();
+        assert!((car.pos.x - 5.0).abs() < 1e-9 && (car.speed - 5.0).abs() < 1e-9);
+        // Across ±π, not the long way through 0.
+        assert!(car.heading.abs() > 3.0, "{}", car.heading);
+        assert!(lap_at(&lap, -1.0).is_none());
+    }
 }

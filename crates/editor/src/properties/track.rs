@@ -50,6 +50,12 @@ pub(super) fn track_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
             commands::button(ui, c, Cmd::Bake);
             commands::button(ui, c, Cmd::BakeDrive);
         });
+        if !c.jobs.lap.is_empty() {
+            ui.horizontal(|ui| {
+                commands::button(ui, c, Cmd::Replay);
+                ui.weak("the test lap's path shows in the view, red where it left the track");
+            });
+        }
         if let Some(r) = &c.jobs.report {
             let first = r.lines().next().unwrap_or_default();
             ui.weak(first);
