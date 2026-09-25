@@ -222,6 +222,42 @@ fn observation_supports_a_simple_driver() {
 }
 
 #[test]
+fn bundled_varied_tracks_support_a_simple_driver() {
+    for name in ["redwood_oval", "pine_ridge_club", "harbor_street"] {
+        let track = load_track(name).unwrap();
+        let length = track.length;
+        let spec = EnvSpec::new(
+            track,
+            CarModel::gt3(),
+            EnvConfig {
+                random_start: false,
+                start_speed: (20.0, 20.0),
+                start_offset: (0.0, 0.0),
+                ..Default::default()
+            },
+        );
+        let mut env = spec.make_vec_env(1);
+        let mut policy = PurePursuit::new(env.observation_space());
+        let mut obs = env.reset(0).to_vec();
+        let mut actions = [0.0; 3];
+        for step in 0..(50 * 150) {
+            policy.act(&obs, &mut actions);
+            let result = env.step(&actions);
+            assert_eq!(
+                result.terminated[0], 0,
+                "{name}: simple driver left the track at step {step}"
+            );
+            obs.copy_from_slice(result.obs);
+        }
+        let progress = env.episode_stats().next().unwrap().progress;
+        assert!(
+            progress > length,
+            "{name}: progress {progress:.0} m of {length:.0} m"
+        );
+    }
+}
+
+#[test]
 fn track_grip_range_parses_and_randomises_episodes() {
     assert_eq!(parse_grip_range("optimum..green"), Ok((0.94, 1.0)));
     assert_eq!(parse_grip_range("97%"), Ok((0.97, 0.97)));
