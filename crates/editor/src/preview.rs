@@ -59,6 +59,10 @@ struct Meshes {
     corners: Vec<Vec<Corner>>,
     /// (material, mesh, casts shadows)
     meshes: Vec<(usize, Mesh, bool)>,
+    /// Walls models show: the model, and its copies along them.
+    walls: Vec<(PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
+    /// Models that could not be read, and why.
+    failed: Vec<String>,
 }
 
 #[derive(Resource, Default)]
@@ -70,6 +74,8 @@ pub struct Rebuild {
     materials: Vec<MaterialDef>,
     assets: u64,
     handles: Vec<Handle<TrackMaterial>>,
+    /// The materials of models walls show, made once per model and asset revision.
+    wall_looks: HashMap<PathBuf, Vec<Handle<TrackMaterial>>>,
 }
 
 fn to_mesh(m: MeshData) -> Mesh {
@@ -83,8 +89,19 @@ fn to_mesh(m: MeshData) -> Mesh {
     })
 }
 
-fn build(project: Project) -> Meshes {
+fn build(project: Project, cache: Arc<Mutex<Cache>>, dir: PathBuf) -> Meshes {
     let scene = bake::build(&project);
+    let (mut walls, mut failed) = (Vec::new(), Vec::new());
+    for line in scene.model_lines() {
+        let model = cache.lock().expect("cache").model(&dir, &line.run.model);
+        match model {
+            Ok(m) => {
+                let copies = open_racing_track_project::model::along(&m, line);
+                walls.push((line.run.model.clone(), m, copies));
+            }
+            Err(e) => failed.push(e.to_string()),
+        }
+    }
     let issues = inspect::issues(&project, &scene);
     let corners = project
         .roads
@@ -117,6 +134,8 @@ fn build(project: Project) -> Meshes {
         issues,
         corners,
         meshes,
+        walls,
+        failed,
     }
 }
 
@@ -154,6 +173,7 @@ pub fn rebuild(
         }
         state.materials = editor.project.materials.clone();
         state.assets = library.revision;
+        state.wall_looks.clear();
     }
 
     if let Some(task) = &mut state.task
@@ -179,18 +199,48 @@ pub fn rebuild(
                 e.insert(NotShadowCaster);
             }
         }
+        for (path, model, copies) in done.walls {
+            let looks = state.wall_looks.entry(path).or_insert_with(|| {
+                render::add_materials(
+                    &model.look,
+                    render::formats(formats.as_deref()),
+                    16,
+                    &mut materials,
+                    &mut images,
+                )
+            });
+            for m in copies {
+                let handle = looks
+                    .get(m.material as usize)
+                    .cloned()
+                    .unwrap_or(fallback.clone());
+                commands.spawn((
+                    PreviewMesh,
+                    Mesh3d(meshes.add(render::to_mesh(m))),
+                    MeshMaterial3d(handle),
+                ));
+            }
+        }
+        let mut issues = done.issues;
+        issues.extend(done.failed.into_iter().map(|text| Issue {
+            text,
+            road: None,
+            s: None,
+        }));
         built.roads = done.roads;
         built.splines = done.splines;
         built.ground = done.ground;
-        built.issues = done.issues;
+        built.issues = issues;
         built.corners = done.corners;
         built.count += 1;
     }
 
     if state.task.is_none() && state.started != editor.revision {
         let (project, revision) = (editor.project.clone(), editor.revision);
+        let (cache, dir) = (cache.0.clone(), editor.dir.clone());
         state.started = revision;
-        state.task = Some(AsyncComputeTaskPool::get().spawn(async move { build(project) }));
+        state.task =
+            Some(AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir) }));
     }
 }
 

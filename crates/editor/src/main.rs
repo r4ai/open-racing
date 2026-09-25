@@ -58,11 +58,24 @@ struct Args {
     /// Look at this corner of the focused road (or the main road), by its number.
     #[arg(long)]
     corner: Option<usize>,
+    /// Open this tab of the properties: track, markers, terrain, reference, library,
+    /// object, corners, strips, lines or barriers.
+    #[arg(long)]
+    tab: Option<String>,
+    /// How far the camera stands from what it looks at, m.
+    #[arg(long)]
+    distance: Option<f32>,
+    /// Hide lines, names, stretches and markers drawn over the track.
+    #[arg(long)]
+    clean: bool,
 }
 
-/// A corner to look at once the first build has found the corners.
+/// A corner to look at once the first build has found the corners, and a properties
+/// tab to open, from the command line.
 #[derive(Resource)]
 pub struct StartCorner(pub usize);
+#[derive(Resource)]
+pub struct StartTab(pub ui::PropTab);
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -97,6 +110,10 @@ fn auto_screenshot(
         exit.write(AppExit::Success);
     }
 }
+
+/// The camera's distance from the command line, set after it has looked at a corner.
+#[derive(Resource)]
+pub struct StartDistance(pub f32);
 
 fn main() {
     let args = Args::parse();
@@ -148,10 +165,35 @@ fn main() {
     if args.top {
         viewport::look(&mut orbit, viewport::ViewDir::Top);
     }
+    let mut tool = viewport::Tool::editing(edit_mode);
+    if args.clean {
+        tool.overlays = viewport::Overlays {
+            lines: false,
+            names: false,
+            indices: false,
+            markers: false,
+            stretches: false,
+            props: false,
+        };
+    }
 
     let mut app = App::new();
     if let Some(n) = args.corner {
         app.insert_resource(StartCorner(n));
+    }
+    if let Some(d) = args.distance {
+        app.insert_resource(StartDistance(d));
+    }
+    if let Some(name) = &args.tab {
+        match ui::PropTab::named(name) {
+            Some(tab) => {
+                app.insert_resource(StartTab(tab));
+            }
+            None => {
+                eprintln!("no properties tab \"{name}\"");
+                std::process::exit(1);
+            }
+        }
     }
     if let Some(path) = args.screenshot {
         app.insert_resource(AutoScreenshot {
@@ -172,7 +214,7 @@ fn main() {
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
-    .insert_resource(viewport::Tool::editing(edit_mode))
+    .insert_resource(tool)
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()

@@ -46,6 +46,18 @@ pub enum PropTab {
     Barriers,
 }
 
+impl PropTab {
+    /// The tab called `name` in lower case, as the command line names it.
+    pub fn named(name: &str) -> Option<Self> {
+        use PropTab::*;
+        [
+            Track, Markers, Terrain, Reference, Library, Object, Corners, Strips, Lines, Barriers,
+        ]
+        .into_iter()
+        .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
+    }
+}
+
 /// A part of a road the outliner asked the properties editor to open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -156,7 +168,11 @@ pub fn ui(
     mut library: ResMut<Library>,
     props: Res<Props>,
     reference: Res<crate::reference::Shown>,
-    start_corner: Option<Res<crate::StartCorner>>,
+    start: (
+        Option<Res<crate::StartCorner>>,
+        Option<Res<crate::StartTab>>,
+        Option<Res<crate::StartDistance>>,
+    ),
     mut cmds: Commands,
     mut state: Local<UiState>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
@@ -197,9 +213,20 @@ pub fn ui(
         shell,
         pointer,
     };
-    if let Some(n) = start_corner.filter(|_| c.built.count > 0) {
-        crate::corners::step_to(&mut c, n.0);
-        cmds.remove_resource::<crate::StartCorner>();
+    let (start_corner, start_tab, start_distance) = start;
+    if c.built.count > 0 {
+        if let Some(n) = start_corner {
+            crate::corners::step_to(&mut c, n.0);
+            cmds.remove_resource::<crate::StartCorner>();
+        }
+        if let Some(t) = start_tab {
+            c.shell.tab = t.0;
+            cmds.remove_resource::<crate::StartTab>();
+        }
+        if let Some(d) = start_distance {
+            c.orbit.distance = d.0;
+            cmds.remove_resource::<crate::StartDistance>();
+        }
     }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
