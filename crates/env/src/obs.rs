@@ -139,18 +139,21 @@ pub fn encode(
     o.push(heading_sin);
     o.push(heading_cos);
 
+    // Widths follow every lookahead coordinate in the existing observation layout.
+    let edge_start = o.i + 2 * layout.lookahead_points;
     for k in 1..=layout.lookahead_points {
         let smp = track.sample_at(q.s + k as f64 * layout.lookahead_spacing);
         let rel = inv * (smp.pos - st.position);
         o.push(rel.x / DISTANCE_SCALE);
         o.push(rel.y / DISTANCE_SCALE);
+        if layout.edges {
+            let edge = edge_start + 2 * (k - 1);
+            o.out[edge] = (smp.width_left / WIDTH_SCALE) as f32;
+            o.out[edge + 1] = (smp.width_right / WIDTH_SCALE) as f32;
+        }
     }
     if layout.edges {
-        for k in 1..=layout.lookahead_points {
-            let smp = track.sample_at(q.s + k as f64 * layout.lookahead_spacing);
-            o.push(smp.width_left / WIDTH_SCALE);
-            o.push(smp.width_right / WIDTH_SCALE);
-        }
+        o.i = edge_start + 2 * layout.lookahead_points;
     }
     if layout.tyres {
         for (w, t) in st.wheels.iter().zip(&tel.wheels) {
@@ -178,5 +181,75 @@ impl Writer<'_> {
     fn push(&mut self, x: f64) {
         self.out[self.i] = x as f32;
         self.i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use open_racing_sim::{CarModel, Track};
+
+    use super::{AppliedInput, encode};
+    use crate::{Env, EnvConfig, EnvShared};
+
+    #[test]
+    fn edge_observations_keep_the_existing_layout() {
+        let config = EnvConfig {
+            random_start: false,
+            start_speed: (0.0, 0.0),
+            tyre_obs: true,
+            edge_obs: true,
+            ..EnvConfig::default()
+        };
+        let shared = EnvShared::new(
+            config.clone(),
+            Arc::new(Track::default_circuit()),
+            Arc::new(CarModel::gt3()),
+        );
+        let env = Env::new(&shared, 7);
+        let layout = config.obs_layout();
+        let mut with_edges = vec![0.0; layout.spec().dim()];
+        encode(
+            &layout,
+            &env.car,
+            &shared.track,
+            0,
+            &AppliedInput::default(),
+            &mut with_edges,
+        );
+
+        let mut without_layout = layout;
+        without_layout.edges = false;
+        let mut without_edges = vec![0.0; without_layout.spec().dim()];
+        encode(
+            &without_layout,
+            &env.car,
+            &shared.track,
+            0,
+            &AppliedInput::default(),
+            &mut without_edges,
+        );
+
+        let edge_start = 17 + 2 * layout.lookahead_points;
+        assert_eq!(&with_edges[..edge_start], &without_edges[..edge_start]);
+        assert_eq!(
+            &with_edges[edge_start + 2 * layout.lookahead_points..],
+            &without_edges[edge_start..]
+        );
+        let s = shared.track.locate(env.car.state.position, 0).s;
+        for k in 1..=layout.lookahead_points {
+            let sample = shared
+                .track
+                .sample_at(s + k as f64 * layout.lookahead_spacing);
+            assert_eq!(
+                with_edges[edge_start + 2 * (k - 1)],
+                (sample.width_left / 10.0) as f32
+            );
+            assert_eq!(
+                with_edges[edge_start + 2 * (k - 1) + 1],
+                (sample.width_right / 10.0) as f32
+            );
+        }
     }
 }

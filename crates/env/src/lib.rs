@@ -9,6 +9,7 @@ pub mod obs;
 pub mod reward;
 mod rng;
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use glam::DVec3;
@@ -37,6 +38,12 @@ pub struct EnvConfig {
     pub control_hz: f64,
     /// Start at a random point of the track (otherwise at the start line).
     pub random_start: bool,
+    /// Restrict random starts to this longitudinal track interval, in metres.
+    /// `None` samples the whole circuit. With [`Self::start_s_focus_fraction`]
+    /// below one, other starts still sample the whole circuit.
+    pub start_s_range: Option<(f64, f64)>,
+    /// Share of random starts sampled from `start_s_range`, when present.
+    pub start_s_focus_fraction: f64,
     /// Initial speed range in m/s.
     pub start_speed: (f64, f64),
     /// Cap the initial speed at what the corners within [`SAFE_START_DISTANCE`] allow at
@@ -49,6 +56,8 @@ pub struct EnvConfig {
     /// Anti-lock brakes, as GT3 cars have: the brake pressure backs off while a wheel
     /// locks. Without it the pedal locks the wheels well short of full travel.
     pub abs: bool,
+    /// Limit throttle when the driven tyres spin beyond useful longitudinal slip.
+    pub traction_control: bool,
     /// Maximum steering wheel speed in rad/s (a human arm / wheel base limit).
     pub max_steer_rate: f64,
     /// Track evolution: grip on the racing line at the start of an episode, relative
@@ -76,11 +85,14 @@ impl Default for EnvConfig {
         Self {
             control_hz: 50.0,
             random_start: true,
+            start_s_range: None,
+            start_s_focus_fraction: 1.0,
             start_speed: (0.0, 40.0),
             start_offset: (-2.0, 2.0),
             safe_start: false,
             auto_shift: true,
             abs: false,
+            traction_control: false,
             max_steer_rate: 15.0,
             track_grip: None,
             grip_gain_per_lap: 0.0,
@@ -192,7 +204,13 @@ impl Env {
         let cfg = &shared.config;
         let track = &*shared.track;
         let s = if cfg.random_start {
-            self.rng.uniform(0.0, track.length)
+            assert!((0.0..=1.0).contains(&cfg.start_s_focus_fraction));
+            let (start, end) = match cfg.start_s_range {
+                Some(range) if self.rng.uniform(0.0, 1.0) < cfg.start_s_focus_fraction => range,
+                _ => (0.0, track.length),
+            };
+            assert!(start >= 0.0 && start < end && end <= track.length);
+            self.rng.uniform(start, end)
         } else {
             0.0
         };
@@ -239,6 +257,9 @@ impl Env {
 
     /// Applies one agent action. Returns the reward and whether the episode ended.
     pub fn step(&mut self, shared: &EnvShared, action: &[f32]) -> (f64, Option<Done>) {
+        if action.iter().any(|a| !a.is_finite()) {
+            return self.terminate_invalid(shared);
+        }
         let cfg = &shared.config;
         let track = &*shared.track;
         let prev_steer = self.input.steer;
@@ -249,6 +270,19 @@ impl Env {
             let controls = self.actuator.controls(cfg, &self.car, action);
             self.car
                 .step_evolving(track, &mut self.evolution, &controls);
+            let st = &self.car.state;
+            if self.car.telemetry.invalid
+                || !st.position.is_finite()
+                || !st.velocity.is_finite()
+                || !st.orientation.is_finite()
+                || !st.angular_velocity.is_finite()
+                || st
+                    .wheels
+                    .iter()
+                    .any(|w| !w.travel.is_finite() || !w.spin.is_finite())
+            {
+                return self.terminate_invalid(shared);
+            }
             barrier_impact = barrier_impact.max(self.car.telemetry.barrier_impact);
         }
         self.input = self.actuator.applied(&self.car, action);
@@ -318,14 +352,39 @@ impl Env {
             } else {
                 0.0
             },
-            invalid: !(st.position.is_finite() && st.velocity.is_finite()),
+            invalid: !(st.position.is_finite()
+                && st.velocity.is_finite()
+                && speed.is_finite()
+                && progress.is_finite()
+                && total_progress.is_finite()
+                && (q.d / half_width).is_finite()
+                && grip_loss.is_finite()
+                && barrier_impact.is_finite()
+                && heading_cos.is_finite()
+                && st.time.is_finite()),
         };
+        if info.invalid {
+            return self.terminate_invalid(shared);
+        }
         self.info = info;
 
         let done = shared.termination.done(&info);
         let reward = shared.reward.reward(&info, done);
         self.stats.time = st.time;
         self.stats.progress = info.total_progress;
+        self.stats.return_ += reward;
+        (reward, done)
+    }
+
+    fn terminate_invalid(&mut self, shared: &EnvShared) -> (f64, Option<Done>) {
+        self.info = StepInfo {
+            invalid: true,
+            time: self.stats.time,
+            total_progress: self.stats.progress,
+            ..StepInfo::default()
+        };
+        let done = Some(Done::Terminated);
+        let reward = shared.reward.reward(&self.info, done);
         self.stats.return_ += reward;
         (reward, done)
     }
@@ -373,6 +432,15 @@ impl Actuator {
             },
             selector: None,
         };
+        if cfg.traction_control {
+            let spin = (0..4)
+                .filter(|&i| car.model.corners[i].driven)
+                .map(|i| car.state.wheels[i].kappa)
+                .fold(0.0_f64, f64::max);
+            controls.throttle = controls
+                .throttle
+                .min((1.0 - 8.0 * (spin - 0.1)).clamp(0.0, 1.0));
+        }
         self.clutch.apply(car, &mut controls);
         BlipAssist.apply(car, &mut controls);
         controls
@@ -554,9 +622,9 @@ impl BatchEnv {
     fn write_all_obs(&mut self) {
         let shared = &self.shared;
         self.envs
-            .par_iter()
+            .par_iter_mut()
             .zip(self.obs.par_chunks_mut(self.obs_dim))
-            .for_each(|(env, out)| env.observe(shared, out));
+            .for_each(|(env, out)| observe_finite(env, shared, out));
     }
 
     /// Steps every env with its row of `actions` (`num_envs × config.action_dim()`).
@@ -582,15 +650,55 @@ impl BatchEnv {
             .into_par_iter()
             .with_min_len(4)
             .for_each(|(env, action, obs, final_obs, reward, term, trunc)| {
-                let (r, done) = env.step(shared, action);
+                let stats_before = env.stats;
+                // A rare non-finite tyre force can still reach an internal float clamp.
+                // Isolate that numerical failure to one car; unrelated panics propagate.
+                let (mut r, mut done) = match catch_unwind(AssertUnwindSafe(|| {
+                    env.step(shared, action)
+                })) {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| payload.downcast_ref::<&str>().copied());
+                        if message.is_some_and(|s| s.starts_with("min > max, or either was NaN")) {
+                            env.terminate_invalid(shared)
+                        } else {
+                            resume_unwind(payload);
+                        }
+                    }
+                };
+                if !r.is_finite() {
+                    env.stats = stats_before;
+                    (r, done) = env.terminate_invalid(shared);
+                }
+                if done.is_some() {
+                    if env.info.invalid {
+                        final_obs.fill(0.0);
+                    } else {
+                        env.observe(shared, final_obs);
+                        if final_obs.iter().any(|x| !x.is_finite()) {
+                            env.stats = stats_before;
+                            (r, done) = env.terminate_invalid(shared);
+                            final_obs.fill(0.0);
+                        }
+                    }
+                    env.reset(shared);
+                    observe_finite(env, shared, obs);
+                } else {
+                    env.observe(shared, obs);
+                    if obs.iter().any(|x| !x.is_finite()) {
+                        env.stats = stats_before;
+                        (r, done) = env.terminate_invalid(shared);
+                        final_obs.fill(0.0);
+                        env.reset(shared);
+                        observe_finite(env, shared, obs);
+                    }
+                }
                 *reward = r as f32;
                 *term = (done == Some(Done::Terminated)) as u8;
                 *trunc = (done == Some(Done::Truncated)) as u8;
-                if done.is_some() {
-                    env.observe(shared, final_obs);
-                    env.reset(shared);
-                }
-                env.observe(shared, obs);
             });
 
         self.finished.clear();
@@ -606,5 +714,76 @@ impl BatchEnv {
             terminated: &self.terminated,
             truncated: &self.truncated,
         }
+    }
+}
+
+fn observe_finite(env: &mut Env, shared: &EnvShared, out: &mut [f32]) {
+    let last_episode = env.last_episode;
+    env.observe(shared, out);
+    for _ in 0..8 {
+        if out.iter().all(|x| x.is_finite()) {
+            env.last_episode = last_episode;
+            return;
+        }
+        env.reset(shared);
+        env.observe(shared, out);
+    }
+    env.last_episode = last_episode;
+    out.fill(0.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_starts_stay_within_requested_track_interval() {
+        let track = Arc::new(Track::default_circuit());
+        let shared = EnvShared::new(
+            EnvConfig {
+                start_s_range: Some((100.0, 200.0)),
+                start_speed: (0.0, 0.0),
+                start_offset: (0.0, 0.0),
+                ..EnvConfig::default()
+            },
+            track.clone(),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut env = Env::new(&shared, 42);
+        for _ in 0..100 {
+            env.reset(&shared);
+            let q = track.locate(
+                env.car.state.position,
+                track.nearest_index(env.car.state.position),
+            );
+            assert!((99.0..=201.0).contains(&q.s), "spawn s={}", q.s);
+        }
+    }
+
+    #[test]
+    fn zero_focus_fraction_keeps_whole_track_starts() {
+        let track = Arc::new(Track::default_circuit());
+        let shared = EnvShared::new(
+            EnvConfig {
+                start_s_range: Some((100.0, 200.0)),
+                start_s_focus_fraction: 0.0,
+                start_speed: (0.0, 0.0),
+                start_offset: (0.0, 0.0),
+                ..EnvConfig::default()
+            },
+            track.clone(),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut env = Env::new(&shared, 42);
+        let mut outside = false;
+        for _ in 0..100 {
+            env.reset(&shared);
+            let q = track.locate(
+                env.car.state.position,
+                track.nearest_index(env.car.state.position),
+            );
+            outside |= !(99.0..=201.0).contains(&q.s);
+        }
+        assert!(outside);
     }
 }

@@ -21,6 +21,8 @@ const LOG_2PI: f32 = 1.837_877_1;
 #[derive(Clone, Debug)]
 pub struct PpoConfig {
     pub iterations: usize,
+    /// Stop after the current iteration once this many seconds have elapsed.
+    pub max_duration_seconds: Option<f64>,
     /// Env steps per env per iteration.
     pub rollout_len: usize,
     pub epochs: usize,
@@ -48,6 +50,7 @@ impl Default for PpoConfig {
     fn default() -> Self {
         Self {
             iterations: 500,
+            max_duration_seconds: None,
             rollout_len: 64,
             epochs: 5,
             minibatch: 4096,
@@ -154,8 +157,7 @@ fn capped_log_std<B: Backend>(agent: &Agent<B>, cap: f32) -> Tensor<B, 1> {
 /// Cap on the log exploration noise in `iteration` (1-based). Lowering it over training
 /// brings the noisy policy that collected the data close to the deterministic one that
 /// is run afterwards: with clipped actions the two differ more the larger the noise.
-fn log_std_cap(cfg: &PpoConfig, iteration: usize) -> f32 {
-    let done = (iteration - 1) as f32 / cfg.iterations.max(1) as f32;
+fn log_std_cap(cfg: &PpoConfig, done: f32) -> f32 {
     let end = cfg.final_log_std.unwrap_or(cfg.init_log_std);
     cfg.init_log_std + (end - cfg.init_log_std) * done
 }
@@ -213,14 +215,18 @@ pub fn train<B: AutodiffBackend>(
     let mut env_actions = vec![0.0; n * act_dim];
     let mut best_lap_overall: Option<f64> = None;
     let mut total_steps = 0usize;
+    let training_started = Instant::now();
 
     for iteration in 1..=cfg.iterations {
         let started = Instant::now();
+        let progress = cfg.max_duration_seconds.map_or_else(
+            || (iteration - 1) as f64 / cfg.iterations.max(1) as f64,
+            |seconds| (training_started.elapsed().as_secs_f64() / seconds).min(1.0),
+        );
         // Linear decay to zero lets the policy settle instead of jittering around the optimum.
-        let learning_rate =
-            cfg.learning_rate * (1.0 - (iteration - 1) as f64 / cfg.iterations as f64);
+        let learning_rate = cfg.learning_rate * (1.0 - progress);
         let policy = agent.valid();
-        let cap = log_std_cap(cfg, iteration);
+        let cap = log_std_cap(cfg, progress as f32);
         let std: Vec<f32> = to_vec(capped_log_std(&policy, cap).exp());
         let mut episodes = EpisodeSummary::default();
 
@@ -418,8 +424,14 @@ pub fn train<B: AutodiffBackend>(
             100.0 * rollout_time / started.elapsed().as_secs_f64(),
         );
 
-        if iteration % cfg.save_every == 0 || iteration == cfg.iterations {
+        let reached_duration = cfg
+            .max_duration_seconds
+            .is_some_and(|seconds| training_started.elapsed().as_secs_f64() >= seconds);
+        if iteration % cfg.save_every == 0 || iteration == cfg.iterations || reached_duration {
             save_policy(&cfg.out_dir, &agent.valid(), &meta).expect("save policy");
+        }
+        if reached_duration {
+            break;
         }
     }
 }

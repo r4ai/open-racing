@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use open_racing_api::{
-    DefaultReward, EnvConfig, EnvSpec, Policy, RacingVecEnv, VecEnv, parse_grip_range,
+    DefaultReward, DefaultTermination, EnvConfig, EnvSpec, Policy, RacingVecEnv, VecEnv,
+    parse_grip_range,
 };
+use open_racing_train_burn::imitation::{self, ImitationConfig};
 use open_racing_train_burn::ppo::{self, PpoConfig, TrainContext};
+use open_racing_train_burn::reference::ReferenceConfig;
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
 #[derive(Parser)]
@@ -17,7 +20,44 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Clap keeps the train options in one variant for a flat command-line interface.
+#[allow(clippy::large_enum_variant)]
 enum Command {
+    /// Bootstrap a Watkins Glen Formula policy from the tested reference controller.
+    Imitate {
+        #[arg(long, default_value_t = 256)]
+        envs: usize,
+        #[arg(long, default_value_t = 524288)]
+        samples: usize,
+        #[arg(long, default_value_t = 10)]
+        epochs: usize,
+        #[arg(long, default_value_t = 8192)]
+        minibatch: usize,
+        #[arg(long, default_value_t = 3e-4)]
+        lr: f64,
+        #[arg(long, default_value_t = 101)]
+        seed: u64,
+        /// Bootstrap from an earlier imitation checkpoint.
+        #[arg(long)]
+        init: Option<PathBuf>,
+        /// Share of rollout cars driven by the student while the reference labels states.
+        #[arg(long, default_value_t = 0.0)]
+        student_fraction: f64,
+        /// Loss weight for throttle and brake relative to the baseline of 1.
+        #[arg(long, default_value_t = 1.0)]
+        pedal_weight: f32,
+        /// First metre of a focused random-start interval.
+        #[arg(long, requires = "start_s_max")]
+        start_s_min: Option<f64>,
+        /// Last metre of a focused random-start interval.
+        #[arg(long, requires = "start_s_min")]
+        start_s_max: Option<f64>,
+        /// Share of random starts in the focused interval; the rest span the whole track.
+        #[arg(long, default_value_t = 1.0)]
+        start_s_focus_fraction: f64,
+        #[arg(long, default_value = "runs/watkins-formula-imitation")]
+        out: PathBuf,
+    },
     /// Train a new policy.
     Train {
         #[arg(long, default_value = "lakeside")]
@@ -28,6 +68,9 @@ enum Command {
         envs: usize,
         #[arg(long, default_value_t = 500)]
         iterations: usize,
+        /// Wall-clock training limit; finishes the current iteration and saves a checkpoint.
+        #[arg(long)]
+        duration_seconds: Option<f64>,
         #[arg(long, default_value_t = 64)]
         rollout: usize,
         /// Samples per gradient step; larger batches keep a GPU busier.
@@ -65,6 +108,9 @@ enum Command {
         /// Reward lost per step for every wheel off the track.
         #[arg(long, default_value_t = DefaultReward::default().off_track_weight)]
         off_track_penalty: f64,
+        /// Dense penalty for driving close to either track edge.
+        #[arg(long, default_value_t = DefaultReward::default().edge_weight)]
+        edge_penalty: f64,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// Include ground-truth tyre state in the observation.
@@ -79,6 +125,15 @@ enum Command {
         /// Start episodes no faster than the corners just ahead allow.
         #[arg(long)]
         safe_start: bool,
+        /// Highest random starting speed in m/s.
+        #[arg(long, default_value_t = EnvConfig::default().start_speed.1)]
+        start_speed_max: f64,
+        /// Absolute limit of the random lateral starting offset in metres.
+        #[arg(long, default_value_t = EnvConfig::default().start_offset.1)]
+        start_offset_meters: f64,
+        /// Episode time limit in simulated seconds.
+        #[arg(long, default_value_t = DefaultTermination::default().max_time)]
+        max_episode_seconds: f64,
         /// Agent decisions per second.
         #[arg(long, default_value_t = EnvConfig::default().control_hz)]
         control_hz: f64,
@@ -91,6 +146,9 @@ enum Command {
         /// Anti-lock brakes.
         #[arg(long)]
         abs: bool,
+        /// Reduce throttle when driven tyres spin excessively.
+        #[arg(long)]
+        traction_control: bool,
         /// Let the policy shift gears itself instead of the automatic gear selector.
         #[arg(long)]
         manual_shift: bool,
@@ -124,20 +182,124 @@ enum Command {
         /// Start the robustness cars no faster than the corners just ahead allow.
         #[arg(long)]
         safe_start: bool,
+        /// Episode time limit in simulated seconds.
+        #[arg(long, default_value_t = DefaultTermination::default().max_time)]
+        max_episode_seconds: f64,
         /// Racing-line grip level or range to evaluate on (see `train --track-grip`);
         /// defaults to what the policy was trained with.
         #[arg(long, value_parser = parse_grip_range)]
         track_grip: Option<(f64, f64)>,
+        /// Use a tested trajectory and tyre-slip controller as a safety supervisor.
+        #[arg(long)]
+        reference_assist: bool,
+        /// Steering share from the model when it agrees closely with the reference.
+        #[arg(long, default_value_t = 0.0)]
+        reference_blend: f32,
+        /// Limit learned throttle and brake actions around Watkins Glen's rough section.
+        /// The model still controls steering everywhere.
+        #[arg(long)]
+        hazard_speed_governor: bool,
+        /// Use reference steering inside the rough section and learned
+        /// steering everywhere else.
+        #[arg(long, requires = "hazard_speed_governor")]
+        hazard_steer_fallback: bool,
     },
+}
+
+#[derive(Clone, Copy)]
+struct EvalSupervision {
+    reference_assist: bool,
+    reference_blend: f32,
+    hazard_speed_governor: bool,
+    hazard_steer_fallback: bool,
 }
 
 fn main() {
     match Cli::parse().command {
+        Command::Imitate {
+            envs,
+            samples,
+            epochs,
+            minibatch,
+            lr,
+            seed,
+            init,
+            student_fraction,
+            pedal_weight,
+            start_s_min,
+            start_s_max,
+            start_s_focus_fraction,
+            out,
+        } => {
+            let start_s_range = start_s_min.zip(start_s_max);
+            let config = EnvConfig {
+                control_hz: 25.0,
+                max_steer_rate: 4.0,
+                safe_start: true,
+                start_speed: (0.0, 12.0),
+                start_offset: (-0.5, 0.5),
+                start_s_range,
+                start_s_focus_fraction,
+                traction_control: true,
+                privileged_obs: true,
+                tyre_obs: true,
+                edge_obs: true,
+                track_grip: Some((0.94, 1.0)),
+                grip_gain_per_lap: 0.01,
+                seed,
+                ..EnvConfig::default()
+            };
+            let spec = EnvSpec::from_names("watkins_glen", "formula", config.clone())
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut env = spec.make_vec_env(envs);
+            let space = env.action_space().clone();
+            let meta = PolicyMeta {
+                obs_names: env.observation_space().names.clone(),
+                act_low: space.low,
+                act_high: space.high,
+                hidden: vec![],
+                normalizer: Normalizer::new(env.observation_space().dim()),
+                control_hz: config.control_hz,
+                lookahead_points: config.lookahead_points,
+                lookahead_spacing: config.lookahead_spacing,
+                privileged_obs: config.privileged_obs,
+                tyre_obs: config.tyre_obs,
+                edge_obs: config.edge_obs,
+                abs: config.abs,
+                traction_control: config.traction_control,
+                max_steer_rate: config.max_steer_rate,
+                auto_shift: config.auto_shift,
+                track_grip: config.track_grip,
+                grip_gain_per_lap: Some(config.grip_gain_per_lap),
+                track: "watkins_glen".into(),
+                car: "formula".into(),
+            };
+            imitation::train::<TrainBackend>(
+                &mut env,
+                &spec.track,
+                &ImitationConfig {
+                    samples,
+                    epochs,
+                    minibatch,
+                    learning_rate: lr,
+                    hidden: vec![512, 512],
+                    seed,
+                    out_dir: out,
+                    reference: ReferenceConfig::default(),
+                    init,
+                    student_fraction,
+                    pedal_weight,
+                },
+                meta,
+                &Default::default(),
+            );
+        }
         Command::Train {
             track,
             car,
             envs,
             iterations,
+            duration_seconds,
             rollout,
             minibatch,
             epochs,
@@ -150,12 +312,17 @@ fn main() {
             grip_loss_penalty,
             steer_change_penalty,
             off_track_penalty,
+            edge_penalty,
             seed,
             privileged,
             tyre_obs,
             edge_obs,
             safe_start,
+            start_speed_max,
+            start_offset_meters,
+            max_episode_seconds,
             abs,
+            traction_control,
             control_hz,
             max_steer_rate,
             hidden,
@@ -165,12 +332,19 @@ fn main() {
             out,
             init,
         } => {
+            assert!(duration_seconds.is_none_or(|seconds| seconds.is_finite() && seconds > 0.0));
+            assert!(max_episode_seconds.is_finite() && max_episode_seconds > 0.0);
+            assert!(start_speed_max.is_finite() && start_speed_max > 0.0);
+            assert!(start_offset_meters.is_finite() && start_offset_meters >= 0.0);
             let config = EnvConfig {
                 privileged_obs: privileged,
                 tyre_obs,
                 edge_obs,
                 safe_start,
+                start_speed: (0.0, start_speed_max),
+                start_offset: (-start_offset_meters, start_offset_meters),
                 abs,
+                traction_control,
                 control_hz,
                 max_steer_rate,
                 auto_shift: !manual_shift,
@@ -186,7 +360,12 @@ fn main() {
                 grip_loss_weight: grip_loss_penalty,
                 steer_change_weight: steer_change_penalty,
                 off_track_weight: off_track_penalty,
+                edge_weight: edge_penalty,
                 ..DefaultReward::default()
+            });
+            spec.termination = Arc::new(DefaultTermination {
+                max_time: max_episode_seconds,
+                ..DefaultTermination::default()
             });
             let mut env = spec.make_vec_env(envs);
             let space = env.action_space().clone();
@@ -203,6 +382,7 @@ fn main() {
                 tyre_obs: config.tyre_obs,
                 edge_obs: config.edge_obs,
                 abs: config.abs,
+                traction_control: config.traction_control,
                 max_steer_rate: config.max_steer_rate,
                 auto_shift: config.auto_shift,
                 track_grip: config.track_grip,
@@ -212,6 +392,7 @@ fn main() {
             };
             let cfg = PpoConfig {
                 iterations,
+                max_duration_seconds: duration_seconds,
                 rollout_len: rollout,
                 minibatch,
                 epochs,
@@ -240,24 +421,58 @@ fn main() {
             envs,
             trace,
             safe_start,
+            max_episode_seconds,
             track_grip,
+            reference_assist,
+            reference_blend,
+            hazard_speed_governor,
+            hazard_steer_fallback,
         } => {
+            assert!((0.0..=1.0).contains(&reference_blend));
+            let supervision = EvalSupervision {
+                reference_assist,
+                reference_blend,
+                hazard_speed_governor,
+                hazard_steer_fallback,
+            };
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
             if track_grip.is_some() {
                 policy.meta.track_grip = track_grip;
             }
-            flying_lap(&mut policy, seconds, trace.as_deref());
+            flying_lap(
+                &mut policy,
+                seconds,
+                max_episode_seconds,
+                trace.as_deref(),
+                supervision,
+            );
             if envs > 0 {
-                robustness(&mut policy, seconds, envs, safe_start);
+                robustness(
+                    &mut policy,
+                    seconds,
+                    envs,
+                    safe_start,
+                    max_episode_seconds,
+                    supervision,
+                );
             }
         }
     }
 }
 
-fn eval_env(policy: &BurnPolicy, config: EnvConfig, envs: usize) -> (EnvSpec, RacingVecEnv) {
-    let spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config)
+fn eval_env(
+    policy: &BurnPolicy,
+    config: EnvConfig,
+    envs: usize,
+    max_episode_seconds: f64,
+) -> (EnvSpec, RacingVecEnv) {
+    let mut spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config)
         .unwrap_or_else(|e| panic!("{e}"));
+    spec.termination = Arc::new(DefaultTermination {
+        max_time: max_episode_seconds,
+        ..DefaultTermination::default()
+    });
     let env = spec.make_vec_env(envs);
     policy
         .check_compatible(env.observation_space())
@@ -266,14 +481,20 @@ fn eval_env(policy: &BurnPolicy, config: EnvConfig, envs: usize) -> (EnvSpec, Ra
 }
 
 /// One car from a standing start on the start line, as in a race.
-fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
+fn flying_lap(
+    policy: &mut BurnPolicy,
+    seconds: f64,
+    max_episode_seconds: f64,
+    trace: Option<&Path>,
+    supervision: EvalSupervision,
+) {
     let config = EnvConfig {
         random_start: false,
         start_speed: (0.0, 0.0),
         start_offset: (0.0, 0.0),
         ..policy.meta.env_config()
     };
-    let (spec, mut env) = eval_env(policy, config.clone(), 1);
+    let (spec, mut env) = eval_env(policy, config.clone(), 1, max_episode_seconds);
     let mut trace = trace.map(|path| {
         let mut file = std::io::BufWriter::new(
             std::fs::File::create(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
@@ -290,8 +511,32 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
     let mut stats = Default::default();
     let mut ending = "";
     let mut laps: Vec<f64> = Vec::new();
+    let mut hint = 0;
+    let mut model_steer_steps = 0_usize;
+    let mut governed_steps = 0_usize;
+    let mut fallback_steps = 0_usize;
+    let mut total_steps = 0_usize;
     for _ in 0..(seconds * config.control_hz) as usize {
         policy.act(&obs, &mut actions);
+        if supervision.reference_assist {
+            let car = env.cars().next().expect("one car");
+            let reference = ReferenceConfig::default().action(car, &spec.track, &mut hint);
+            model_steer_steps +=
+                supervise_action(&mut actions, reference, supervision.reference_blend) as usize;
+            total_steps += 1;
+        }
+        if supervision.hazard_speed_governor {
+            let car = env.cars().next().expect("one car");
+            let (governed, fallback) = govern_rough_section_speed(
+                &mut actions,
+                car,
+                &spec.track,
+                &mut hint,
+                supervision.hazard_steer_fallback,
+            );
+            governed_steps += governed as usize;
+            fallback_steps += fallback as usize;
+        }
         let r = env.step(&actions);
         obs.copy_from_slice(r.obs);
         let (terminated, truncated) = (r.terminated[0] != 0, r.truncated[0] != 0);
@@ -372,25 +617,109 @@ fn flying_lap(policy: &mut BurnPolicy, seconds: f64, trace: Option<&Path>) {
             .map_or("-".into(), |l| format!("{l:.3}s")),
         laps.join(", ")
     );
+    if supervision.reference_assist {
+        println!(
+            "reference assist: model steering blended on {model_steer_steps}/{total_steps} steps"
+        );
+    }
+    if supervision.hazard_speed_governor {
+        println!("hazard speed governor: applied on {governed_steps} steps");
+    }
+    if supervision.hazard_steer_fallback {
+        println!("hazard steering fallback: applied on {fallback_steps} steps");
+    }
+}
+
+/// A bounded steering residual from the model; speed and traction remain supervised.
+fn supervise_action(action: &mut [f32], reference: [f32; 3], blend: f32) -> bool {
+    let close = (action[0] - reference[0]).abs() <= 0.1;
+    action[0] = if close && blend > 0.0 {
+        (1.0 - blend) * reference[0] + blend * action[0]
+    } else {
+        reference[0]
+    };
+    action[1] = reference[1];
+    action[2] = reference[2];
+    close && blend > 0.0
+}
+
+/// Keep the learned steering policy while bounding its speed in the measured
+/// rough section, including the approach needed for braking.
+fn govern_rough_section_speed(
+    action: &mut [f32],
+    car: &open_racing_api::Car,
+    track: &open_racing_api::Track,
+    hint: &mut usize,
+    steer_fallback: bool,
+) -> (bool, bool) {
+    if car.state.time == 0.0 {
+        *hint = track.nearest_index(car.state.position);
+    }
+    let q = track.locate(car.state.position, *hint);
+    *hint = q.index;
+    if !(3750.0..4600.0).contains(&q.s) {
+        return (false, false);
+    }
+    let reference = ReferenceConfig::default().action(car, track, hint);
+    action[1] = action[1].min(reference[1]);
+    action[2] = action[2].max(reference[2]);
+    let fallback = steer_fallback;
+    if fallback {
+        action[0] = reference[0];
+    }
+    (true, fallback)
 }
 
 /// Many cars from random points and speeds (the training distribution): how often and
 /// where on the track the policy crashes.
-fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize, safe_start: bool) {
+fn robustness(
+    policy: &mut BurnPolicy,
+    seconds: f64,
+    envs: usize,
+    safe_start: bool,
+    max_episode_seconds: f64,
+    supervision: EvalSupervision,
+) {
     const BIN: f64 = 100.0;
     let config = EnvConfig {
         safe_start,
         ..policy.meta.env_config()
     };
-    let (spec, mut env) = eval_env(policy, config.clone(), envs);
+    let (spec, mut env) = eval_env(policy, config.clone(), envs, max_episode_seconds);
     let track = &*spec.track;
     let mut obs = env.reset(1).to_vec();
     let mut actions = vec![0.0; envs * config.action_dim()];
+    let mut hints = vec![0_usize; envs];
     let mut crashes_at = vec![0usize; (track.length / BIN).ceil() as usize];
     let (mut crashes, mut distance, mut laps, mut best_lap) = (0usize, 0.0, 0u32, None::<f64>);
+    let mut governed_steps = 0_usize;
+    let mut fallback_steps = 0_usize;
     for _ in 0..(seconds * config.control_hz) as usize {
         let before: Vec<_> = env.cars().map(|c| c.state.position).collect();
         policy.act(&obs, &mut actions);
+        if supervision.reference_assist {
+            for (e, car) in env.cars().enumerate() {
+                let reference = ReferenceConfig::default().action(car, track, &mut hints[e]);
+                supervise_action(
+                    &mut actions[e * 3..e * 3 + 3],
+                    reference,
+                    supervision.reference_blend,
+                );
+            }
+        }
+        if supervision.hazard_speed_governor {
+            for (e, car) in env.cars().enumerate() {
+                let (governed, fallback) = govern_rough_section_speed(
+                    &mut actions[e * 3..e * 3 + 3],
+                    car,
+                    track,
+                    &mut hints[e],
+                    supervision.hazard_steer_fallback,
+                );
+                governed_steps += governed as usize;
+                fallback_steps += fallback as usize;
+            }
+        }
         let r = env.step(&actions);
         obs.copy_from_slice(r.obs);
         for (e, pos) in before.iter().enumerate() {
@@ -420,6 +749,12 @@ fn robustness(policy: &mut BurnPolicy, seconds: f64, envs: usize, safe_start: bo
         best_lap.map_or("-".into(), |l| format!("{l:.3}s")),
         crashes as f64 * track.length / distance.max(1.0),
     );
+    if supervision.hazard_speed_governor {
+        println!("hazard speed governor: applied on {governed_steps} car-steps");
+    }
+    if supervision.hazard_steer_fallback {
+        println!("hazard steering fallback: applied on {fallback_steps} car-steps");
+    }
     let mut hot: Vec<_> = crashes_at
         .iter()
         .enumerate()

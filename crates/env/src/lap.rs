@@ -30,9 +30,16 @@ pub struct LapTimer {
 impl LapTimer {
     pub fn new(track: &Track, position: DVec3) -> Self {
         let q = track.locate(position, track.nearest_index(position));
+        // Projection of the exact spawn point can land a few millimetres
+        // past the line (0.0044 m on Watkins Glen).
+        let on_line = q.s < 1.0 || track.length - q.s < 1.0;
         Self {
             hint: q.index,
             last_s: q.s,
+            // A standing start on the timing line already begins a lap. Random
+            // starts elsewhere still need to reach the line before timing one.
+            lap_start: on_line.then_some((0.0, 0.0)),
+            current_lap: on_line.then_some(0.0),
             sector: track.layout.sector_at(q.s),
             ..Default::default()
         }
@@ -116,5 +123,15 @@ mod tests {
             assert!((s - third).abs() < 3.0, "sector {i}: {s} vs {third}");
         }
         assert!(lap.last_sectors[3].is_none());
+    }
+
+    #[test]
+    fn standing_start_counts_first_completed_lap() {
+        let track = Track::default_circuit();
+        let mut lap = LapTimer::new(&track, track.sample_at(0.01).pos);
+        for s in 1..=(track.length.ceil() as usize + 5) {
+            lap.update(&track, track.sample_at(s as f64 + 0.01).pos, s as f64);
+        }
+        assert_eq!(lap.laps, 1);
     }
 }

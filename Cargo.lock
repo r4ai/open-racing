@@ -7233,6 +7233,8 @@ dependencies = [
  "burn",
  "clap",
  "open-racing-api",
+ "open-racing-sim",
+ "rayon",
  "ron",
  "serde",
 ]

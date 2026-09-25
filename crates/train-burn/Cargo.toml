@@ -13,7 +13,9 @@ flex = ["burn/flex"]
 
 [dependencies]
 open-racing-api.workspace = true
+open-racing-sim.workspace = true
 burn = { version = "0.21", default-features = false, features = ["std", "autodiff"] }
 clap.workspace = true
 serde.workspace = true
 ron.workspace = true
+rayon.workspace = true

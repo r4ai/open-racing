@@ -1,7 +1,9 @@
 //! Burn adapter: actor-critic network, PPO trainer and a `Policy` implementation for
 //! running trained agents anywhere the `open_racing_api::Policy` port is accepted.
 
+pub mod imitation;
 pub mod ppo;
+pub mod reference;
 
 use std::path::Path;
 
@@ -120,10 +122,36 @@ impl Normalizer {
 
     pub fn normalize(&self, rows: &[f32], out: &mut [f32]) {
         let dim = self.mean.len();
-        for (i, (x, o)) in rows.iter().zip(out.iter_mut()).enumerate() {
-            let j = i % dim;
-            let z = (*x as f64 - self.mean[j]) / (self.var[j] + 1e-8).sqrt();
-            *o = z.clamp(-Self::CLIP, Self::CLIP) as f32;
+        if dim == 0 {
+            return;
+        }
+        // Every row uses the same statistics; compute each square root once.
+        let inv_std: Vec<f64> = self.var.iter().map(|v| (v + 1e-8).sqrt().recip()).collect();
+        for (input, output) in rows.chunks(dim).zip(out.chunks_mut(dim)) {
+            for (j, (&x, o)) in input.iter().zip(output).enumerate() {
+                let z = (x as f64 - self.mean[j]) * inv_std[j];
+                *o = z.clamp(-Self::CLIP, Self::CLIP) as f32;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod normalizer_tests {
+    use super::Normalizer;
+
+    #[test]
+    fn normalize_matches_per_element_formula() {
+        let mut normalizer = Normalizer::new(3);
+        normalizer.update(&[1.0, 5.0, -2.0, 3.0, 7.0, 4.0]);
+        let rows = [0.0, 8.0, -5.0, 2.0, 6.0, 20.0];
+        let mut output = [0.0; 6];
+        normalizer.normalize(&rows, &mut output);
+        for (i, (&x, &actual)) in rows.iter().zip(&output).enumerate() {
+            let j = i % 3;
+            let expected = ((x as f64 - normalizer.mean[j]) / (normalizer.var[j] + 1e-8).sqrt())
+                .clamp(-10.0, 10.0) as f32;
+            assert!((actual - expected).abs() < 1e-6);
         }
     }
 }
@@ -149,6 +177,8 @@ pub struct PolicyMeta {
     /// Anti-lock brakes (absent in older policies).
     #[serde(default)]
     pub abs: bool,
+    #[serde(default)]
+    pub traction_control: bool,
     pub max_steer_rate: f64,
     pub auto_shift: bool,
     /// Racing-line grip range of the episodes (absent: uniform grip, no rubber model).
@@ -172,6 +202,7 @@ impl PolicyMeta {
             tyre_obs: self.tyre_obs,
             edge_obs: self.edge_obs,
             abs: self.abs,
+            traction_control: self.traction_control,
             max_steer_rate: self.max_steer_rate,
             auto_shift: self.auto_shift,
             track_grip: self.track_grip,

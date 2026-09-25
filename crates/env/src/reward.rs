@@ -56,6 +56,8 @@ pub struct DefaultReward {
     pub progress_weight: f64,
     /// Penalty per step per wheel off the track.
     pub off_track_weight: f64,
+    /// Penalty as the car approaches the road edge; begins at 60% of the usable width.
+    pub edge_weight: f64,
     /// Penalty per unit of steering input change (smoothness).
     pub steer_change_weight: f64,
     /// Penalty per step per unit of tyre grip lost (see [`StepInfo::grip_loss`]): an
@@ -71,6 +73,7 @@ impl Default for DefaultReward {
         Self {
             progress_weight: 0.1,
             off_track_weight: 0.02,
+            edge_weight: 0.0,
             steer_change_weight: 0.0,
             grip_loss_weight: 0.0,
             termination_penalty: 10.0,
@@ -82,6 +85,7 @@ impl RewardFn for DefaultReward {
     fn reward(&self, info: &StepInfo, done: Option<Done>) -> f64 {
         let mut r = self.progress_weight * info.progress
             - self.off_track_weight * info.wheels_off as f64
+            - self.edge_weight * (info.offset.abs() - 0.6).max(0.0).powi(2)
             - self.steer_change_weight * info.steer_change.abs()
             - self.grip_loss_weight * info.grip_loss;
         if done == Some(Done::Terminated) {

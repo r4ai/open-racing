@@ -55,6 +55,18 @@ fn buffers_match_spaces() {
 }
 
 #[test]
+fn invalid_action_terminates_and_resets_without_poisoning_observations() {
+    let mut env = spec(EnvConfig::default()).make_vec_env(1);
+    env.reset(3);
+    let result = env.step(&[f32::NAN, 0.0, 0.0]);
+    assert_eq!(result.terminated, &[1]);
+    assert!(result.rewards[0].is_finite());
+    assert!(result.obs.iter().all(|x| x.is_finite()));
+    assert!(result.final_obs.iter().all(|x| x.is_finite()));
+    assert!(env.step(&[0.0, 0.0, 0.0]).obs.iter().all(|x| x.is_finite()));
+}
+
+#[test]
 fn privileged_obs_extends_space() {
     let base = spec(EnvConfig::default()).observation_space().dim();
     let priv_ = spec(EnvConfig {

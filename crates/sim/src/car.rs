@@ -185,6 +185,8 @@ impl Default for WheelTelemetry {
 /// Derived quantities from the last step, for HUD, observations and force feedback.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Telemetry {
+    /// The physics step encountered a non-finite tyre force and must be terminated.
+    pub invalid: bool,
     pub wheels: [WheelTelemetry; 4],
     /// Specific force at the CG in body coordinates (what an accelerometer measures), m/s².
     pub acceleration: DVec3,
@@ -514,6 +516,10 @@ impl Car {
                 * camber_grip
                 * tire.slide_grip(slide_speed)
                 * tire.condition_grip(&w.tire, &tread_load, pressure);
+            if !mu.is_finite() || mu < 0.0 || !fz.is_finite() {
+                tel.invalid = true;
+                return;
+            }
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu, pressure);
             // The pneumatic trail lies behind the patch's middle in the direction the
             // wheel rolls, so it swaps ends in reverse; on loose ground the tyre ploughs
@@ -534,6 +540,11 @@ impl Car {
             if blend > 0.0 {
                 let limit_x = tp.mu_x * mu * fz;
                 let limit_y = tp.mu_y * mu * fz;
+                if !(limit_x.is_finite() && limit_y.is_finite() && limit_x >= 0.0 && limit_y >= 0.0)
+                {
+                    tel.invalid = true;
+                    return;
+                }
                 let damping = blend * LOW_SPEED_DAMPING * fz;
                 f.fx = (f.fx + damping * slip_vel).clamp(-limit_x, limit_x);
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
