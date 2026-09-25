@@ -22,6 +22,9 @@ pub fn view(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx, view: View) {
     navigation(ctx, r, c);
 }
 
+/// Least screen distance between node numbers, logical pixels.
+const LABEL_GAP: f32 = 22.0;
+
 /// Text with a dark outline, readable over the sky and the grass.
 fn outlined(
     painter: &egui::Painter,
@@ -198,22 +201,36 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
         && let Some(item) = sel.item
         && let Some((_, nodes, _)) = item_line(p, item)
     {
-        for (i, node) in nodes.iter().enumerate() {
-            if let Some(at) = screen(shown_pos(c.editor, c.built, item, node.pos)) {
-                let color = if sel.nodes.contains(&i) {
-                    egui::Color32::from_rgb(255, 215, 30)
-                } else {
-                    egui::Color32::from_gray(235)
-                };
-                outlined(
-                    &painter,
-                    at + egui::vec2(9.0, -9.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    &i.to_string(),
-                    11.0,
-                    color,
-                );
+        // Selected nodes first; the others where they do not crowd what is drawn.
+        let order = sel
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&i| i < nodes.len())
+            .chain((0..nodes.len()).filter(|i| !sel.nodes.contains(i)));
+        let mut drawn: Vec<egui::Pos2> = Vec::new();
+        for i in order {
+            let chosen = sel.nodes.contains(&i);
+            let Some(at) = screen(shown_pos(c.editor, c.built, item, nodes[i].pos)) else {
+                continue;
+            };
+            if !chosen && drawn.iter().any(|d| d.distance(at) < LABEL_GAP) {
+                continue;
             }
+            drawn.push(at);
+            let color = if chosen {
+                egui::Color32::from_rgb(255, 215, 30)
+            } else {
+                egui::Color32::from_gray(235)
+            };
+            outlined(
+                &painter,
+                at + egui::vec2(9.0, -9.0),
+                egui::Align2::LEFT_BOTTOM,
+                &i.to_string(),
+                11.0,
+                color,
+            );
         }
     }
 }

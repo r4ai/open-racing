@@ -194,6 +194,122 @@ pub fn subdivide(editor: &mut Editor, built: &Built) {
     }
 }
 
+/// What smoothing evens out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Smooth {
+    /// The nodes' heights.
+    Heights,
+    /// Their places in plan.
+    Shape,
+}
+
+/// Evens out the selected nodes (all with none selected) with their neighbours two
+/// either side, as Blender's Smooth; an open line's ends stay. Again smooths more.
+pub fn smooth(editor: &mut Editor, what: Smooth) {
+    let picked = editor.picked_nodes();
+    let Some((name, nodes, closed)) = editor.line() else {
+        return;
+    };
+    let n = nodes.len();
+    let at = |i: usize, d: isize| -> Option<usize> {
+        let j = i as isize + d;
+        if closed {
+            Some(j.rem_euclid(n as isize) as usize)
+        } else {
+            (0..n as isize).contains(&j).then_some(j as usize)
+        }
+    };
+    let ops: Vec<Op> = picked
+        .into_iter()
+        .filter(|&i| closed || (i > 0 && i + 1 < n))
+        .map(|i| {
+            let (mut sum, mut total) = (DVec3::ZERO, 0.0);
+            for (d, w) in [(-2, 1.0), (-1, 2.0), (0, 3.0), (1, 2.0), (2, 1.0)] {
+                if let Some(j) = at(i, d) {
+                    sum += nodes[j].pos * w;
+                    total += w;
+                }
+            }
+            let mean = sum / total;
+            let pos = nodes[i].pos;
+            Op::MoveNode {
+                line: name.to_string(),
+                index: i,
+                pos: match what {
+                    Smooth::Heights => pos.with_z(mean.z),
+                    Smooth::Shape => mean.with_z(pos.z),
+                },
+            }
+        })
+        .collect();
+    if !ops.is_empty() {
+        editor.apply(ops, None);
+    }
+}
+
+/// Puts the selected nodes at their mean height: a level stretch.
+pub fn flatten(editor: &mut Editor) {
+    let picked = editor.picked_nodes();
+    let Some((name, nodes, _)) = editor.line() else {
+        return;
+    };
+    if picked.is_empty() {
+        return;
+    }
+    let z = picked.iter().map(|&i| nodes[i].pos.z).sum::<f64>() / picked.len() as f64;
+    let ops = picked
+        .iter()
+        .map(|&i| Op::MoveNode {
+            line: name.to_string(),
+            index: i,
+            pos: nodes[i].pos.with_z(z),
+        })
+        .collect();
+    editor.apply(ops, None);
+}
+
+/// A steady slope from the first selected node to the last: the nodes between them
+/// take heights in proportion to the distance along the line.
+pub fn even_grade(editor: &mut Editor) {
+    let mut sel = editor.selection.nodes.clone();
+    sel.sort_unstable();
+    let Some((name, nodes, _)) = editor.line() else {
+        return;
+    };
+    let (Some(&a), Some(&b)) = (sel.first(), sel.last()) else {
+        return;
+    };
+    if b >= nodes.len() || b < a + 2 {
+        editor.status = "select the nodes at both ends of the slope, with nodes between".into();
+        return;
+    }
+    let run = |i: usize| {
+        nodes[i]
+            .pos
+            .truncate()
+            .distance(nodes[i + 1].pos.truncate())
+    };
+    let total: f64 = (a..b).map(run).sum();
+    if total < 1e-9 {
+        return;
+    }
+    let (za, zb) = (nodes[a].pos.z, nodes[b].pos.z);
+    let mut along = 0.0;
+    let mut ops = Vec::new();
+    for i in a + 1..b {
+        along += run(i - 1);
+        ops.push(Op::MoveNode {
+            line: name.to_string(),
+            index: i,
+            pos: nodes[i].pos.with_z(za + (zb - za) * along / total),
+        });
+    }
+    let grade = 100.0 * (zb - za) / total;
+    if editor.apply(ops, None) {
+        editor.status = format!("a steady {grade:+.1} % from node {a} to node {b}");
+    }
+}
+
 /// Opens a closed road or spline, or closes an open one (Alt + C).
 pub fn toggle_closed(editor: &mut Editor) {
     let op = match editor.selection.item {
@@ -427,6 +543,47 @@ mod tests {
         crate::viewport::delete(&mut e);
         assert_eq!(e.project.splines.len(), 1);
         assert_eq!(e.selection.item, None, "not the spline that moved up");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn height_tools_level_slope_and_smooth() {
+        let (mut e, dir) = editor("heights");
+        let z =
+            |e: &Editor| -> Vec<f64> { e.project.roads[0].nodes.iter().map(|n| n.pos.z).collect() };
+        e.selection = Selection {
+            item: Some(Item::Road(0)),
+            nodes: vec![0],
+        };
+        let mut p = e.project.roads[0].nodes[4].pos;
+        p.z = 12.0;
+        assert!(e.apply(
+            vec![Op::MoveNode {
+                line: "circuit".into(),
+                index: 4,
+                pos: p,
+            }],
+            None
+        ));
+        // A slope from node 2 (0 m) to node 4 (12 m): node 3 in proportion.
+        e.selection.nodes = vec![4, 2];
+        even_grade(&mut e);
+        let nodes = &e.project.roads[0].nodes;
+        let (d23, d34) = (
+            nodes[2].pos.truncate().distance(nodes[3].pos.truncate()),
+            nodes[3].pos.truncate().distance(nodes[4].pos.truncate()),
+        );
+        assert!((z(&e)[3] - 12.0 * d23 / (d23 + d34)).abs() < 1e-9);
+        // Smoothing spreads the bump to the neighbours and lowers its top.
+        e.selection.nodes.clear();
+        smooth(&mut e, Smooth::Heights);
+        let after = z(&e);
+        assert!(after[4] < 12.0 && after[6] > 0.0, "{after:?}");
+        // Flattening levels the selected ones at their mean.
+        e.selection.nodes = vec![3, 4, 5];
+        flatten(&mut e);
+        let after = z(&e);
+        assert!((after[3] - after[5]).abs() < 1e-9 && (after[4] - after[3]).abs() < 1e-9);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

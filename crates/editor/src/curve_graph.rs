@@ -222,7 +222,8 @@ pub fn panel(
         egui::FontId::monospace(10.0),
         egui::Color32::GRAY,
     );
-    // The nodes along the road, the selected ones lit.
+    // The nodes along the road, the selected ones lit, numbered where there is room.
+    let mut last_label = f32::NEG_INFINITY;
     for n in 0..=period.round() as usize {
         let px = x(n as f64);
         let lit = editor.selection.nodes.contains(&n)
@@ -241,6 +242,10 @@ pub fn panel(
         } else {
             n
         };
+        if !lit && px - last_label < 22.0 {
+            continue;
+        }
+        last_label = px;
         painter.text(
             egui::pos2(px, rect.bottom() + 1.0),
             egui::Align2::CENTER_TOP,

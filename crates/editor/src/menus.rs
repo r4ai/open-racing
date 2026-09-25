@@ -130,6 +130,15 @@ fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
         entry(ui, c, cmd);
     }
     ui.separator();
+    for cmd in [
+        Cmd::SmoothShape,
+        Cmd::SmoothHeights,
+        Cmd::Flatten,
+        Cmd::EvenGrade,
+    ] {
+        entry(ui, c, cmd);
+    }
+    ui.separator();
     ui.menu_button("Handle Type", |ui| {
         for m in [HandleMode::Auto, HandleMode::Aligned, HandleMode::Free] {
             commands::button_as(ui, c, Cmd::Handles(m), commands::handle_label(m));
