@@ -27,6 +27,9 @@ mod theme;
 mod ui;
 mod viewport;
 
+#[cfg(test)]
+mod ui_tests;
+
 use std::path::PathBuf;
 
 use bevy::prelude::*;
