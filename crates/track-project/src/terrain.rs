@@ -173,7 +173,9 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
             .as_vec3()
             .to_array()
     };
-    let tile = project.materials[t.material].tile;
+    let tile = project
+        .material_index(&t.material)
+        .map_or([1.0; 2], |m| project.materials[m].tile);
     let grid = |i0: usize, j0: usize, i1: usize, j1: usize, uvs: bool| {
         let mut m = MeshData::default();
         let w = i1 - i0 + 1;

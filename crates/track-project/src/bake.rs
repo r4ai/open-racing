@@ -28,9 +28,10 @@ pub struct Scene {
 }
 
 pub fn build(project: &Project) -> Scene {
-    let roads: Vec<RoadBuild> = (0..project.roads.len())
+    let mut roads: Vec<RoadBuild> = (0..project.roads.len())
         .map(|i| road::build(project, i))
         .collect();
+    crate::overlap::resolve(&mut roads);
     let terrain = terrain::build(project, &roads);
     Scene { roads, terrain }
 }
@@ -146,15 +147,19 @@ pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Tr
     }
     if let Some(t) = &scene.terrain {
         let s = &t.solid;
+        let surface = project.surface_index(&project.terrain.surface).unwrap_or(0);
+        let material = project
+            .material_index(&project.terrain.material)
+            .unwrap_or(0);
         ground.add(
-            PatchKind::Ground(project.terrain.surface as u16),
+            PatchKind::Ground(surface as u16),
             &s.positions,
             &s.normals,
             &s.indices,
         );
         for m in &t.chunks {
             visual.add_mesh(
-                project.terrain.material as u32,
+                material as u32,
                 false,
                 &m.positions,
                 &m.normals,
@@ -164,7 +169,7 @@ pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Tr
         }
     }
 
-    let centreline = centreline(project, &scene.roads[project.main_road]);
+    let centreline = centreline(project, &scene.roads[project.main_index()]);
     let layout = layout(project, &scene, &centreline)?;
     Ok(TrackPackage {
         centreline,
@@ -177,7 +182,7 @@ pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Tr
 
 /// The main road's centre, starting at the start/finish line.
 fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
-    let road = &project.roads[project.main_road];
+    let road = &project.roads[project.main_index()];
     let sampled = &main.sampled;
     let start = sampled.s_at(project.markers.start);
     let count = (sampled.length / CENTRELINE_SPACING).round().max(8.0) as usize;
@@ -216,7 +221,7 @@ fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
 fn layout(project: &Project, scene: &Scene, centreline: &TrackDef) -> Result<Layout, Error> {
     let track = Track::new(centreline).map_err(|e| Error::Invalid(e.to_string()))?;
     let locate = |p: DVec3| track.locate(p, track.nearest_index(p));
-    let main = &scene.roads[project.main_road].sampled;
+    let main = &scene.roads[project.main_index()].sampled;
     let m = &project.markers;
 
     let mut sectors: Vec<f64> = m
@@ -239,8 +244,9 @@ fn layout(project: &Project, scene: &Scene, centreline: &TrackDef) -> Result<Lay
         .collect();
 
     let pit = m.pit.as_ref().map(|p| {
-        let road = &project.roads[p.road];
-        let lane = &scene.roads[p.road].sampled;
+        let i = project.road_index(&p.road).expect("validated");
+        let road = &project.roads[i];
+        let lane = &scene.roads[i].sampled;
         let boxes = p
             .boxes
             .iter()

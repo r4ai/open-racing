@@ -14,6 +14,10 @@
 pub mod bake;
 pub mod builtin;
 pub mod curve;
+pub mod inspect;
+pub mod ops;
+mod overlap;
+pub mod preview;
 pub mod project;
 pub mod road;
 pub mod terrain;
@@ -138,6 +142,47 @@ mod tests {
         };
         assert_eq!(at(6.6), Surface::Kerb);
         assert_eq!(at(-6.6), Surface::Kerb);
+    }
+
+    #[test]
+    fn pit_lane_is_paved_beside_the_straight() {
+        let mut project = Project::new("oval");
+        let ops = ops::parse(
+            r#"[
+                AddRoad(name: "pit", closed: false,
+                        nodes: [(20, -8, 0), (120, -22, 0), (230, -22, 0), (330, -8, 0)]),
+                SetPit(pit: Some((road: "pit", speed_limit: 22.2, boxes: [1.2, 1.5],
+                                  box_side: Right, box_offset: 4))),
+            ]"#,
+        )
+        .unwrap();
+        ops::apply_all(&mut project, &ops).unwrap();
+        let package = bake(&project, Path::new("."), &mut Textures::default()).unwrap();
+        let track = package.build_track().unwrap();
+        let ground = track.ground.as_ref().unwrap();
+        // Along the lane, across its width.
+        let lane = curve::Sampled::new(&project.roads[1], 2.0);
+        for f in lane.frames.iter().step_by(10) {
+            for d in [-5.0, 0.0, 5.0] {
+                let p = f.pos + f.lateral * d + DVec3::Z * 2.0;
+                let hit = ground.raycast_down(p, 3.0).unwrap();
+                assert_eq!(hit.surface.kind, Surface::Asphalt, "s = {}, d = {d}", f.s);
+            }
+        }
+        // No wall across the lane.
+        assert!(
+            track
+                .wall_contact(glam::DVec3::new(180.0, -25.0, 0.5), 0.5)
+                .is_none()
+        );
+        let pit = track.layout.pit.as_ref().unwrap();
+        assert_eq!(pit.boxes.len(), 2);
+        // The lane spans the start line: in before it, out after it.
+        let (entry, exit) = (pit.entry.unwrap(), pit.exit.unwrap());
+        assert!(
+            entry > track.length - 150.0 && exit < 250.0,
+            "{entry} {exit}"
+        );
     }
 
     use std::path::Path;

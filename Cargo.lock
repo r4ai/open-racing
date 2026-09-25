@@ -6929,11 +6929,14 @@ dependencies = [
 name = "open-racing-track-project"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "glam 0.33.8",
  "open-racing-sim",
  "open-racing-track",
+ "png",
  "ron",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

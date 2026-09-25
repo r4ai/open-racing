@@ -4,7 +4,9 @@
 //!
 //! Positions are in the simulation's world frame (m, Z up). Places along a road are
 //! given as spline parameters `u` (node index plus the fraction of the way to the next
-//! node), so that they stay with the road's shape when nodes move.
+//! node), so that they stay with the road's shape when nodes move. Roads, surfaces and
+//! materials refer to each other by name, so the file reads (and can be written) on
+//! its own.
 
 use std::path::{Path, PathBuf};
 
@@ -18,10 +20,10 @@ use crate::Error;
 pub const FORMAT_VERSION: u32 = 1;
 pub const PROJECT_FILE: &str = "project.ron";
 
-/// Index into `Project::surfaces`.
-pub type SurfaceId = usize;
-/// Index into `Project::materials`.
-pub type MaterialId = usize;
+/// Name of an entry of `Project::surfaces`.
+pub type SurfaceId = String;
+/// Name of an entry of `Project::materials`.
+pub type MaterialId = String;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -30,8 +32,8 @@ pub struct Project {
     pub surfaces: Vec<NamedSurface>,
     pub materials: Vec<MaterialDef>,
     pub roads: Vec<Road>,
-    /// The circuit: the closed road the centreline, timing and grid follow.
-    pub main_road: usize,
+    /// Name of the circuit: the closed road the centreline, timing and grid follow.
+    pub main_road: String,
     pub markers: Markers,
     pub terrain: Terrain,
 }
@@ -237,6 +239,7 @@ pub struct Strip {
 /// A painted line on the road, drawn only: it does not change the surface.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaintLine {
+    pub name: String,
     /// Lateral offset of its middle from the road's centre, m, positive to the left.
     pub offset: f64,
     pub width: f64,
@@ -374,9 +377,9 @@ pub struct Grid {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pit {
-    /// The pit lane's road; it starts where the lane leaves the track and ends where it
-    /// rejoins.
-    pub road: usize,
+    /// Name of the pit lane's road; it starts where the lane leaves the track and ends
+    /// where it rejoins.
+    pub road: String,
     /// Speed limit, m/s.
     pub speed_limit: f64,
     /// Pit boxes on the pit road.
@@ -404,8 +407,8 @@ impl Project {
     pub fn new(name: &str) -> Self {
         let surfaces = crate::builtin::surfaces();
         let materials = crate::builtin::materials();
-        let s = |name: &str| surfaces.iter().position(|x| x.name == name).unwrap();
-        let m = |name: &str| materials.iter().position(|x| x.name == name).unwrap();
+        let s = |name: &str| name.to_string();
+        let m = s;
         // A rounded rectangle, 600 m × 250 m, driven anticlockwise.
         let nodes = [
             (0.0, 0.0),
@@ -462,8 +465,9 @@ impl Project {
             material: m("asphalt"),
             left: vec![kerb.clone(), grass(18.0)],
             right: vec![kerb, grass(18.0)],
-            lines: [5.7, -5.7]
-                .map(|offset| PaintLine {
+            lines: [("left edge", 5.7), ("right edge", -5.7)]
+                .map(|(name, offset)| PaintLine {
+                    name: name.into(),
                     offset,
                     width: 0.12,
                     material: m("paint"),
@@ -487,7 +491,7 @@ impl Project {
             surfaces,
             materials,
             roads: vec![road],
-            main_road: 0,
+            main_road: "circuit".into(),
             markers: Markers {
                 start: 0.5,
                 sectors: vec![3.0, 6.5],
@@ -506,7 +510,8 @@ impl Project {
     pub fn load(dir: &Path) -> Result<Self, Error> {
         let path = dir.join(PROJECT_FILE);
         let src = std::fs::read_to_string(&path).map_err(|e| Error::Io(path.clone(), e))?;
-        let project: Self = ron::from_str(&src).map_err(|e| Error::Parse(path.clone(), Box::new(e)))?;
+        let project: Self =
+            ron::from_str(&src).map_err(|e| Error::Parse(path.clone(), Box::new(e)))?;
         if project.format != FORMAT_VERSION {
             return Err(Error::Invalid(format!(
                 "{}: format version {}, expected {FORMAT_VERSION}",
@@ -526,13 +531,29 @@ impl Project {
         std::fs::write(&path, src).map_err(|e| Error::Io(path, e))
     }
 
-    /// Checks that every index refers to something that exists and the main road can be
+    /// Checks that every name refers to something that exists and the main road can be
     /// a circuit.
     pub fn validate(&self) -> Result<(), Error> {
         let invalid = |msg: String| Err(Error::Invalid(msg));
-        let (ns, nm) = (self.surfaces.len(), self.materials.len());
-        let Some(main) = self.roads.get(self.main_road) else {
-            return invalid("the main road does not exist".into());
+        for (what, names) in [
+            (
+                "road",
+                self.roads.iter().map(|r| &r.name).collect::<Vec<_>>(),
+            ),
+            ("surface", self.surfaces.iter().map(|s| &s.name).collect()),
+            ("material", self.materials.iter().map(|m| &m.name).collect()),
+        ] {
+            for (i, n) in names.iter().enumerate() {
+                if names[..i].contains(n) {
+                    return invalid(format!("two {what}s are named \"{n}\""));
+                }
+            }
+        }
+        let Some(main) = self.road(&self.main_road) else {
+            return invalid(format!(
+                "the main road \"{}\" does not exist",
+                self.main_road
+            ));
         };
         if !main.closed || main.nodes.len() < 3 {
             return invalid(format!(
@@ -542,38 +563,75 @@ impl Project {
         }
         for r in &self.roads {
             let strips = r.left.iter().chain(&r.right);
-            let surfaces = std::iter::once(r.surface).chain(strips.clone().map(|s| s.surface));
-            let materials = [r.material]
+            let surfaces = std::iter::once(&r.surface).chain(strips.clone().map(|s| &s.surface));
+            let materials = [&r.material]
                 .into_iter()
-                .chain(strips.map(|s| s.material))
-                .chain(r.lines.iter().map(|l| l.material))
-                .chain(r.barriers.iter().map(|b| b.material));
-            if surfaces.clone().any(|s| s >= ns) {
-                return invalid(format!("road \"{}\": undefined surface", r.name));
+                .chain(strips.map(|s| &s.material))
+                .chain(r.lines.iter().map(|l| &l.material))
+                .chain(r.barriers.iter().map(|b| &b.material));
+            for s in surfaces {
+                if self.surface_index(s).is_none() {
+                    return invalid(format!("road \"{}\": no surface named \"{s}\"", r.name));
+                }
             }
-            if materials.clone().any(|m| m >= nm) {
-                return invalid(format!("road \"{}\": undefined material", r.name));
+            for m in materials {
+                if self.material_index(m).is_none() {
+                    return invalid(format!("road \"{}\": no material named \"{m}\"", r.name));
+                }
             }
             if r.nodes.len() < 2 {
                 return invalid(format!("road \"{}\" needs at least 2 nodes", r.name));
             }
-            if r.resolution <= 0.1 {
-                return invalid(format!("road \"{}\": resolution too fine", r.name));
+            if r.resolution < 0.25 {
+                return invalid(format!("road \"{}\": resolution under 0.25 m", r.name));
+            }
+            if r.left.iter().chain(&r.right).any(|s| s.width < 0.0) {
+                return invalid(format!("road \"{}\": a strip has a negative width", r.name));
             }
         }
         if let Some(p) = &self.markers.pit
-            && (p.road >= self.roads.len() || p.road == self.main_road)
+            && (self.road(&p.road).is_none() || p.road == self.main_road)
         {
-            return invalid("the pit lane must be a road other than the main road".into());
+            return invalid(format!(
+                "the pit lane \"{}\" must be a road other than the main road",
+                p.road
+            ));
         }
-        if self.terrain.surface >= ns || self.terrain.material >= nm {
+        if self.surface_index(&self.terrain.surface).is_none()
+            || self.material_index(&self.terrain.material).is_none()
+        {
             return invalid("terrain: undefined surface or material".into());
         }
         Ok(())
     }
 
+    pub fn road_index(&self, name: &str) -> Option<usize> {
+        self.roads.iter().position(|r| r.name == name)
+    }
+
+    pub fn road(&self, name: &str) -> Option<&Road> {
+        self.roads.iter().find(|r| r.name == name)
+    }
+
+    pub fn surface_index(&self, name: &str) -> Option<usize> {
+        self.surfaces.iter().position(|s| s.name == name)
+    }
+
+    pub fn material_index(&self, name: &str) -> Option<usize> {
+        self.materials.iter().position(|m| m.name == name)
+    }
+
+    /// Index of the main road; the project must be valid.
+    pub fn main_index(&self) -> usize {
+        self.road_index(&self.main_road)
+            .expect("the main road exists")
+    }
+
     /// Surface of the built-in kind, if the project has one.
-    pub fn surface_of(&self, kind: Surface) -> Option<SurfaceId> {
-        self.surfaces.iter().position(|s| s.props.kind == kind)
+    pub fn surface_of(&self, kind: Surface) -> Option<&str> {
+        self.surfaces
+            .iter()
+            .find(|s| s.props.kind == kind)
+            .map(|s| s.name.as_str())
     }
 }

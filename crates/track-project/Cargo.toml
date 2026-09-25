@@ -5,9 +5,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "open-racing-trackctl"
+path = "src/bin/trackctl.rs"
+
 [dependencies]
 open-racing-sim.workspace = true
 open-racing-track = { workspace = true, features = ["encode"] }
 glam.workspace = true
 serde.workspace = true
 ron.workspace = true
+serde_json.workspace = true
+png = "0.18"
+clap.workspace = true

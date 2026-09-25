@@ -1,0 +1,274 @@
+//! Command-line access to track projects, for scripts and AI agents: create, inspect,
+//! edit with operations, preview, check and bake. `trackctl guide` prints the format.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+use open_racing_track_project::{Error, Project, Textures, bake, inspect, ops, preview, validate};
+
+#[derive(Parser)]
+#[command(
+    name = "open-racing-trackctl",
+    about = "Create, edit, check and bake open-racing track projects"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Prints the project format and the operations, for people and agents.
+    Guide,
+    /// Creates a project with a small circuit to start from.
+    New {
+        /// Project directory, or a name under <content>/track-src/.
+        project: String,
+        /// Track name; defaults to the directory's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite an existing project.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Summarises a project: roads, node distances, radii, grades, markers, warnings.
+    Info {
+        project: String,
+        /// As JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Applies a list of operations (RON or JSON; `-` reads standard input), all or
+    /// nothing, and saves the project.
+    Apply {
+        project: String,
+        ops: String,
+        /// Check the operations without saving.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Draws a plan view as PNG.
+    Preview {
+        project: String,
+        /// Defaults to preview.png in the project's directory.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Pixels along the longer side.
+        #[arg(long, default_value_t = 1600)]
+        size: usize,
+    },
+    /// Bakes the project and checks the package, without saving it.
+    Check {
+        project: String,
+        /// Also drive a test lap.
+        #[arg(long)]
+        lap: bool,
+    },
+    /// Bakes the project into a track package, checks it and drives a test lap.
+    Bake {
+        project: String,
+        /// Package directory; defaults to <content>/tracks/<project name>.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Skip the test lap.
+        #[arg(long)]
+        no_lap: bool,
+    },
+}
+
+/// A directory, or the name of one under the projects directory.
+fn resolve(project: &str) -> PathBuf {
+    let path = Path::new(project);
+    if path.components().count() > 1 || path.exists() {
+        path.to_path_buf()
+    } else {
+        open_racing_track_project::projects_dir().join(project)
+    }
+}
+
+fn run(cli: Cli) -> Result<(), Error> {
+    match cli.command {
+        Command::Guide => print!("{}", include_str!("../../README.md")),
+        Command::New {
+            project,
+            name,
+            force,
+        } => {
+            let dir = resolve(&project);
+            if dir.join(open_racing_track_project::PROJECT_FILE).exists() && !force {
+                return Err(Error::Invalid(format!(
+                    "{} already holds a project (--force overwrites it)",
+                    dir.display()
+                )));
+            }
+            let name = name.unwrap_or_else(|| {
+                dir.file_name()
+                    .map_or("track".into(), |n| n.to_string_lossy().into_owned())
+            });
+            Project::new(&name).save(&dir)?;
+            println!("created {}", dir.display());
+        }
+        Command::Info { project, json } => {
+            let p = Project::load(&resolve(&project))?;
+            let summary = inspect::summarize(&p, &bake::build(&p));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&summary).expect("summary serialises")
+                );
+            } else {
+                print_summary(&summary);
+            }
+        }
+        Command::Apply {
+            project,
+            ops: source,
+            dry_run,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let src = if source == "-" {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .map_err(|e| Error::Io("<stdin>".into(), e))?;
+                s
+            } else {
+                std::fs::read_to_string(&source).map_err(|e| Error::Io(source.clone().into(), e))?
+            };
+            let list = ops::parse(&src)?;
+            ops::apply_all(&mut p, &list)?;
+            if !dry_run {
+                p.save(&dir)?;
+            }
+            println!(
+                "{} {} operations",
+                if dry_run { "checked" } else { "applied" },
+                list.len()
+            );
+            let summary = inspect::summarize(&p, &bake::build(&p));
+            for w in &summary.warnings {
+                println!("warning: {w}");
+            }
+        }
+        Command::Preview { project, out, size } => {
+            let dir = resolve(&project);
+            let p = Project::load(&dir)?;
+            let picture = preview::render(&p, &bake::build(&p), size.clamp(64, 8192));
+            let out = out.unwrap_or_else(|| dir.join("preview.png"));
+            std::fs::write(&out, picture.to_png()).map_err(|e| Error::Io(out.clone(), e))?;
+            println!(
+                "wrote {} ({} × {})",
+                out.display(),
+                picture.width,
+                picture.height
+            );
+        }
+        Command::Check { project, lap } => {
+            let dir = resolve(&project);
+            let p = Project::load(&dir)?;
+            let package = bake::bake(&p, &dir, &mut Textures::default())?;
+            let report = validate::check(&package, lap);
+            print!("{report}");
+            if !report.ok() {
+                return Err(Error::Invalid("the track does not pass its checks".into()));
+            }
+        }
+        Command::Bake {
+            project,
+            out,
+            no_lap,
+        } => {
+            let dir = resolve(&project);
+            let p = Project::load(&dir)?;
+            let package = bake::bake(&p, &dir, &mut Textures::default())?;
+            let report = validate::check(&package, !no_lap);
+            print!("{report}");
+            let out = out.unwrap_or_else(|| open_racing_track::tracks_dir().join(&p.name));
+            package.save(&out)?;
+            println!("baked into {}", out.display());
+            if !report.ok() {
+                return Err(Error::Invalid(
+                    "baked, but the track does not pass its checks".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_summary(s: &inspect::Summary) {
+    println!("{} (main road \"{}\")", s.name, s.main_road);
+    println!(
+        "extent x {:.0}..{:.0} m, y {:.0}..{:.0} m",
+        s.bounds[0][0], s.bounds[1][0], s.bounds[0][1], s.bounds[1][1]
+    );
+    for r in &s.roads {
+        println!(
+            "road \"{}\": {} {:.0} m, width {:.1}..{:.1} / {:.1}..{:.1} m, height {:.1}..{:.1} m, steepest {:.1} % at s = {:.0}, tightest radius {:.0} m at s = {:.0}",
+            r.name,
+            if r.closed { "closed" } else { "open" },
+            r.length,
+            r.width_left[0],
+            r.width_left[1],
+            r.width_right[0],
+            r.width_right[1],
+            r.elevation[0],
+            r.elevation[1],
+            r.max_grade.value,
+            r.max_grade.s,
+            r.min_radius.value,
+            r.min_radius.s
+        );
+        for n in &r.nodes {
+            println!(
+                "  node {:>3} at ({:.1}, {:.1}, {:.1}), s = {:.0} m",
+                n.index, n.pos[0], n.pos[1], n.pos[2], n.s
+            );
+        }
+        for (side, strips) in [("left", &r.strips_left), ("right", &r.strips_right)] {
+            for st in strips {
+                let at = if st.stretches.is_empty() {
+                    "everywhere".to_string()
+                } else {
+                    st.stretches
+                        .iter()
+                        .map(|[a, b]| format!("{a:.0}..{b:.0} m"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!(
+                    "  {side} strip \"{}\": {:.1} m of {}, {at}",
+                    st.name, st.width, st.surface
+                );
+            }
+        }
+        if !r.barriers.is_empty() {
+            println!("  barriers: {}", r.barriers.join(", "));
+        }
+    }
+    let m = &s.markers;
+    println!("start at s = {:.0} m", m.start.s);
+    for (i, sec) in m.sectors.iter().enumerate() {
+        println!("sector {} starts at s = {:.0} m", i + 2, sec.s);
+    }
+    println!("{} grid slots", m.grid_slots);
+    if let Some(p) = &m.pit {
+        println!("pit lane \"{}\" with {} boxes", p.road, p.boxes.len());
+    }
+    for w in &s.warnings {
+        println!("warning: {w}");
+    }
+}
+
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}

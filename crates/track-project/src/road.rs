@@ -5,7 +5,7 @@
 use glam::DVec3;
 
 use crate::curve::{Frame, Sampled};
-use crate::project::{MaterialId, Profile, Project, Road, Side, SurfaceId};
+use crate::project::{Profile, Project, Road, Side};
 
 /// Rows of cross-sections per visual mesh, so that the renderer can cull a road's far
 /// parts.
@@ -32,14 +32,26 @@ impl MeshData {
 /// What a physics mesh is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Solid {
-    Ground(SurfaceId),
+    /// Drivable, with the surface at this index of `Project::surfaces`.
+    Ground(usize),
     Wall,
+}
+
+/// Which part of a road a mesh is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layer {
+    Surface,
+    Strip,
+    Line,
+    Barrier,
 }
 
 /// A rendered mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualPart {
-    pub material: MaterialId,
+    pub layer: Layer,
+    /// Index into `Project::materials`.
+    pub material: usize,
     pub cast_shadows: bool,
     pub mesh: MeshData,
 }
@@ -47,6 +59,7 @@ pub struct VisualPart {
 /// A physics mesh (UVs unused).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolidPart {
+    pub layer: Layer,
     pub kind: Solid,
     pub mesh: MeshData,
 }
@@ -63,9 +76,23 @@ pub struct RoadBuild {
     pub solid: Vec<SolidPart>,
     /// Per frame, the outline of each side (left, right).
     outlines: Vec<[Outline; 2]>,
+    crown: f64,
 }
 
 impl RoadBuild {
+    /// Height of the road's own surface above its plane at lateral offset `d` within
+    /// its edges, in frame `k`.
+    pub fn surface_height(&self, k: usize, d: f64) -> f64 {
+        let f = &self.sampled.frames[k];
+        let w = if d >= 0.0 {
+            f.width_left
+        } else {
+            f.width_right
+        };
+        let x = (d / w).clamp(-1.0, 1.0);
+        self.crown * (1.0 - x * x)
+    }
+
     /// Height above the road's plane at lateral offset `d` (positive left) in frame `k`.
     pub fn height_at(&self, road: &Road, k: usize, d: f64) -> f64 {
         let f = &self.sampled.frames[k];
@@ -88,8 +115,11 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
     let road = &project.roads[index];
     let sampled = Sampled::new(road, road.resolution);
     let frames = &sampled.frames;
-    let tile = |m: MaterialId| {
-        let t = project.materials[m].tile;
+    // Unknown names (in a project being edited) fall back to the first entry.
+    let surface = |name: &str| project.surface_index(name).unwrap_or(0);
+    let material = |name: &str| project.material_index(name).unwrap_or(0);
+    let tile = |m: usize| {
+        let t = project.materials.get(m).map_or([1.0; 2], |m| m.tile);
         [t[0].max(1e-3) as f64, t[1].max(1e-3) as f64]
     };
 
@@ -108,7 +138,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                     let presence = sampled.presence(&strip.ranges, strip.fade, f.s);
                     let width = strip.width * presence;
                     let (d0, h0) = *outline.last().unwrap();
-                    let cols = columns(strip.profile);
+                    let cols = columns(strip.profile, strip.width);
                     for c in 1..=cols {
                         let x = c as f64 / cols as f64;
                         outline.push((
@@ -149,9 +179,10 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         &mut solid,
         &sampled,
         &road_rows,
-        Some(Solid::Ground(road.surface)),
-        road.material,
-        tile(road.material),
+        Layer::Surface,
+        Some(Solid::Ground(surface(&road.surface))),
+        material(&road.material),
+        tile(material(&road.material)),
         false,
         |_| true,
     );
@@ -162,7 +193,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         let si = side as usize;
         let mut col0 = 0;
         for strip in road.strips(side) {
-            let cols = columns(strip.profile);
+            let cols = columns(strip.profile, strip.width);
             let rows: Vec<Vec<(DVec3, f64)>> = frames
                 .iter()
                 .zip(&outlines)
@@ -185,9 +216,10 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                 &mut solid,
                 &sampled,
                 &rows,
-                Some(Solid::Ground(strip.surface)),
-                strip.material,
-                tile(strip.material),
+                Layer::Strip,
+                Some(Solid::Ground(surface(&strip.surface))),
+                material(&strip.material),
+                tile(material(&strip.material)),
                 false,
                 |_| true,
             );
@@ -219,9 +251,10 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
             &mut solid,
             &sampled,
             &rows,
+            Layer::Line,
             None,
-            line.material,
-            tile(line.material),
+            material(&line.material),
+            tile(material(&line.material)),
             false,
             present,
         );
@@ -276,9 +309,10 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                 &mut solid,
                 &sampled,
                 &rows,
+                Layer::Barrier,
                 kind,
-                barrier.material,
-                tile(barrier.material),
+                material(&barrier.material),
+                tile(material(&barrier.material)),
                 true,
                 present,
             );
@@ -290,14 +324,20 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         visual,
         solid,
         outlines,
+        crown: road.crown,
     }
 }
 
-/// Columns a strip of this profile is built with.
-fn columns(profile: Profile) -> usize {
+/// Width of a strip's columns at most, m: fine enough for other roads crossing it to
+/// press it down under themselves.
+const STRIP_COLUMN: f64 = 2.0;
+
+/// Columns a strip of this profile and full width is built with.
+fn columns(profile: Profile, width: f64) -> usize {
+    let across = (width / STRIP_COLUMN).ceil().max(1.0) as usize;
     match profile {
-        Profile::Crown(_) => 4,
-        Profile::Flat | Profile::Slope(_) => 1,
+        Profile::Crown(_) => across.max(4),
+        Profile::Flat | Profile::Slope(_) => across,
     }
 }
 
@@ -352,8 +392,9 @@ fn add_band(
     solid: &mut Vec<SolidPart>,
     sampled: &Sampled,
     rows: &[Vec<(DVec3, f64)>],
+    layer: Layer,
     kind: Option<Solid>,
-    material: MaterialId,
+    material: usize,
     tile: [f64; 2],
     cast_shadows: bool,
     present: impl Fn(usize) -> bool,
@@ -417,6 +458,7 @@ fn add_band(
         }
         if !mesh.is_empty() {
             visual.push(VisualPart {
+                layer,
                 material,
                 cast_shadows,
                 mesh,
@@ -430,7 +472,11 @@ fn add_band(
         if kind == Solid::Wall {
             whole.normals.clear();
         }
-        solid.push(SolidPart { kind, mesh: whole });
+        solid.push(SolidPart {
+            layer,
+            kind,
+            mesh: whole,
+        });
     }
 }
 
