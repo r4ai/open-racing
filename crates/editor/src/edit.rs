@@ -296,12 +296,12 @@ pub fn even_grade(editor: &mut Editor) {
     let (za, zb) = (nodes[a].pos.z, nodes[b].pos.z);
     let mut along = 0.0;
     let mut ops = Vec::new();
-    for i in a + 1..b {
+    for (i, node) in nodes.iter().enumerate().take(b).skip(a + 1) {
         along += run(i - 1);
         ops.push(Op::MoveNode {
             line: name.to_string(),
             index: i,
-            pos: nodes[i].pos.with_z(za + (zb - za) * along / total),
+            pos: node.pos.with_z(za + (zb - za) * along / total),
         });
     }
     let grade = 100.0 * (zb - za) / total;

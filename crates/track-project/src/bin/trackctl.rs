@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use open_racing_track_project::{
-    Cache, Error, Project, assets, bake, centreline, inspect, ops, preview, validate,
+    Cache, Error, Project, Side, assets, bake, centreline, inspect, ops, pitlane, preview, validate,
 };
 
 #[derive(Parser)]
@@ -89,6 +89,31 @@ enum Command {
         /// Make it the main road (it must be a closed loop).
         #[arg(long)]
         main: bool,
+    },
+    /// Lays a pit lane beside a stretch of the main road, joining it at both ends, and
+    /// makes it the pit lane with its boxes. Defaults to a stretch round the start line.
+    Pitlane {
+        project: String,
+        /// The lane's road.
+        #[arg(long, default_value = "pit")]
+        road: String,
+        /// Where it leaves and rejoins the main road, as spline parameters (node index
+        /// plus fraction).
+        #[arg(long)]
+        from: Option<f64>,
+        #[arg(long)]
+        to: Option<f64>,
+        /// Run it on the left of the main road rather than the right.
+        #[arg(long)]
+        left: bool,
+        /// Gap between the track's edge and the lane's, m.
+        #[arg(long, default_value_t = 8.0)]
+        gap: f64,
+        /// Lane width, m.
+        #[arg(long, default_value_t = 10.0)]
+        width: f64,
+        #[arg(long, default_value_t = 12)]
+        boxes: usize,
     },
     /// Bakes the project and checks the package, without saving it.
     Check {
@@ -254,6 +279,36 @@ fn run(cli: Cli) -> Result<(), Error> {
             if let Some((lon, lat)) = line.origin {
                 println!("(0, 0) is at longitude {lon:.6}, latitude {lat:.6}");
             }
+        }
+        Command::Pitlane {
+            project,
+            road,
+            from,
+            to,
+            left,
+            gap,
+            width,
+            boxes,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let around = pitlane::Plan::around_start(&p);
+            let plan = pitlane::Plan {
+                from: from.unwrap_or(around.from),
+                to: to.unwrap_or(around.to),
+                side: if left { Side::Left } else { Side::Right },
+                gap,
+                width,
+                boxes,
+                ..around
+            };
+            let list = pitlane::ops(&p, &road, &plan)?;
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            println!(
+                "laid pit lane \"{road}\" from u = {:.2} to {:.2} with {boxes} boxes",
+                plan.from, plan.to
+            );
         }
         Command::Check { project, lap } => {
             let dir = resolve(&project);

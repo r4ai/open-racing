@@ -231,6 +231,11 @@ the line is thinned to the nodes a spline needs to stay within `--tolerance` met
 The editor does the same from File › Import Centreline, and can lay a satellite image or
 track map under the view to trace over (the Reference image tab; `SetReference`).
 
+`trackctl pitlane <project> [--from u --to u] [--left] [--gap m] [--width m] [--boxes n]`
+lays a pit lane road beside a stretch of the main road (by default round the start line):
+it leaves the track, runs parallel to it past the boxes, and rejoins it. The editor
+offers the same in Race markers › Pit lane.
+
 ## Working on a track
 
 1. Run `trackctl info` for the facts and `trackctl preview` for the picture.

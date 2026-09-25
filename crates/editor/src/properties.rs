@@ -28,6 +28,8 @@ pub struct State {
     rename: Option<(Item, String)>,
     /// The track's name as typed so far.
     track_name: String,
+    /// The pit lane to lay, as set up so far.
+    pit_plan: Option<open_racing_track_project::pitlane::Plan>,
     /// The track's tab is shown only because nothing was selected.
     stand_in: bool,
 }
@@ -139,7 +141,7 @@ pub fn show(
             .auto_shrink([false, false])
             .show(ui, |ui| match c.shell.tab {
                 PropTab::Track => track_tab(ui, c, state),
-                PropTab::Markers => markers_tab(ui, c.editor),
+                PropTab::Markers => markers_tab(ui, c.editor, state),
                 PropTab::Terrain => terrain_tab(ui, c.editor),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Surfaces => surfaces_tab(ui, c.editor, state),
@@ -1113,7 +1115,64 @@ fn prop_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, library: &Library
     });
 }
 
-fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor) {
+/// Laying a new pit lane beside the main road.
+fn pit_generator(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
+    use open_racing_track_project::pitlane::{self, Plan};
+    let period = editor
+        .project
+        .road(&editor.project.main_road)
+        .map_or(1.0, |r| r.period());
+    let plan = state
+        .pit_plan
+        .get_or_insert_with(|| Plan::around_start(&editor.project));
+    egui::CollapsingHeader::new("Lay a new pit lane")
+        .id_salt("pit generator")
+        .default_open(editor.project.markers.pit.is_none())
+        .show(ui, |ui| {
+            ui.weak("A road beside the main road that leaves it, runs past the boxes and rejoins it. Places are node numbers (u) on the main road; selected nodes of the main road set them.");
+            if let (Some(r), [a, .., b]) = (
+                editor.selection.road(),
+                &{
+                    let mut s = editor.selection.nodes.clone();
+                    s.sort_unstable();
+                    s
+                }[..],
+            ) && editor.project.roads.get(r).is_some_and(|r| r.name == editor.project.main_road)
+                && ui.small_button(format!("From node {a} to node {b}")).clicked()
+            {
+                plan.from = *a as f64;
+                plan.to = *b as f64;
+            }
+            drag(ui, "Leaves at u", &mut plan.from, 0.05, 0.0..=period);
+            drag(ui, "Rejoins at u", &mut plan.to, 0.05, 0.0..=period);
+            row(ui, "Side", |ui| {
+                choice(
+                    ui,
+                    &mut plan.side,
+                    &[(Side::Left, "Left"), (Side::Right, "Right")],
+                )
+            });
+            drag(ui, "Gap m", &mut plan.gap, 0.1, 0.0..=100.0);
+            drag(ui, "Width m", &mut plan.width, 0.1, 4.0..=30.0);
+            let mut boxes = plan.boxes as f64;
+            if drag(ui, "Boxes", &mut boxes, 0.2, 0.0..=60.0) {
+                plan.boxes = boxes as usize;
+            }
+            if ui.button("Lay pit lane").clicked() {
+                let name = crate::presets::unique_name(&editor.project, "pit");
+                match pitlane::ops(&editor.project, &name, plan) {
+                    Ok(ops) => {
+                        if editor.apply(ops, None) {
+                            editor.status = format!("laid pit lane \"{name}\"");
+                        }
+                    }
+                    Err(e) => editor.status = e.to_string(),
+                }
+            }
+        });
+}
+
+fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
     let p = &editor.project;
     let mut m = p.markers.clone();
     let main_period = p.road(&p.main_road).map_or(1.0, |r| r.period());
@@ -1179,6 +1238,7 @@ fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor) {
             .filter(|r| r.name != editor.project.main_road && !r.closed)
             .map(|r| r.name.clone())
             .collect();
+        pit_generator(ui, editor, state);
         let mut pit = editor.project.markers.pit.clone();
         let mut pchanged = false;
         let mut on = pit.is_some();
