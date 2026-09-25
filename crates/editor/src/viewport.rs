@@ -511,6 +511,11 @@ pub fn sync_mode(editor: &Editor, tool: &mut Tool) {
 }
 
 impl Tool {
+    /// The tools as they start, in edit mode or object mode.
+    pub fn editing(edit: bool) -> Self {
+        Self { edit, ..default() }
+    }
+
     /// Drops what the tools are doing, keeping their settings: another project was
     /// opened.
     pub fn reset(&mut self) {

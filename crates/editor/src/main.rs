@@ -51,6 +51,10 @@ struct Args {
     /// View from above.
     #[arg(long)]
     top: bool,
+    /// Start in edit mode on the focused road or spline, with these of its nodes
+    /// selected (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    edit: Option<Vec<usize>>,
     /// Look at this corner of the focused road (or the main road), by its number.
     #[arg(long)]
     corner: Option<usize>,
@@ -131,6 +135,14 @@ fn main() {
             }
         }
     }
+    let edit_mode = match &args.edit {
+        Some(nodes) if editor.line().is_some() => {
+            let count = editor.line().map_or(0, |(_, n, _)| n.len());
+            editor.selection.nodes = nodes.iter().copied().filter(|&n| n < count).collect();
+            true
+        }
+        _ => false,
+    };
     let mut orbit = viewport::Orbit::default();
     viewport::frame_selection(&editor, &mut orbit);
     if args.top {
@@ -160,7 +172,7 @@ fn main() {
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
-    .init_resource::<viewport::Tool>()
+    .insert_resource(viewport::Tool::editing(edit_mode))
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()
