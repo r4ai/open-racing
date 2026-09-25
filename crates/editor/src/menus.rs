@@ -17,6 +17,28 @@ use crate::viewport::{Hit, Marker, Menu, Part, RangeEnd, ToolKind, ViewDir, add_
 pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
     egui::Panel::top("view header").show(root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
+            let mode = if c.tool.edit {
+                "Edit Mode"
+            } else {
+                "Object Mode"
+            };
+            let mut edit = c.tool.edit;
+            egui::ComboBox::from_id_salt("mode")
+                .selected_text(mode)
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut edit, false, "Object Mode");
+                    ui.add_enabled_ui(c.editor.line().is_some(), |ui| {
+                        ui.selectable_value(&mut edit, true, "Edit Mode");
+                    });
+                })
+                .response
+                .on_hover_text(
+                    "Object mode picks whole roads, kerbs and props; edit mode their nodes (Tab)",
+                );
+            if edit != c.tool.edit {
+                crate::viewport::toggle_edit(c.editor, c.tool);
+            }
             let tool = c.tool.active;
             egui::ComboBox::from_id_salt("active tool")
                 .selected_text(tool.label())
@@ -44,7 +66,9 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
             ui.menu_button("Add", |ui| add_menu(ui, c));
             match c.editor.selection.item {
                 Some(item @ (Item::Road(_) | Item::Spline(_))) => {
-                    ui.menu_button("Node", |ui| node_menu(ui, c));
+                    if c.tool.edit {
+                        ui.menu_button("Node", |ui| node_menu(ui, c));
+                    }
                     ui.menu_button(edit::item_kind(item), |ui| object_menu(ui, c, item));
                 }
                 Some(item @ Item::Prop(_)) => {

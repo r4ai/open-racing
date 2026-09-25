@@ -41,6 +41,7 @@ use open_racing_track_project::model::Placement;
 use crate::presets::{PRESETS, unique_name, unique_prop_name};
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
+use crate::theme;
 use open_racing_track_project::corners::Corner;
 
 /// Screen distance within which the pointer picks a node or handle, logical pixels.
@@ -451,6 +452,9 @@ impl Default for Overlays {
 /// The state of the view's tools.
 #[derive(Resource, Default)]
 pub struct Tool {
+    /// Edit mode, as Blender's Tab: the selected line's nodes are shown and picked.
+    /// In object mode clicks pick whole roads, kerbs, walls and props.
+    pub edit: bool,
     pub active: ToolKind,
     pub overlays: Overlays,
     /// The item under the pointer in the outliner, lit up in the view.
@@ -481,6 +485,29 @@ pub struct Tool {
     /// from a camera drag even if the pointer returns to where it began.
     right_press: Option<(Vec2, f32)>,
     middle_press: bool,
+}
+
+/// Tab: into edit mode on the selected road or spline, or back to object mode.
+pub fn toggle_edit(editor: &mut Editor, tool: &mut Tool) {
+    if tool.edit {
+        tool.edit = false;
+        editor.selection.nodes.clear();
+    } else if editor.line().is_some() {
+        tool.edit = true;
+    } else {
+        editor.status = "select a road, kerb or wall to edit its nodes (Tab)".into();
+    }
+}
+
+/// Keeps the mode in step with the selection: nodes selected (from a graph, say) mean
+/// edit mode, and edit mode needs a road or spline.
+pub fn sync_mode(editor: &Editor, tool: &mut Tool) {
+    if !tool.edit && !editor.selection.nodes.is_empty() {
+        tool.edit = true;
+    }
+    if tool.edit && editor.line().is_none() {
+        tool.edit = false;
+    }
 }
 
 impl Tool {
@@ -743,6 +770,7 @@ fn pick(
     view: View,
     at: Vec2,
     ground_at: Option<DVec3>,
+    edit: bool,
 ) -> Option<Hit> {
     let near = |p: DVec3, r: f32| view.screen(p).map(|s| s.distance(at)).filter(|&d| d < r);
     let sel = &editor.selection;
@@ -785,16 +813,16 @@ fn pick(
         }
     }
     let mut best: Option<(Hit, f32)> = None;
-    for item in items(editor) {
-        let Some((_, nodes, _)) = item_line(&editor.project, item) else {
-            continue;
-        };
+    // In edit mode, the nodes of the line being edited; none in object mode.
+    if let Some(item) = sel.item.filter(|_| edit)
+        && let Some((_, nodes, _)) = item_line(&editor.project, item)
+    {
         for (i, node) in nodes.iter().enumerate() {
             let p = shown_pos(editor, built, item, node.pos) + DVec3::Z * LIFT;
             consider_pick(&mut best, Hit::Node(item, i), view.screen(p), at);
         }
     }
-    if let (Some(item), Some(n)) = (sel.item, sel.node())
+    if let (Some(item), Some(n)) = (sel.item.filter(|_| edit), sel.node())
         && let Some((_, nodes, closed)) = item_line(&editor.project, item)
         && n < nodes.len()
     {
@@ -1084,6 +1112,7 @@ pub fn input(
         tool.pointer = None;
         return;
     }
+    sync_mode(editor, tool);
     let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none() && !tool.blocked;
     let keys_free = !wants.wants_any_keyboard_input() && !tool.blocked;
     let anywhere = window.cursor_position();
@@ -1154,7 +1183,7 @@ pub fn input(
     let hover = over.and_then(|at| {
         pick_gizmo(editor, &built, view, tool.active, at)
             .map(Hit::Gizmo)
-            .or_else(|| pick(editor, &built, view, at, tool.pointer))
+            .or_else(|| pick(editor, &built, view, at, tool.pointer, tool.edit))
     });
     tool.hover = hover;
 
@@ -1165,7 +1194,9 @@ pub fn input(
     if let Some((from, hit, orbiting)) = tool.press {
         if !buttons.pressed(MouseButton::Left) {
             match finish_left(tool, anywhere, over.is_some()) {
-                Some(LeftRelease::Box(rect)) => box_select(editor, &built, view, rect, shift),
+                Some(LeftRelease::Box(rect)) => {
+                    box_select(editor, &built, view, rect, shift, tool.edit)
+                }
                 Some(LeftRelease::Click(_)) if tool.active == ToolKind::Measure => {
                     if let Some(p) = tool.pointer {
                         if tool.measure.len() >= 2 {
@@ -1181,7 +1212,16 @@ pub fn input(
                                 hit,
                                 Some(Hit::Node(..) | Hit::Handle(..) | Hit::Gizmo(_))
                             ));
-                    click(editor, &built, hit, tool.pointer, shift, add, alt);
+                    click(
+                        editor,
+                        &built,
+                        hit,
+                        tool.pointer,
+                        shift,
+                        add,
+                        alt,
+                        tool.edit,
+                    );
                 }
                 None => {}
             }
@@ -1262,10 +1302,18 @@ pub fn input(
         duplicate(editor, tool, &built, at);
     } else if pressed(KeyCode::KeyA) && shift {
         open_menu(tool, at, hover, true);
+    } else if pressed(KeyCode::Tab) && !ctrl && !alt {
+        toggle_edit(editor, tool);
     } else if pressed(KeyCode::KeyA) && alt {
-        editor.selection.nodes.clear();
+        if tool.edit {
+            editor.selection.nodes.clear();
+        } else {
+            editor.selection = Default::default();
+        }
     } else if pressed(KeyCode::KeyA) && !ctrl {
-        select_all(editor);
+        if tool.edit {
+            select_all(editor);
+        }
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
         delete(editor);
     } else if pressed(KeyCode::NumpadAdd) && ctrl {
@@ -1537,6 +1585,7 @@ fn click(
     shift: bool,
     add: bool,
     alt: bool,
+    edit: bool,
 ) {
     if add {
         add_node_at(editor, built, pointer);
@@ -1561,16 +1610,16 @@ fn click(
             | Hit::Edge(..)
             | Hit::Gizmo(_),
         ) => {}
-        None => {
-            if !shift {
-                editor.selection.nodes.clear();
-            }
-        }
+        // Empty space: in edit mode no nodes, in object mode nothing at all.
+        None if shift => {}
+        None if edit => editor.selection.nodes.clear(),
+        None => editor.selection = Default::default(),
     }
 }
 
-fn box_select(editor: &mut Editor, built: &Built, view: View, r: Rect, add: bool) {
-    // Nodes of the selected road or spline, or else of whichever has most in the box.
+fn box_select(editor: &mut Editor, built: &Built, view: View, r: Rect, add: bool, edit: bool) {
+    // In edit mode the nodes of the line being edited; in object mode the line with
+    // most nodes in the box.
     let inside = |item: Item| -> Vec<usize> {
         item_line(&editor.project, item).map_or(vec![], |(_, nodes, _)| {
             nodes
@@ -1584,30 +1633,28 @@ fn box_select(editor: &mut Editor, built: &Built, view: View, r: Rect, add: bool
                 .collect()
         })
     };
-    let (item, found) = match editor.selection.item.map(|i| (i, inside(i))) {
-        Some((i, f)) if !f.is_empty() || add => (i, f),
-        _ => match items(editor)
-            .map(|i| (i, inside(i)))
-            .max_by_key(|(_, f)| f.len())
-        {
-            Some((i, f)) if !f.is_empty() => (i, f),
-            _ => {
-                if !add {
-                    editor.selection.nodes.clear();
-                }
-                return;
-            }
-        },
-    };
-    if add && editor.selection.item == Some(item) {
+    if edit {
+        let Some(item) = editor.selection.item else {
+            return;
+        };
+        let found = inside(item);
+        if !add {
+            editor.selection.nodes.clear();
+        }
         for n in found {
             if !editor.selection.nodes.contains(&n) {
                 editor.selection.nodes.push(n);
             }
         }
-    } else {
-        editor.selection.item = Some(item);
-        editor.selection.nodes = found;
+        return;
+    }
+    let best = items(editor)
+        .map(|i| (i, inside(i).len()))
+        .max_by_key(|&(_, n)| n);
+    match best {
+        Some((item, n)) if n > 0 => editor.selection.select(item),
+        _ if !add => editor.selection = Default::default(),
+        _ => {}
     }
 }
 
@@ -2802,15 +2849,13 @@ pub fn gizmos(
         if !overlays.lines && !selected {
             continue;
         }
-        let base = match item {
-            Item::Road(_) => Color::srgb(0.3, 0.9, 1.0),
-            Item::Spline(_) | Item::Prop(_) => Color::srgb(1.0, 0.45, 0.8),
-        };
         let hovered_body = hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item);
-        let line = if selected || hovered_body {
-            base
+        let line = if selected {
+            theme::SELECTED
+        } else if hovered_body {
+            theme::HOVER
         } else {
-            base.with_alpha(0.35)
+            theme::UNSELECTED
         };
         let shown: Vec<DVec3> = nodes
             .iter()
@@ -2828,32 +2873,34 @@ pub fn gizmos(
                 .iter()
                 .map(|f| lift(f.pos))
                 .chain(closed.then(|| lift(smp.frames[0].pos)));
-            gizmos.linestrip(pts, line.with_alpha(if selected { 0.9 } else { 0.4 }));
+            gizmos.linestrip(pts, line);
+        }
+        // Only the line being edited shows its nodes.
+        if !(selected && tool.edit) {
+            continue;
         }
         let n = nodes.len();
         let segs = segments(n, closed);
-        if selected {
-            for i in 0..segs {
-                gizmos.line(
-                    lift(shown[i]),
-                    lift(shown[(i + 1) % n]),
-                    line.with_alpha(0.25),
-                );
-            }
+        for i in 0..segs {
+            gizmos.line(
+                lift(shown[i]),
+                lift(shown[(i + 1) % n]),
+                theme::UNSELECTED.with_alpha(0.3),
+            );
         }
         for (i, &pos) in shown.iter().enumerate() {
-            let chosen = selected && sel.nodes.contains(&i);
-            let active = selected && sel.node() == Some(i);
+            let chosen = sel.nodes.contains(&i);
+            let active = sel.node() == Some(i);
             let color = if active {
-                Color::srgb(1.0, 1.0, 1.0)
+                theme::ACTIVE_NODE
             } else if chosen {
-                Color::srgb(1.0, 0.6, 0.1)
+                theme::SELECTED_NODE
             } else if hover == Some(Hit::Node(item, i)) {
-                Color::srgb(1.0, 0.95, 0.6)
+                theme::HOVER
             } else if i == 0 && matches!(item, Item::Road(_)) {
-                Color::srgb(0.2, 1.0, 0.4)
+                theme::START
             } else {
-                line
+                theme::NODE
             };
             let size = if chosen { 1.0 } else { 0.8 };
             let radius = size * node_size(eye, pos);
@@ -2862,9 +2909,9 @@ pub fn gizmos(
                 for (h, o) in visible_handles(nodes, closed, i) {
                     let hovered = hover == Some(Hit::Handle(item, i, o));
                     let c = if hovered {
-                        Color::srgb(1.0, 0.95, 0.6)
+                        theme::HOVER
                     } else {
-                        Color::srgb(1.0, 0.6, 0.1)
+                        theme::SELECTED_NODE
                     };
                     gizmos.line(lift(pos), lift(pos + h), c);
                     gizmos.sphere(Isometry3d::from_translation(lift(pos + h)), 0.6 * radius, c);
@@ -2881,8 +2928,8 @@ pub fn gizmos(
     {
         for (part, ranges) in parts(road) {
             let color = match part {
-                Part::Strip(..) => Color::srgb(1.0, 0.55, 0.2),
-                Part::Barrier(_) => Color::srgb(0.8, 0.8, 0.9),
+                Part::Strip(..) => theme::STRIP,
+                Part::Barrier(_) => theme::BARRIER,
             };
             for (range, rg) in ranges.iter().enumerate() {
                 let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
@@ -2938,7 +2985,7 @@ pub fn gizmos(
                     let size = 0.6 * node_size(eye, at);
                     gizmos.cube(
                         Transform::from_translation(lift(at)).with_scale(Vec3::splat(size * 1.6)),
-                        lit(Hit::Reach(end), Color::srgb(1.0, 0.85, 0.3)),
+                        lit(Hit::Reach(end), theme::STRIP),
                     );
                 }
             }
@@ -2947,7 +2994,7 @@ pub fn gizmos(
             let centre = smp.frame_at(smp.s_at(n as f64)).pos;
             for side in [Side::Left, Side::Right] {
                 let at = edge_pos(smp, n, side);
-                let color = lit(Hit::Edge(r, n, side), Color::srgb(0.3, 0.9, 1.0));
+                let color = lit(Hit::Edge(r, n, side), theme::STRIP);
                 gizmos.line(lift(centre), lift(at), color.with_alpha(0.4));
                 gizmos.cube(
                     Transform::from_translation(lift(at))
@@ -2966,11 +3013,11 @@ pub fn gizmos(
             continue;
         }
         let color = if sel.item == Some(item) {
-            Color::srgb(1.0, 0.6, 0.1)
+            theme::SELECTED
         } else if hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item) {
-            Color::srgb(1.0, 0.95, 0.6)
+            theme::HOVER
         } else {
-            Color::srgb(0.7, 1.0, 0.4)
+            theme::UNSELECTED
         };
         let r = 1.5 * node_size(eye, at.pos);
         let base = lift(at.pos);
@@ -3382,6 +3429,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(at, editor.project.roads[0].nodes[1].pos);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tab_switches_modes_and_clicks_follow_them() {
+        let (mut editor, built, _, _, dir) = top_down("modes", DVec3::ZERO);
+        let mut tool = Tool::default();
+        editor.selection = Default::default();
+        toggle_edit(&mut editor, &mut tool);
+        assert!(!tool.edit, "nothing to edit");
+        editor.selection.select(Item::Road(0));
+        toggle_edit(&mut editor, &mut tool);
+        assert!(tool.edit);
+        // In edit mode empty space drops the nodes only; Tab back drops them too.
+        editor.selection.select_node(Item::Road(0), 2);
+        click(&mut editor, &built, None, None, false, false, false, true);
+        assert_eq!(editor.selection.item, Some(Item::Road(0)));
+        assert!(editor.selection.nodes.is_empty());
+        editor.selection.select_node(Item::Road(0), 2);
+        toggle_edit(&mut editor, &mut tool);
+        assert!(!tool.edit && editor.selection.nodes.is_empty());
+        // In object mode it drops the selection.
+        click(&mut editor, &built, None, None, false, false, false, false);
+        assert_eq!(editor.selection.item, None);
+        // Nodes selected from elsewhere (a graph) mean edit mode.
+        editor.selection.select_node(Item::Road(0), 1);
+        sync_mode(&editor, &mut tool);
+        assert!(tool.edit);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

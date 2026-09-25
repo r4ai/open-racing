@@ -37,6 +37,7 @@ pub enum Cmd {
     ToggleMaximize,
     ToggleSnap,
     Shortcuts,
+    ToggleEdit,
     SelectAll,
     SelectNone,
     SelectInvert,
@@ -100,6 +101,7 @@ impl Cmd {
             ToggleMaximize,
             ToggleSnap,
             Shortcuts,
+            ToggleEdit,
             SelectAll,
             SelectNone,
             SelectInvert,
@@ -153,6 +155,7 @@ impl Cmd {
             ToggleMaximize => "Maximize 3D View".into(),
             ToggleSnap => "Snapping".into(),
             Shortcuts => "Keyboard Shortcuts".into(),
+            ToggleEdit => "Edit Mode".into(),
             SelectAll => "Select All".into(),
             SelectNone => "Select None".into(),
             SelectInvert => "Invert Selection".into(),
@@ -187,7 +190,9 @@ impl Cmd {
         use Cmd::*;
         let menu = match self {
             DrawRoad | DrawSpline(_) | PlaceProp => "Add",
-            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess => "Select",
+            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | ToggleEdit => {
+                "Select"
+            }
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
             | HandleMenu | ToggleClosed | Duplicate | SetMain | Rename | SmoothHeights
             | SmoothShape | Flatten | EvenGrade => "Edit",
@@ -218,6 +223,7 @@ impl Cmd {
             ToggleToolbar => "T",
             ToggleSidebar => "N",
             ToggleMaximize => "Ctrl Space",
+            ToggleEdit => "Tab",
             SelectAll => "A",
             SelectNone => "Alt A",
             SelectInvert => "Ctrl I",
@@ -249,8 +255,9 @@ impl Cmd {
             Bake | BakeDrive => !c.jobs.running(),
             Rename | Grab | Rotate | Scale | Delete => sel.item.is_some(),
             FrameSelected => sel.item.is_some(),
-            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | Subdivide
-            | ToggleClosed | SmoothHeights | SmoothShape | Flatten => line,
+            ToggleEdit => line || c.tool.edit,
+            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess => line && c.tool.edit,
+            Subdivide | ToggleClosed | SmoothHeights | SmoothShape | Flatten => line,
             EvenGrade => line && sel.nodes.len() >= 2,
             Extrude | Handles(_) | HandleMenu => node,
             Width | Tilt => sel.road().is_some(),
@@ -271,6 +278,7 @@ impl Cmd {
             ToggleMaximize => Some(c.shell.maximized),
             ToggleSnap => Some(c.tool.snap),
             UseTool(t) => Some(c.tool.active == t),
+            ToggleEdit => Some(c.tool.edit),
             _ => None,
         }
     }
@@ -327,6 +335,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         ToggleMaximize => c.shell.maximized = !c.shell.maximized,
         ToggleSnap => c.tool.snap = !c.tool.snap,
         Shortcuts => c.shell.shortcuts = !c.shell.shortcuts,
+        ToggleEdit => viewport::toggle_edit(c.editor, c.tool),
         SelectAll => viewport::select_all(c.editor),
         SelectNone => c.editor.selection.nodes.clear(),
         SelectInvert => edit::select_invert(c.editor),

@@ -169,7 +169,7 @@ fn item_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item, icon:
     }
     let selected = c.editor.selection.item == Some(item);
     let text = if selected {
-        egui::RichText::new(format!("{icon} {name}")).color(egui::Color32::from_rgb(255, 170, 64))
+        egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_UI)
     } else {
         egui::RichText::new(format!("{icon} {name}"))
     };

@@ -538,6 +538,7 @@ fn mouse_hints(c: &Ctx) -> String {
             .to_string()
     };
     let tool = match t.active {
+        _ if !t.edit && t.active == ToolKind::Select => "Click: select · Tab: edit nodes",
         ToolKind::AddNode => "Click: add node",
         ToolKind::Measure => match t.measure.len() {
             1 => "Click: measure to here",

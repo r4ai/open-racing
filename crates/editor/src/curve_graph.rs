@@ -229,7 +229,7 @@ pub fn panel(
         let lit = editor.selection.nodes.contains(&n)
             || (road.closed && n as f64 >= period && editor.selection.nodes.contains(&0));
         let color = if lit {
-            egui::Color32::from_rgb(255, 160, 40)
+            crate::theme::SELECTED_NODE_UI
         } else {
             egui::Color32::from_gray(60)
         };
@@ -303,7 +303,7 @@ pub fn panel(
     for i in 0..c.keys.len() {
         let p = point(i, Part::Key);
         let color = if state.selected == Some(i) {
-            egui::Color32::YELLOW
+            crate::theme::SELECTED_NODE_UI
         } else {
             egui::Color32::LIGHT_BLUE
         };

@@ -252,7 +252,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
     for (i, &p) in nodes.iter().enumerate() {
         let selected = editor.selection.nodes.contains(&i);
         let color = if selected {
-            egui::Color32::from_rgb(255, 215, 30)
+            crate::theme::SELECTED_NODE_UI
         } else {
             egui::Color32::from_rgb(90, 230, 255)
         };

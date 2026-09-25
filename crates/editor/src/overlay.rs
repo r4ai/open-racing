@@ -11,6 +11,7 @@ use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
 use crate::presets::PRESETS;
 use crate::state::{Item, item_line};
+use crate::theme;
 use crate::viewport::{DrawKind, Orbit, ToolKind, View, ViewDir, look, orbit_by, shown_pos};
 
 pub fn view(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx, view: View) {
@@ -93,6 +94,12 @@ fn info(ctx: &egui::Context, r: egui::Rect, c: &Ctx) {
         }
         None => "Nothing selected".into(),
     };
+    let mode = if c.tool.edit {
+        "Edit Mode"
+    } else {
+        "Object Mode"
+    };
+    let what = format!("{mode} · {what}");
     outlined(
         &painter,
         egui::pos2(x, r.min.y + 28.0),
@@ -153,9 +160,9 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             }
             if let Some(at) = screen(shown_pos(c.editor, c.built, item, node.pos)) {
                 let color = if selected {
-                    egui::Color32::from_rgb(255, 170, 64)
+                    theme::SELECTED_UI
                 } else {
-                    egui::Color32::from_gray(215)
+                    theme::UNSELECTED_UI
                 };
                 outlined(
                     &painter,
@@ -200,6 +207,7 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
         );
     }
     if o.indices
+        && c.tool.edit
         && let Some(item) = sel.item
         && let Some((_, nodes, _)) = item_line(p, item)
     {
@@ -221,9 +229,9 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             }
             drawn.push(at);
             let color = if chosen {
-                egui::Color32::from_rgb(255, 215, 30)
+                theme::SELECTED_NODE_UI
             } else {
-                egui::Color32::from_gray(235)
+                theme::UNSELECTED_UI
             };
             outlined(
                 &painter,

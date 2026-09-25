@@ -23,6 +23,7 @@ mod properties;
 mod reference;
 mod sidebar;
 mod state;
+mod theme;
 mod ui;
 mod viewport;
 

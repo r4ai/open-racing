@@ -107,7 +107,7 @@ pub fn labels(ctx: &egui::Context, rect: egui::Rect, c: &mut Ctx, view: View) {
                 egui::Color32::WHITE
             });
         let fill = if current {
-            egui::Color32::from_rgb(255, 200, 60)
+            crate::theme::SELECTED_UI
         } else {
             egui::Color32::from_rgba_unmultiplied(30, 30, 30, 200)
         };
@@ -239,7 +239,7 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
             k.length(smp.length)
         );
         let text = if current {
-            egui::RichText::new(title).color(egui::Color32::from_rgb(255, 200, 60))
+            egui::RichText::new(title).color(crate::theme::SELECTED_UI)
         } else {
             egui::RichText::new(title)
         };
