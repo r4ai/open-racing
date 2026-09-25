@@ -13,7 +13,7 @@ const CHUNK_ROWS: usize = 32;
 /// How far painted lines float above the road, m.
 const PAINT_LIFT: f64 = 0.004;
 /// How far barriers reach below the ground, m, to close gaps on uneven ground.
-const BARRIER_SINK: f64 = 0.3;
+pub(crate) const BARRIER_SINK: f64 = 0.3;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshData {
@@ -286,37 +286,25 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
             })
             .collect();
         let present = |k: usize| sampled.presence(&barrier.ranges, 0.0, frames[k].s) > 0.5;
-        // Columns ordered so that each face's normal points out of the barrier.
-        let faces: &[[usize; 2]] = match (barrier.thickness > 0.0, barrier.side) {
-            (false, Side::Left) => &[[0, 1]],
-            (false, Side::Right) => &[[1, 0]],
-            (true, Side::Left) => &[[0, 1], [1, 2], [2, 3]],
-            (true, Side::Right) => &[[1, 0], [2, 1], [3, 2]],
+        // A left barrier's corners run away from the road, a right one's towards it.
+        let corners: Vec<[DVec3; 4]> = match barrier.side {
+            Side::Left => corners,
+            Side::Right => corners
+                .into_iter()
+                .map(|[a, b, c, d]| [d, c, b, a])
+                .collect(),
         };
-        for (i, face) in faces.iter().enumerate() {
-            let rows: Vec<Vec<(DVec3, f64)>> = corners
-                .iter()
-                .map(|c| {
-                    // Across the face: height up the sides, width over the top.
-                    face.map(|j| (c[j], if i == 1 { c[j].distance(c[1]) } else { c[j].z }))
-                        .to_vec()
-                })
-                .collect();
-            // The top is not a wall to the physics.
-            let kind = (i != 1).then_some(Solid::Wall);
-            add_band(
-                &mut visual,
-                &mut solid,
-                &sampled,
-                &rows,
-                Layer::Barrier,
-                kind,
-                material(&barrier.material),
-                tile(material(&barrier.material)),
-                true,
-                present,
-            );
-        }
+        add_wall(
+            &mut visual,
+            &mut solid,
+            &sampled,
+            &corners,
+            barrier.thickness > 0.0,
+            true,
+            material(&barrier.material),
+            tile(material(&barrier.material)),
+            present,
+        );
     }
 
     RoadBuild {
@@ -328,12 +316,60 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
     }
 }
 
+/// Builds a wall from its corners at each row: the bottom and top of its right side
+/// (looking along the rows), then the top and bottom of its left side. A thin wall
+/// (`thick` false, both sides the same) is one face, for a double-sided material.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_wall(
+    visual: &mut Vec<VisualPart>,
+    solid: &mut Vec<SolidPart>,
+    sampled: &Sampled,
+    corners: &[[DVec3; 4]],
+    thick: bool,
+    collide: bool,
+    material: usize,
+    tile: [f64; 2],
+    present: impl Fn(usize) -> bool,
+) {
+    // Columns ordered so that each face's normal points out of the wall.
+    let faces: &[[usize; 2]] = if thick {
+        &[[0, 1], [1, 2], [2, 3]]
+    } else {
+        &[[0, 1]]
+    };
+    for (i, face) in faces.iter().enumerate() {
+        let top = i == 1;
+        let rows: Vec<Vec<(DVec3, f64)>> = corners
+            .iter()
+            .map(|c| {
+                // Across the face: height up the sides, width over the top.
+                face.map(|j| (c[j], if top { c[j].distance(c[1]) } else { c[j].z }))
+                    .to_vec()
+            })
+            .collect();
+        // The top is not a wall to the physics.
+        let kind = (collide && !top).then_some(Solid::Wall);
+        add_band(
+            visual,
+            solid,
+            sampled,
+            &rows,
+            Layer::Barrier,
+            kind,
+            material,
+            tile,
+            true,
+            &present,
+        );
+    }
+}
+
 /// Width of a strip's columns at most, m: fine enough for other roads crossing it to
 /// press it down under themselves.
 const STRIP_COLUMN: f64 = 2.0;
 
 /// Columns a strip of this profile and full width is built with.
-fn columns(profile: Profile, width: f64) -> usize {
+pub(crate) fn columns(profile: Profile, width: f64) -> usize {
     let across = (width / STRIP_COLUMN).ceil().max(1.0) as usize;
     match profile {
         Profile::Crown(_) => across.max(4),
@@ -342,7 +378,7 @@ fn columns(profile: Profile, width: f64) -> usize {
 }
 
 /// Height of a profile above its inner edge at `x` of the way across.
-fn profile_height(profile: Profile, x: f64) -> f64 {
+pub(crate) fn profile_height(profile: Profile, x: f64) -> f64 {
     match profile {
         Profile::Flat => 0.0,
         Profile::Crown(h) => h * (std::f64::consts::PI * x).sin(),
@@ -387,7 +423,7 @@ fn surface_height(road: &Road, f: &Frame, outlines: &[Outline; 2], d: f64) -> f6
 /// `present(k)` keeps the quads between rows `k` and `k + 1`. Across each row the
 /// points run so that (along × across) is the side the band faces.
 #[allow(clippy::too_many_arguments)]
-fn add_band(
+pub(crate) fn add_band(
     visual: &mut Vec<VisualPart>,
     solid: &mut Vec<SolidPart>,
     sampled: &Sampled,

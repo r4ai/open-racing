@@ -55,19 +55,33 @@ pub fn bezier(c: &[DVec3; 4], t: f64) -> DVec3 {
     c[0] * (s * s * s) + c[1] * (3.0 * s * s * t) + c[2] * (3.0 * s * t * t) + c[3] * (t * t * t)
 }
 
+/// Number of segments of a spline through `n` nodes.
+pub fn segments(n: usize, closed: bool) -> usize {
+    match (n, closed) {
+        (0 | 1, _) => 0,
+        (n, true) => n,
+        (n, false) => n - 1,
+    }
+}
+
 /// Position on the road's spline at parameter `u`.
 pub fn point(road: &Road, u: f64) -> DVec3 {
-    let segs = road.segments();
+    point_on(&road.nodes, road.closed, u)
+}
+
+/// Position on the spline through `nodes` at parameter `u`.
+pub fn point_on(nodes: &[Node], closed: bool, u: f64) -> DVec3 {
+    let segs = segments(nodes.len(), closed);
     if segs == 0 {
-        return road.nodes.first().map_or(DVec3::ZERO, |n| n.pos);
+        return nodes.first().map_or(DVec3::ZERO, |n| n.pos);
     }
-    let u = if road.closed {
+    let u = if closed {
         u.rem_euclid(segs as f64)
     } else {
         u.clamp(0.0, segs as f64)
     };
     let i = (u.floor() as usize).min(segs - 1);
-    bezier(&segment(&road.nodes, road.closed, i), u - i as f64)
+    bezier(&segment(nodes, closed, i), u - i as f64)
 }
 
 /// A cross-section of a road: where it is and how it lies.
@@ -100,14 +114,37 @@ pub struct Sampled {
 
 impl Sampled {
     pub fn new(road: &Road, spacing: f64) -> Self {
-        let segs = road.segments();
+        let mut smp = Self::line(&road.nodes, road.closed, spacing, |p| p);
         let period = road.period();
+        for f in &mut smp.frames {
+            let bank = road.bank.eval(f.u, period, road.closed);
+            // As the simulation's centreline: the level lateral rotated by the bank.
+            let flat_normal = f.normal;
+            f.lateral = f.lateral * bank.cos() - flat_normal * bank.sin();
+            f.normal = f.tangent.cross(f.lateral);
+            f.width_left = road.width_left.eval(f.u, period, road.closed).max(0.1);
+            f.width_right = road.width_right.eval(f.u, period, road.closed).max(0.1);
+        }
+        smp
+    }
+
+    /// The spline through `nodes` resampled every `spacing` metres or so, with level
+    /// frames and no width. `place` moves each sample (onto the ground, say) before the
+    /// frames' directions are taken from them.
+    pub fn line(
+        nodes: &[Node],
+        closed: bool,
+        spacing: f64,
+        place: impl Fn(DVec3) -> DVec3,
+    ) -> Self {
+        let segs = segments(nodes.len(), closed);
+        let period = segs as f64;
         // Dense points with their parameter and cumulative length.
         let mut table = Vec::with_capacity(segs * SUBDIVISIONS + 1);
         let mut dense = Vec::with_capacity(segs * SUBDIVISIONS + 1);
         let mut s = 0.0;
         for i in 0..segs {
-            let c = segment(&road.nodes, road.closed, i);
+            let c = segment(nodes, closed, i);
             for k in 0..SUBDIVISIONS {
                 let t = k as f64 / SUBDIVISIONS as f64;
                 let p = bezier(&c, t);
@@ -118,7 +155,7 @@ impl Sampled {
                 table.push((i as f64 + t, s));
             }
         }
-        let end = point(road, period);
+        let end = point_on(nodes, closed, period);
         if let Some(&last) = dense.last() {
             s += end.distance(last);
         }
@@ -126,12 +163,12 @@ impl Sampled {
         table.push((period, s));
         let length = s;
 
-        let count = if road.closed {
+        let count = if closed {
             (length / spacing).round().max(8.0) as usize
         } else {
             (length / spacing).round().max(1.0) as usize + 1
         };
-        let ds = if road.closed {
+        let ds = if closed {
             length / count as f64
         } else {
             length / (count - 1) as f64
@@ -149,24 +186,24 @@ impl Sampled {
                 } else {
                     0.0
                 };
-                (a.0 + (b.0 - a.0) * t, s, dense[j].lerp(dense[j + 1], t))
+                (
+                    a.0 + (b.0 - a.0) * t,
+                    s,
+                    place(dense[j].lerp(dense[j + 1], t)),
+                )
             })
             .collect();
 
         let frames = (0..count)
             .map(|k| {
                 let (u, s, pos) = raw[k];
-                let (prev, next) = if road.closed {
+                let (prev, next) = if closed {
                     (raw[(k + count - 1) % count].2, raw[(k + 1) % count].2)
                 } else {
                     (raw[k.saturating_sub(1)].2, raw[(k + 1).min(count - 1)].2)
                 };
                 let tangent = (next - prev).normalize_or(DVec3::X);
-                let bank = road.bank.eval(u, period, road.closed);
-                // As the simulation's centreline: the level lateral rotated by the bank.
-                let flat_left = DVec3::Z.cross(tangent).normalize_or(DVec3::Y);
-                let flat_normal = tangent.cross(flat_left);
-                let lateral = flat_left * bank.cos() - flat_normal * bank.sin();
+                let lateral = DVec3::Z.cross(tangent).normalize_or(DVec3::Y);
                 Frame {
                     u,
                     s,
@@ -174,15 +211,15 @@ impl Sampled {
                     tangent,
                     lateral,
                     normal: tangent.cross(lateral),
-                    width_left: road.width_left.eval(u, period, road.closed).max(0.1),
-                    width_right: road.width_right.eval(u, period, road.closed).max(0.1),
+                    width_left: 0.0,
+                    width_right: 0.0,
                 }
             })
             .collect();
         Self {
             frames,
             length,
-            closed: road.closed,
+            closed,
             table,
         }
     }

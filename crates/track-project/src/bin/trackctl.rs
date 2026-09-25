@@ -249,6 +249,18 @@ fn print_summary(s: &inspect::Summary) {
             println!("  barriers: {}", r.barriers.join(", "));
         }
     }
+    for sp in &s.splines {
+        let nodes = sp
+            .nodes
+            .iter()
+            .map(|p| format!("({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "spline \"{}\": {} of {}, {:.0} m through {nodes}",
+            sp.name, sp.shape, sp.material, sp.length
+        );
+    }
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);
     for (i, sec) in m.sectors.iter().enumerate() {

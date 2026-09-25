@@ -221,7 +221,7 @@ pub fn input(
         let node = d.node;
         editor.apply(
             vec![Op::MoveNode {
-                road,
+                line: road,
                 index: node,
                 pos,
             }],
@@ -270,7 +270,7 @@ pub fn input(
     if keys.just_pressed(KeyCode::Delete)
         && let (Some(road), Some(index)) = (editor.road_name(), editor.selection.node)
     {
-        editor.apply(vec![Op::RemoveNode { road, index }], None);
+        editor.apply(vec![Op::RemoveNode { line: road, index }], None);
         editor.selection.node = None;
     }
     if keys.just_pressed(KeyCode::KeyF) {
@@ -325,7 +325,7 @@ fn add_node(editor: &mut Editor, built: &Built, cam: &Camera, t: &GlobalTransfor
     let name = road.name.clone();
     if editor.apply(
         vec![Op::AddNode {
-            road: name,
+            line: name,
             pos,
             before: Some(before),
         }],

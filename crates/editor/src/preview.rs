@@ -59,19 +59,14 @@ fn build(project: Project) -> Meshes {
     let terrain = project
         .material_index(&project.terrain.material)
         .unwrap_or(0);
-    let mut meshes = Vec::new();
-    let mut roads = Vec::new();
+    let mut meshes: Vec<_> = scene
+        .visual_parts()
+        .map(|p| (p.material, to_mesh(p.mesh.clone()), p.cast_shadows))
+        .collect();
     if let Some(t) = scene.terrain {
         meshes.extend(t.chunks.into_iter().map(|m| (terrain, to_mesh(m), false)));
     }
-    for b in scene.roads {
-        meshes.extend(
-            b.visual
-                .into_iter()
-                .map(|p| (p.material, to_mesh(p.mesh), p.cast_shadows)),
-        );
-        roads.push(b.sampled);
-    }
+    let roads = scene.roads.into_iter().map(|b| b.sampled).collect();
     Meshes { roads, meshes }
 }
 

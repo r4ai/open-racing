@@ -32,6 +32,9 @@ pub struct Project {
     pub surfaces: Vec<NamedSurface>,
     pub materials: Vec<MaterialDef>,
     pub roads: Vec<Road>,
+    /// Kerbs, walls and fences placed on their own, apart from any road.
+    #[serde(default)]
+    pub splines: Vec<Spline>,
     /// Name of the circuit: the closed road the centreline, timing and grid follow.
     pub main_road: String,
     pub markers: Markers,
@@ -292,11 +295,7 @@ pub struct Road {
 impl Road {
     /// Number of spline segments.
     pub fn segments(&self) -> usize {
-        match (self.nodes.len(), self.closed) {
-            (0 | 1, _) => 0,
-            (n, true) => n,
-            (n, false) => n - 1,
-        }
+        crate::curve::segments(self.nodes.len(), self.closed)
     }
 
     /// Range of the spline parameter: [0, period].
@@ -346,6 +345,68 @@ impl Road {
         for r in ranges {
             shift(&mut r.from);
             shift(&mut r.to);
+        }
+    }
+}
+
+/// Which side of its line a spline's band lies on, looking along the line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Align {
+    #[default]
+    Center,
+    Left,
+    Right,
+}
+
+/// What a spline is built into.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Shape {
+    /// A drivable band along the line: a kerb, a patch of run-off, a painted area.
+    Band {
+        width: f64,
+        #[serde(default)]
+        align: Align,
+        /// Cross-section from its right edge to its left.
+        profile: Profile,
+        surface: SurfaceId,
+        material: MaterialId,
+        /// Height above the ground or the nodes, m, so that it shows over what is under.
+        #[serde(default)]
+        lift: f64,
+    },
+    /// A wall, guard rail or fence standing on the line.
+    Wall {
+        height: f64,
+        /// 0 for a thin rail or fence.
+        thickness: f64,
+        material: MaterialId,
+        /// Whether cars collide with it.
+        #[serde(default = "yes")]
+        collide: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A kerb, wall or fence along its own spline, placed anywhere.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Spline {
+    pub name: String,
+    pub closed: bool,
+    pub nodes: Vec<Node>,
+    /// Follow the roads and the terrain under the line instead of the nodes' heights.
+    pub drape: bool,
+    pub shape: Shape,
+    /// Spacing of the cross-sections it is built from, m.
+    pub resolution: f64,
+}
+
+impl Spline {
+    pub fn material(&self) -> &str {
+        match &self.shape {
+            Shape::Band { material, .. } | Shape::Wall { material, .. } => material,
         }
     }
 }
@@ -491,6 +552,7 @@ impl Project {
             surfaces,
             materials,
             roads: vec![road],
+            splines: vec![],
             main_road: "circuit".into(),
             markers: Markers {
                 start: 0.5,
@@ -537,8 +599,12 @@ impl Project {
         let invalid = |msg: String| Err(Error::Invalid(msg));
         for (what, names) in [
             (
-                "road",
-                self.roads.iter().map(|r| &r.name).collect::<Vec<_>>(),
+                "road or spline",
+                self.roads
+                    .iter()
+                    .map(|r| &r.name)
+                    .chain(self.splines.iter().map(|s| &s.name))
+                    .collect::<Vec<_>>(),
             ),
             ("surface", self.surfaces.iter().map(|s| &s.name).collect()),
             ("material", self.materials.iter().map(|m| &m.name).collect()),
@@ -589,6 +655,26 @@ impl Project {
                 return invalid(format!("road \"{}\": a strip has a negative width", r.name));
             }
         }
+        for sp in &self.splines {
+            let invalid = |what: &str| invalid(format!("spline \"{}\": {what}", sp.name));
+            if let Shape::Band { surface, width, .. } = &sp.shape {
+                if self.surface_index(surface).is_none() {
+                    return invalid(&format!("no surface named \"{surface}\""));
+                }
+                if *width < 0.0 {
+                    return invalid("negative width");
+                }
+            }
+            if self.material_index(sp.material()).is_none() {
+                return invalid(&format!("no material named \"{}\"", sp.material()));
+            }
+            if sp.nodes.len() < 2 {
+                return invalid("needs at least 2 nodes");
+            }
+            if sp.resolution < 0.1 {
+                return invalid("resolution under 0.1 m");
+            }
+        }
         if let Some(p) = &self.markers.pit
             && (self.road(&p.road).is_none() || p.road == self.main_road)
         {
@@ -611,6 +697,17 @@ impl Project {
 
     pub fn road(&self, name: &str) -> Option<&Road> {
         self.roads.iter().find(|r| r.name == name)
+    }
+
+    pub fn spline(&self, name: &str) -> Option<&Spline> {
+        self.splines.iter().find(|s| s.name == name)
+    }
+
+    /// Nodes of the road or spline named `name`, and whether it is closed.
+    pub fn line(&self, name: &str) -> Option<(&[Node], bool)> {
+        self.road(name)
+            .map(|r| (r.nodes.as_slice(), r.closed))
+            .or_else(|| self.spline(name).map(|s| (s.nodes.as_slice(), s.closed)))
     }
 
     pub fn surface_index(&self, name: &str) -> Option<usize> {

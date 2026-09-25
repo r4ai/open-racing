@@ -20,6 +20,7 @@ mod overlap;
 pub mod preview;
 pub mod project;
 pub mod road;
+pub mod spline;
 pub mod terrain;
 pub mod validate;
 
@@ -224,6 +225,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn splines_drape_kerbs_and_stand_walls_anywhere() {
+        let mut project = Project::new("oval");
+        // Lift the far end of the straight so that draping has something to follow.
+        project.roads[0].nodes[1].pos.z = 6.0;
+        let ops = ops::parse(
+            r#"[
+                PutSpline(spline: (name: "chicane kerb", closed: false, drape: true,
+                    nodes: [(pos: (60, 5, 50)), (pos: (120, 5, 50)), (pos: (180, 5, 50))], resolution: 1,
+                    shape: Band(width: 1.5, profile: Crown(0.04), surface: "kerb",
+                                material: "kerb", lift: 0.02))),
+                PutSpline(spline: (name: "infield wall", closed: false, drape: true,
+                    nodes: [(pos: (100, 60, 0)), (pos: (160, 60, 0))], resolution: 2,
+                    shape: Wall(height: 1.2, thickness: 0.4, material: "concrete"))),
+                AddNode(line: "infield wall", pos: (220, 70, 0)),
+            ]"#,
+        )
+        .unwrap();
+        ops::apply_all(&mut project, &ops).unwrap();
+        assert_eq!(project.splines[1].nodes.len(), 3);
+
+        let scene = bake::build(&project);
+        let ground = scene
+            .ground
+            .build(&project.surfaces.iter().map(|s| s.props).collect::<Vec<_>>());
+        let road = curve::Sampled::new(&project.roads[0], 1.0);
+        for x in [70.0, 120.0, 170.0] {
+            let p = DVec3::new(x, 5.0, 20.0);
+            let hit = ground.raycast_down(p, 0.0).unwrap();
+            assert_eq!(hit.surface.kind, Surface::Kerb, "x = {x}");
+            // On the road (under the kerb's middle), not at the nodes' 50 m.
+            let f = road.frames[road.nearest(p)];
+            assert!(
+                (hit.point.z - f.pos.z).abs() < 0.3,
+                "x = {x}: {}",
+                hit.point.z
+            );
+        }
+        // The wall stands on the terrain along its last segment too.
+        let p = DVec3::new(190.0, 65.0, 0.0);
+        let floor = ground.raycast_down(p.with_z(50.0), 0.0).unwrap().point;
+        assert!(ground.wall_contact(floor + DVec3::Z * 0.6, 0.5).is_some());
+        assert!(
+            ground
+                .wall_contact(floor + DVec3::new(0.0, 3.0, 0.6), 0.5)
+                .is_none()
+        );
     }
 
     use std::path::Path;

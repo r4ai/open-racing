@@ -290,7 +290,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             pos.z = z;
             editor.apply(
                 vec![Op::MoveNode {
-                    road: road.name.clone(),
+                    line: road.name.clone(),
                     index: d.node,
                     pos,
                 }],
@@ -369,7 +369,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             let before = (next < road.nodes.len()).then_some(next);
             if editor.apply(
                 vec![Op::AddNode {
-                    road: road.name.clone(),
+                    line: road.name.clone(),
                     pos: p,
                     before,
                 }],

@@ -448,7 +448,7 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
             if moved {
                 editor.apply(
                     vec![Op::MoveNode {
-                        road: name.clone(),
+                        line: name.clone(),
                         index: n,
                         pos: p,
                     }],
@@ -473,7 +473,7 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
             if hchanged {
                 editor.apply(
                     vec![Op::SetHandle {
-                        road: name.clone(),
+                        line: name.clone(),
                         index: n,
                         handle: manual.then_some(h),
                     }],
@@ -483,7 +483,7 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
             if ui.button("Remove node").clicked() {
                 editor.apply(
                     vec![Op::RemoveNode {
-                        road: name.clone(),
+                        line: name.clone(),
                         index: n,
                     }],
                     None,

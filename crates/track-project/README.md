@@ -63,6 +63,15 @@ trackctl guide                          # this text
                     material: "concrete", ranges: [])],   // offset from the road's edge
         resolution: 2,               // m between cross-sections
     )],
+    splines: [                       // kerbs, walls and fences on their own lines
+        (name: "T1 sausage", closed: false, drape: true,
+         nodes: [(pos: (410, 12, 0)), (pos: (440, 40, 0))], resolution: 0.5,
+         shape: Band(width: 0.6, align: Center, profile: Crown(0.12),
+                     surface: "kerb", material: "kerb", lift: 0.01)),
+        (name: "tyre wall", closed: false, drape: true,
+         nodes: [(pos: (500, 100, 0)), (pos: (505, 160, 0))], resolution: 2,
+         shape: Wall(height: 1, thickness: 0.8, material: "concrete", collide: true)),
+    ],
     markers: (
         start: 0.5,                  // start/finish line on the main road (u)
         sectors: [3.0, 6.5],         // sector boundaries (u)
@@ -88,6 +97,13 @@ trackctl guide                          # this text
   - `Flat` continues the plane of whatever lies inside it.
   - `Crown(h)` rises to `h` in the middle, like a kerb.
   - `Slope(d)` falls by `d` to its outer edge.
+
+**Splines.** A spline is a kerb, wall or fence along its own line, placed anywhere rather than beside a road.
+
+- Its name must differ from every road's and spline's, and the node operations address it by that name as `line`.
+- `drape: true` lays it on whatever is under the line (roads, then terrain) and ignores the nodes' heights. Otherwise it follows the nodes.
+- The `Band` shape is drivable: it takes a `width` and a profile. It lies centred on the line, or to its `Left` or `Right`. `lift` raises it above what is under it.
+- The `Wall` shape stands on the line. A `thickness` of 0 gives a thin rail or fence, which wants a double-sided material. With `collide: false`, cars pass through it.
 
 **Surfaces.** A surface's `kind` is one of `Asphalt`, `Kerb`, `Runoff`, `Grass`, `Turf`, `Gravel` or `Dirt`.
 
@@ -132,11 +148,11 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `AddNode` | `road`, `pos`, `before?` | inserts a node before node `before`, or appends one |
-| `MoveNode` | `road`, `index`, `pos` | moves a node |
-| `SetHandle` | `road`, `index`, `handle` | sets a handle: `Some((x, y, z))`, or `None` for an automatic one |
-| `RemoveNode` | `road`, `index` | removes a node |
-| `SetNodes` | `road`, `nodes` | replaces the whole polyline, with automatic handles |
+| `AddNode` | `line`, `pos`, `before?` | inserts a node before node `before`, or appends one |
+| `MoveNode` | `line`, `index`, `pos` | moves a node |
+| `SetHandle` | `line`, `index`, `handle` | sets a handle: `Some((x, y, z))`, or `None` for an automatic one |
+| `RemoveNode` | `line`, `index` | removes a node |
+| `SetNodes` | `line`, `nodes` | replaces the whole polyline, with automatic handles |
 
 **Profiles**
 
@@ -153,6 +169,12 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveStrip` | `road`, `side`, `name` | removes a strip |
 | `PutLine` / `RemoveLine` | `road`, `line` / `name` | adds, replaces or removes a painted line |
 | `PutBarrier` / `RemoveBarrier` | `road`, `barrier` / `name` | adds, replaces or removes a barrier |
+
+**Splines**
+
+| operation | fields | what it does |
+| --- | --- | --- |
+| `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence) |
 
 **Markers and terrain**
 

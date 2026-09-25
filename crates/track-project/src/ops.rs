@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 use crate::project::{
     Barrier, Grid, Key, MaterialDef, NamedSurface, Node, PaintLine, Pit, Project, Road, Side,
-    StationCurve, Strip, Terrain,
+    Spline, StationCurve, Strip, Terrain,
 };
 
 /// Which profile along a road.
@@ -70,32 +70,33 @@ pub enum Op {
         road: String,
     },
 
-    /// Adds a node before node `before`, or at the end.
+    /// Adds a node to a road or spline (`line` names either) before node `before`, or
+    /// at the end.
     AddNode {
-        road: String,
+        line: String,
         pos: DVec3,
         #[serde(default)]
         before: Option<usize>,
     },
     MoveNode {
-        road: String,
+        line: String,
         index: usize,
         pos: DVec3,
     },
     /// Sets a node's outgoing handle offset, or `None` for an automatic one.
     SetHandle {
-        road: String,
+        line: String,
         index: usize,
         handle: Option<DVec3>,
     },
     RemoveNode {
-        road: String,
+        line: String,
         index: usize,
     },
-    /// Replaces all of a road's nodes (automatic handles). Profiles and stretches keep
-    /// their spline parameters.
+    /// Replaces all of a road's or spline's nodes (automatic handles). A road's
+    /// profiles and stretches keep their spline parameters.
     SetNodes {
-        road: String,
+        line: String,
         nodes: Vec<DVec3>,
     },
 
@@ -145,6 +146,15 @@ pub enum Op {
     },
 
     /// Sets the race markers; those left out stay as they are.
+    /// Adds a kerb, wall or fence along its own spline, or replaces the one of the same
+    /// name.
+    PutSpline {
+        spline: Spline,
+    },
+    RemoveSpline {
+        name: String,
+    },
+
     SetMarkers {
         #[serde(default)]
         start: Option<f64>,
@@ -186,16 +196,57 @@ fn road_mut<'a>(p: &'a mut Project, name: &str) -> Result<&'a mut Road, Error> {
         .ok_or_else(|| missing("road", name))
 }
 
-fn node_index(road: &Road, index: usize) -> Result<usize, Error> {
-    if index < road.nodes.len() {
-        Ok(index)
-    } else {
-        Err(Error::Invalid(format!(
-            "road \"{}\" has no node {index} (it has {})",
-            road.name,
-            road.nodes.len()
-        )))
+/// A road or a spline, for editing its nodes.
+enum Line<'a> {
+    Road(&'a mut Road),
+    Spline(&'a mut Spline),
+}
+
+impl Line<'_> {
+    fn nodes(&mut self) -> &mut Vec<Node> {
+        match self {
+            Line::Road(r) => &mut r.nodes,
+            Line::Spline(s) => &mut s.nodes,
+        }
     }
+
+    fn node_index(&mut self, name: &str, index: usize) -> Result<usize, Error> {
+        let n = self.nodes().len();
+        if index < n {
+            Ok(index)
+        } else {
+            Err(Error::Invalid(format!(
+                "\"{name}\" has no node {index} (it has {n})"
+            )))
+        }
+    }
+
+    fn insert(&mut self, index: usize, node: Node) {
+        match self {
+            Line::Road(r) => r.insert_node(index, node),
+            Line::Spline(s) => s.nodes.insert(index, node),
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        match self {
+            Line::Road(r) => r.remove_node(index),
+            Line::Spline(s) => {
+                s.nodes.remove(index);
+            }
+        }
+    }
+}
+
+fn line_mut<'a>(p: &'a mut Project, name: &str) -> Result<Line<'a>, Error> {
+    if let Some(r) = p.roads.iter_mut().find(|r| r.name == name) {
+        return Ok(Line::Road(r));
+    }
+    p.splines
+        .iter_mut()
+        .find(|s| s.name == name)
+        .map(Line::Spline)
+        .ok_or_else(|| missing("road or spline", name))
 }
 
 /// Adds `item` to `list`, replacing the one with the same name.
@@ -349,44 +400,46 @@ impl Op {
                 }
                 p.main_road = road;
             }
-            Op::AddNode { road, pos, before } => {
-                let r = road_mut(p, &road)?;
+            Op::AddNode { line, pos, before } => {
+                let mut l = line_mut(p, &line)?;
                 let node = Node { pos, handle: None };
                 match before {
                     Some(i) => {
-                        if i > r.nodes.len() {
-                            node_index(r, i)?;
+                        if i > l.nodes().len() {
+                            l.node_index(&line, i)?;
                         }
-                        r.insert_node(i, node)
+                        l.insert(i, node)
                     }
-                    None => r.nodes.push(node),
+                    None => l.nodes().push(node),
                 }
             }
-            Op::MoveNode { road, index, pos } => {
-                let r = road_mut(p, &road)?;
-                let i = node_index(r, index)?;
-                r.nodes[i].pos = pos;
+            Op::MoveNode { line, index, pos } => {
+                let mut l = line_mut(p, &line)?;
+                let i = l.node_index(&line, index)?;
+                l.nodes()[i].pos = pos;
             }
             Op::SetHandle {
-                road,
+                line,
                 index,
                 handle,
             } => {
-                let r = road_mut(p, &road)?;
-                let i = node_index(r, index)?;
-                r.nodes[i].handle = handle;
+                let mut l = line_mut(p, &line)?;
+                let i = l.node_index(&line, index)?;
+                l.nodes()[i].handle = handle;
             }
-            Op::RemoveNode { road, index } => {
-                let r = road_mut(p, &road)?;
-                let i = node_index(r, index)?;
-                r.remove_node(i);
+            Op::RemoveNode { line, index } => {
+                let mut l = line_mut(p, &line)?;
+                let i = l.node_index(&line, index)?;
+                l.remove(i);
             }
-            Op::SetNodes { road, nodes } => {
-                road_mut(p, &road)?.nodes = nodes
+            Op::SetNodes { line, nodes } => {
+                *line_mut(p, &line)?.nodes() = nodes
                     .into_iter()
                     .map(|pos| Node { pos, handle: None })
                     .collect();
             }
+            Op::PutSpline { spline } => put(&mut p.splines, spline, |s| &s.name, None),
+            Op::RemoveSpline { name } => remove(&mut p.splines, "spline", &name, |s| &s.name)?,
             Op::SetProfile { road, curve, keys } => {
                 let r = road_mut(p, &road)?;
                 let mut keys = keys;
@@ -522,6 +575,8 @@ impl Op {
             Op::RemoveLine { .. } => "RemoveLine",
             Op::PutBarrier { .. } => "PutBarrier",
             Op::RemoveBarrier { .. } => "RemoveBarrier",
+            Op::PutSpline { .. } => "PutSpline",
+            Op::RemoveSpline { .. } => "RemoveSpline",
             Op::SetMarkers { .. } => "SetMarkers",
             Op::SetPit { .. } => "SetPit",
             Op::SetTerrain { .. } => "SetTerrain",
@@ -595,7 +650,7 @@ mod tests {
         // A failing list changes nothing.
         let before = p.clone();
         let bad = parse(
-            r#"[{"MoveNode": {"road": "gp", "index": 0, "pos": [1, 2, 3]}},
+            r#"[{"MoveNode": {"line": "gp", "index": 0, "pos": [1, 2, 3]}},
                 {"SetRoad": {"road": "gp", "surface": "ice"}}]"#,
         )
         .unwrap();
@@ -611,7 +666,7 @@ mod tests {
         apply_all(
             &mut p,
             &[Op::AddNode {
-                road: "circuit".into(),
+                line: "circuit".into(),
                 pos: DVec3::new(120.0, -5.0, 0.0),
                 before: Some(1),
             }],

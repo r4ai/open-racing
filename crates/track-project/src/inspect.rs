@@ -16,6 +16,7 @@ pub struct Summary {
     /// Plan-view extent of the roads: [[min x, min y], [max x, max y]], m.
     pub bounds: [[f64; 2]; 2],
     pub roads: Vec<RoadSummary>,
+    pub splines: Vec<SplineSummary>,
     pub markers: MarkerSummary,
     pub surfaces: Vec<String>,
     pub materials: Vec<String>,
@@ -42,6 +43,18 @@ pub struct RoadSummary {
     pub strips_right: Vec<StripSummary>,
     pub lines: Vec<String>,
     pub barriers: Vec<String>,
+}
+
+/// A kerb, wall or fence on its own line.
+#[derive(Serialize)]
+pub struct SplineSummary {
+    pub name: String,
+    /// "Band" or "Wall".
+    pub shape: &'static str,
+    pub material: String,
+    pub length: f64,
+    /// Node positions.
+    pub nodes: Vec<[f64; 3]>,
 }
 
 #[derive(Serialize)]
@@ -258,11 +271,27 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
             })
         }),
     };
+    let splines = project
+        .splines
+        .iter()
+        .zip(&scene.splines)
+        .map(|(sp, b)| SplineSummary {
+            name: sp.name.clone(),
+            shape: match sp.shape {
+                crate::project::Shape::Band { .. } => "Band",
+                crate::project::Shape::Wall { .. } => "Wall",
+            },
+            material: sp.material().to_string(),
+            length: b.sampled.length,
+            nodes: sp.nodes.iter().map(|n| n.pos.to_array()).collect(),
+        })
+        .collect();
     Summary {
         name: project.name.clone(),
         main_road: project.main_road.clone(),
         bounds: [lo, hi],
         roads,
+        splines,
         markers,
         surfaces: project.surfaces.iter().map(|s| s.name.clone()).collect(),
         materials: project.materials.iter().map(|m| m.name.clone()).collect(),
@@ -342,7 +371,7 @@ mod tests {
         apply_all(
             &mut p,
             &[Op::SetNodes {
-                road: "circuit".into(),
+                line: "circuit".into(),
                 nodes: [(0., 0.), (200., 200.), (400., 0.), (200., -200.)]
                     .iter()
                     .chain(&[(0., 0.), (-200., 200.), (-400., 0.), (-200., -200.)])

@@ -15,7 +15,8 @@ use open_racing_track::{
 use crate::Error;
 use crate::curve::Sampled;
 use crate::project::{MaterialDef, Project, TextureSource};
-use crate::road::{self, RoadBuild, Solid};
+use crate::road::{self, RoadBuild, Solid, SolidPart};
+use crate::spline::{self, SplineBuild};
 use crate::terrain::{self, TerrainBuild};
 
 /// Spacing of the centreline's points, m. The simulation eases between them.
@@ -25,15 +26,69 @@ const CENTRELINE_SPACING: f64 = 4.0;
 pub struct Scene {
     pub roads: Vec<RoadBuild>,
     pub terrain: Option<TerrainBuild>,
+    pub splines: Vec<SplineBuild>,
+    /// Every physics mesh: roads, terrain and splines.
+    pub ground: Ground,
 }
 
+impl Scene {
+    /// Every rendered mesh but the terrain's.
+    pub fn visual_parts(&self) -> impl Iterator<Item = &road::VisualPart> {
+        let roads = self.roads.iter().flat_map(|b| &b.visual);
+        roads.chain(self.splines.iter().flat_map(|b| &b.visual))
+    }
+}
+
+fn add_solids<'a>(ground: &mut Ground, parts: impl IntoIterator<Item = &'a SolidPart>) {
+    for part in parts {
+        let kind = match part.kind {
+            Solid::Ground(s) => PatchKind::Ground(s as u16),
+            Solid::Wall => PatchKind::Wall,
+        };
+        let m = &part.mesh;
+        ground.add(kind, &m.positions, &m.normals, &m.indices);
+    }
+}
+
+/// Builds the roads, then the terrain under them, then the splines over both.
 pub fn build(project: &Project) -> Scene {
     let mut roads: Vec<RoadBuild> = (0..project.roads.len())
         .map(|i| road::build(project, i))
         .collect();
     crate::overlap::resolve(&mut roads);
     let terrain = terrain::build(project, &roads);
-    Scene { roads, terrain }
+
+    let mut ground = Ground::default();
+    add_solids(&mut ground, roads.iter().flat_map(|b| &b.solid));
+    if let Some(t) = &terrain {
+        let s = &t.solid;
+        let surface = project.surface_index(&project.terrain.surface).unwrap_or(0);
+        ground.add(
+            PatchKind::Ground(surface as u16),
+            &s.positions,
+            &s.normals,
+            &s.indices,
+        );
+    }
+    let under = project
+        .splines
+        .iter()
+        .any(|s| s.drape)
+        .then(|| ground.build(&surface_props(project)));
+    let splines: Vec<SplineBuild> = (0..project.splines.len())
+        .map(|i| spline::build(project, i, under.as_ref()))
+        .collect();
+    add_solids(&mut ground, splines.iter().flat_map(|b| &b.solid));
+    Scene {
+        roads,
+        terrain,
+        splines,
+        ground,
+    }
+}
+
+fn surface_props(project: &Project) -> Vec<open_racing_sim::SurfaceProps> {
+    project.surfaces.iter().map(|s| s.props).collect()
 }
 
 /// Prepared textures, kept between bakes so that each is encoded once.
@@ -121,42 +176,23 @@ pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Tr
     project.validate()?;
     let scene = build(project);
 
-    let mut ground = Ground::default();
     let mut visual = VisualBuilder::new();
     add_materials(project, dir, textures, &mut visual)?;
-    for b in &scene.roads {
-        for part in &b.solid {
-            let kind = match part.kind {
-                Solid::Ground(s) => PatchKind::Ground(s as u16),
-                Solid::Wall => PatchKind::Wall,
-            };
-            let m = &part.mesh;
-            ground.add(kind, &m.positions, &m.normals, &m.indices);
-        }
-        for part in &b.visual {
-            let m = &part.mesh;
-            visual.add_mesh(
-                part.material as u32,
-                part.cast_shadows,
-                &m.positions,
-                &m.normals,
-                &m.uvs,
-                &m.indices,
-            );
-        }
+    for part in scene.visual_parts() {
+        let m = &part.mesh;
+        visual.add_mesh(
+            part.material as u32,
+            part.cast_shadows,
+            &m.positions,
+            &m.normals,
+            &m.uvs,
+            &m.indices,
+        );
     }
     if let Some(t) = &scene.terrain {
-        let s = &t.solid;
-        let surface = project.surface_index(&project.terrain.surface).unwrap_or(0);
         let material = project
             .material_index(&project.terrain.material)
             .unwrap_or(0);
-        ground.add(
-            PatchKind::Ground(surface as u16),
-            &s.positions,
-            &s.normals,
-            &s.indices,
-        );
         for m in &t.chunks {
             visual.add_mesh(
                 material as u32,
@@ -173,9 +209,9 @@ pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Tr
     let layout = layout(project, &scene, &centreline)?;
     Ok(TrackPackage {
         centreline,
-        surfaces: project.surfaces.iter().map(|s| s.props).collect(),
+        surfaces: surface_props(project),
         layout,
-        ground,
+        ground: scene.ground,
         visual: Some(visual.build()),
     })
 }
