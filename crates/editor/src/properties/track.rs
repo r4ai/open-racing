@@ -357,6 +357,9 @@ pub(super) fn reference_tab(
     if changed {
         reference::set(c.editor, Some(r), Some("reference"));
     }
+    section(ui, "Place by coordinates", "reference geo", false, |ui| {
+        geo_place(ui, c, &before);
+    });
     section(ui, "Scale", "reference scale", true, |ui| {
         ui.weak("With the Measure tool, click both ends of something whose length you know on the image, then enter it in the sidebar (N) › Tool.");
         if ui.button("📏 Measure on the image").clicked() {
@@ -370,6 +373,72 @@ pub(super) fn reference_tab(
     });
     if ui.button("Remove reference image").clicked() {
         reference::set(c.editor, None, None);
+    }
+}
+
+/// Lines the image up by the longitudes and latitudes of its edges, as a map export or
+/// a satellite tile gives them. The first image placed so sets the project's place on
+/// the Earth, if a GPS centreline has not already.
+fn geo_place(ui: &mut egui::Ui, c: &mut Ctx, r: &open_racing_track_project::project::Reference) {
+    use open_racing_track_project::geo::Geo;
+    let id = ui.make_persistent_id("reference bounds");
+    let geo = c.editor.project.geo;
+    // North, south, west, east; starting from where the image is now, when known.
+    let mut b: [f64; 4] = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| match geo {
+        Some(g) => {
+            let (w, s) = g.to_geo(r.center - glam::DVec2::splat(0.5 * r.width));
+            let (e, n) = g.to_geo(r.center + glam::DVec2::splat(0.5 * r.width));
+            [n, s, w, e]
+        }
+        None => [0.0; 4],
+    });
+    ui.weak("The image's edges in degrees, north up, as a map export gives them.");
+    for (i, label) in ["North °", "South °", "West °", "East °"]
+        .iter()
+        .enumerate()
+    {
+        row(ui, label, |ui| {
+            let w = ui.available_width().max(40.0);
+            ui.add_sized(
+                [w, ui.spacing().interact_size.y],
+                egui::DragValue::new(&mut b[i])
+                    .speed(0.00001)
+                    .max_decimals(7),
+            )
+        });
+    }
+    ui.data_mut(|d| d.insert_temp(id, b));
+    let [n, s, w, e] = b;
+    let ok = n > s && e > w && n.abs() <= 89.0 && s.abs() <= 89.0;
+    if let Some(g) = geo {
+        let (lon, lat) = (g.lon, g.lat);
+        ui.weak(format!("The project's origin is at {lat:.6}°, {lon:.6}°."));
+    }
+    if ui
+        .add_enabled(ok, egui::Button::new("Place the image"))
+        .clicked()
+    {
+        let mut ops = Vec::new();
+        let g = geo.unwrap_or_else(|| {
+            let g = Geo {
+                lon: 0.5 * (w + e),
+                lat: 0.5 * (n + s),
+            };
+            ops.push(Op::SetGeo { geo: Some(g) });
+            g
+        });
+        let (sw, ne) = (g.to_local(w, s), g.to_local(e, n));
+        ops.push(Op::SetReference {
+            reference: Some(open_racing_track_project::project::Reference {
+                center: 0.5 * (sw + ne),
+                width: ne.x - sw.x,
+                rotation: 0.0,
+                ..r.clone()
+            }),
+        });
+        if c.editor.apply(ops, None) {
+            c.editor.status = "placed the reference image by its coordinates".into();
+        }
     }
 }
 

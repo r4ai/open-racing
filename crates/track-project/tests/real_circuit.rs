@@ -40,6 +40,17 @@ fn circuit() -> Project {
 #[test]
 fn a_gps_lap_becomes_a_circuit_with_a_pit_lane_and_kerbed_corners() {
     let mut p = timed("lay the road", circuit);
+    // The lap placed the project on the Earth; the same lap imported again lies on it.
+    assert!(p.geo.is_some());
+    let line = centreline::read("circuit.gpx", include_str!("fixtures/circuit.gpx")).unwrap();
+    let mut q = p.clone();
+    let again = centreline::road_ops(&q, &line, "again", 1.0);
+    apply_all(&mut q, &again).unwrap();
+    let (a, b) = (
+        &q.road("gp").unwrap().nodes,
+        &q.road("again").unwrap().nodes,
+    );
+    assert!(a[0].pos.distance(b[0].pos) < 0.01);
     let (smp, found) = timed("find corners", || corners::of_road(&p, 0));
     assert!(
         (5400.0..6000.0).contains(&smp.length),

@@ -222,6 +222,10 @@ pub enum Op {
     SetReference {
         reference: Option<Reference>,
     },
+    /// Sets where the project's (0, 0) lies on the Earth.
+    SetGeo {
+        geo: Option<crate::geo::Geo>,
+    },
 
     PutSurface {
         surface: NamedSurface,
@@ -679,6 +683,7 @@ impl Op {
             Op::SetPit { pit } => p.markers.pit = pit,
             Op::SetTerrain { terrain } => p.terrain = terrain,
             Op::SetReference { reference } => p.reference = reference,
+            Op::SetGeo { geo } => p.geo = geo,
             Op::PutSurface { surface } => put(&mut p.surfaces, surface, |s| &s.name, None),
             Op::RemoveSurface { name } => remove(&mut p.surfaces, "surface", &name, |s| &s.name)?,
             Op::PutMaterial { material } => put(&mut p.materials, material, |m| &m.name, None),
@@ -842,6 +847,7 @@ impl Op {
             Op::SetPit { .. } => "SetPit",
             Op::SetTerrain { .. } => "SetTerrain",
             Op::SetReference { .. } => "SetReference",
+            Op::SetGeo { .. } => "SetGeo",
             Op::PutSurface { .. } => "PutSurface",
             Op::RemoveSurface { .. } => "RemoveSurface",
             Op::PutMaterial { .. } => "PutMaterial",

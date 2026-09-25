@@ -48,6 +48,9 @@ pub struct Project {
     pub main_road: String,
     pub markers: Markers,
     pub terrain: Terrain,
+    /// Where the project's (0, 0) lies on the Earth, once a real place was brought in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo: Option<crate::geo::Geo>,
     /// A picture of the real place (a satellite image, a track map) laid flat in the
     /// editor to trace the roads over. Not part of the track.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1006,6 +1009,7 @@ impl Project {
                 pit: None,
             },
             reference: None,
+            geo: None,
         }
     }
 
@@ -1242,6 +1246,9 @@ impl Project {
             return invalid(
                 "reference image: the width must be positive and the opacity 0 to 1".into(),
             );
+        }
+        if self.geo.is_some_and(|g| !g.is_valid()) {
+            return invalid("the origin's longitude or latitude is out of range".into());
         }
         if self.surface_index(&self.terrain.surface).is_none()
             || self.material_index(&self.terrain.material).is_none()

@@ -2,13 +2,16 @@
 //! it: a GPS track (GPX), a line drawn in Google Earth (KML), a GeoJSON line (as
 //! OpenStreetMap exports give), or a CSV of points.
 //!
-//! Longitudes and latitudes become metres east and north of the line's middle. The line
-//! is thinned to the points a spline through them needs to stay within a tolerance of
-//! it, and a line that ends where it starts is a closed loop.
+//! Longitudes and latitudes become metres east and north of the project's origin on
+//! the Earth, or of the line's middle, which then becomes the project's origin, so that
+//! every line imported later lies where it should beside the first. The line is thinned
+//! to the points a spline through them needs to stay within a tolerance of it, and a
+//! line that ends where it starts is a closed loop.
 
 use glam::{DVec2, DVec3};
 
 use crate::Error;
+use crate::geo::Geo;
 use crate::ops::Op;
 use crate::project::Project;
 
@@ -21,10 +24,29 @@ pub struct Centreline {
     pub closed: bool,
     /// The file gave longitudes and latitudes, and where they were measured from.
     pub origin: Option<(f64, f64)>,
+    /// The longitude and latitude of each point, when the file gave them.
+    pub lonlat: Vec<DVec2>,
 }
 
-/// Mean radius of the Earth, m.
-const EARTH: f64 = 6_371_000.0;
+impl Centreline {
+    /// The line measured from `geo` instead of its own middle.
+    pub fn onto(&self, geo: Geo) -> Self {
+        if self.lonlat.len() != self.points.len() {
+            return self.clone();
+        }
+        let points = self
+            .lonlat
+            .iter()
+            .zip(&self.points)
+            .map(|(g, p)| geo.to_local(g.x, g.y).extend(p.z))
+            .collect();
+        Self {
+            points,
+            origin: Some((geo.lon, geo.lat)),
+            ..self.clone()
+        }
+    }
+}
 
 /// Reads a centreline; `name` (the file's name) tells the format by its extension.
 pub fn read(name: &str, src: &str) -> Result<Centreline, Error> {
@@ -48,26 +70,39 @@ pub fn read(name: &str, src: &str) -> Result<Centreline, Error> {
             points.len()
         )));
     }
-    let (mut points, origin) = if geographic {
+    let (metres, origin) = if geographic {
         let (pts, origin) = to_metres(&points);
         (pts, Some(origin))
     } else {
-        (points, None)
+        (points.clone(), None)
     };
     // Drop repeated points; a last point back at the first closes the loop.
-    points.dedup_by(|a, b| a.truncate().distance(b.truncate()) < 0.05);
-    let closed = points.len() > 3
-        && points[0]
+    let mut kept: Vec<usize> = Vec::with_capacity(metres.len());
+    for i in 0..metres.len() {
+        if kept
+            .last()
+            .is_none_or(|&j| metres[j].truncate().distance(metres[i].truncate()) >= 0.05)
+        {
+            kept.push(i);
+        }
+    }
+    let closed = kept.len() > 3
+        && metres[kept[0]]
             .truncate()
-            .distance(points[points.len() - 1].truncate())
+            .distance(metres[kept[kept.len() - 1]].truncate())
             < 5.0;
     if closed {
-        points.pop();
+        kept.pop();
     }
     Ok(Centreline {
-        points,
+        points: kept.iter().map(|&i| metres[i]).collect(),
         closed,
         origin,
+        lonlat: if geographic {
+            kept.iter().map(|&i| points[i].truncate()).collect()
+        } else {
+            vec![]
+        },
     })
 }
 
@@ -79,11 +114,13 @@ fn to_metres(points: &[DVec3]) -> (Vec<DVec3>, (f64, f64)) {
         |(lo, hi), p| (lo.min(p.truncate()), hi.max(p.truncate())),
     );
     let mid = 0.5 * (lo + hi);
-    let k = EARTH * std::f64::consts::PI / 180.0;
-    let east = k * mid.y.to_radians().cos();
+    let geo = Geo {
+        lon: mid.x,
+        lat: mid.y,
+    };
     let pts = points
         .iter()
-        .map(|p| DVec3::new((p.x - mid.x) * east, (p.y - mid.y) * k, p.z))
+        .map(|p| geo.to_local(p.x, p.y).extend(p.z))
         .collect();
     (pts, (mid.x, mid.y))
 }
@@ -442,9 +479,25 @@ fn whittaker(y: &[f64], closed: bool, lambda: f64) -> Vec<f64> {
 /// its nodes replaced if it exists, or else a new road with the main road's
 /// cross-section.
 pub fn road_ops(project: &Project, line: &Centreline, name: &str, tolerance: f64) -> Vec<Op> {
+    // Measured from the project's origin; the first line on the Earth sets it.
+    let mut first = Vec::new();
+    let onto;
+    let line = match (project.geo, line.origin) {
+        (Some(geo), Some(_)) => {
+            onto = line.onto(geo);
+            &onto
+        }
+        (None, Some((lon, lat))) => {
+            first.push(Op::SetGeo {
+                geo: Some(Geo { lon, lat }),
+            });
+            line
+        }
+        _ => line,
+    };
     let smooth = smooth(&line.points, line.closed, PLAN_SMOOTHING, HEIGHT_SMOOTHING);
     let nodes = simplify(&smooth, line.closed, tolerance, LONGEST);
-    if project.road(name).is_some() {
+    let laid = if project.road(name).is_some() {
         vec![
             Op::SetNodes {
                 line: name.to_string(),
@@ -466,7 +519,8 @@ pub fn road_ops(project: &Project, line: &Centreline, name: &str, tolerance: f64
             nodes,
             like: Some(project.main_road.clone()),
         }]
-    }
+    };
+    first.into_iter().chain(laid).collect()
 }
 
 fn distance_to_segment(p: DVec2, a: DVec2, b: DVec2) -> f64 {

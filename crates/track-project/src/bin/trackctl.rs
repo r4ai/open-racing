@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use open_racing_track_project::{
-    Cache, Error, Project, Side, assets, bake, centreline, corners, curve, inspect, ops, pitlane,
-    preview, validate,
+    Cache, Error, Project, Side, assets, bake, centreline, corners, curve, dem, inspect, ops,
+    pitlane, preview, validate,
 };
 
 #[derive(Parser)]
@@ -150,6 +150,19 @@ enum Command {
         /// Its distance from the road's edge, m.
         #[arg(long, default_value_t = 20.0)]
         wall_offset: f64,
+    },
+    /// Puts roads' and splines' nodes on the ground of elevation data: an ESRI ASCII
+    /// grid (.asc) or x y z points (.xyz, .csv, .txt), in metres or, once a GPS
+    /// centreline has placed the project, longitudes and latitudes.
+    Dem {
+        project: String,
+        file: PathBuf,
+        /// Only these roads or splines; all by default.
+        #[arg(long, value_delimiter = ',')]
+        lines: Vec<String>,
+        /// Height above the ground, m.
+        #[arg(long, default_value_t = 0.0)]
+        offset: f64,
     },
     /// Paints the start/finish line across the main road and a line at the front of
     /// each grid slot, in place of those painted before.
@@ -405,6 +418,22 @@ fn run(cli: Cli) -> Result<(), Error> {
             ops::apply_all(&mut p, &list)?;
             p.save(&dir)?;
             println!("kerbed {} corners of \"{name}\"", found.len());
+        }
+        Command::Dem {
+            project,
+            file,
+            lines,
+            offset,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let src = std::fs::read_to_string(&file).map_err(|e| Error::Io(file.clone(), e))?;
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            let heights = dem::read(&name, &src, p.geo)?;
+            let (list, moved) = dem::node_ops(&p, &heights, &lines, offset);
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            println!("put {moved} nodes on the ground");
         }
         Command::Paint { project } => {
             let dir = resolve(&project);

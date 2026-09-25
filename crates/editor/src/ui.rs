@@ -366,6 +366,41 @@ fn import_centreline(c: &mut Ctx) {
     }
 }
 
+/// Puts nodes on the ground of elevation data: the selected line's, or every line's.
+fn import_heights(c: &mut Ctx) {
+    use open_racing_track_project::dem;
+    let Some(file) = rfd::FileDialog::new()
+        .add_filter("elevation data", &["asc", "xyz", "csv", "txt"])
+        .pick_file()
+    else {
+        return;
+    };
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let heights = match std::fs::read_to_string(&file)
+        .map_err(|e| e.to_string())
+        .and_then(|src| dem::read(&name, &src, c.editor.project.geo).map_err(|e| e.to_string()))
+    {
+        Ok(h) => h,
+        Err(e) => {
+            c.editor.status = format!("not read: {e}");
+            return;
+        }
+    };
+    let lines: Vec<String> = c
+        .editor
+        .line()
+        .map(|(n, ..)| vec![n.to_string()])
+        .unwrap_or_default();
+    let (ops, moved) = dem::node_ops(&c.editor.project, &heights, &lines, 0.0);
+    if moved == 0 {
+        c.editor.status = "the elevation data does not cover these nodes".into();
+    } else if c.editor.apply(ops, None) {
+        c.editor.status = format!(
+            "{moved} nodes put on the ground; Smooth Heights evens out the data's roughness"
+        );
+    }
+}
+
 /// Opens another project, dropping what the tools were doing in this one.
 fn open_project(c: &mut Ctx, dir: std::path::PathBuf) {
     let before = c.editor.dir.clone();
@@ -445,6 +480,16 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
             {
                 ui.close();
                 import_centreline(c);
+            }
+            if ui
+                .button("Heights from Elevation Data…")
+                .on_hover_text(
+                    "Put the nodes of the selected road or spline (or of every one) on the ground of an elevation grid (.asc) or a list of x y z points (.xyz, .csv), in metres or longitudes and latitudes",
+                )
+                .clicked()
+            {
+                ui.close();
+                import_heights(c);
             }
             ui.separator();
             entry(ui, c, Cmd::Bake);
@@ -629,6 +674,11 @@ fn status_bar(ui: &mut egui::Ui, c: &Ctx) {
                 p.splines.len(),
                 p.props.len()
             ));
+            // Where the pointer is on the Earth.
+            if let (Some(g), Some(p)) = (c.editor.project.geo, c.tool.pointer) {
+                let (lon, lat) = g.to_geo(p.truncate());
+                ui.weak(format!("{lat:.6}°, {lon:.6}°"));
+            }
             ui.separator();
             ui.add(egui::Label::new(&c.editor.status).truncate())
                 .on_hover_text(&c.editor.status);

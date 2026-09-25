@@ -17,6 +17,8 @@ pub mod builtin;
 pub mod centreline;
 pub mod corners;
 pub mod curve;
+pub mod dem;
+pub mod geo;
 pub mod inspect;
 pub mod model;
 pub mod ops;
