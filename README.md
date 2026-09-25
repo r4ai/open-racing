@@ -14,7 +14,7 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 
 | crate               | role                                                                                                                                                                                         |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, sliding speed, camber and camber gain, tread temperature and wear), a mean-value engine (throttle, intake manifold, turbocharger), clutch / H-pattern, sequential and dual-clutch gearboxes with their electronics, front / rear / all-wheel drive through limited-slip differentials, aero elements sensitive to ride height, pitch, yaw and damage, tracks |
+| `crates/sim`        | 6-DOF chassis, 4-wheel suspension with unsprung masses, Pacejka tyres (combined slip, relaxation length, load sensitivity, sliding speed, camber and camber gain, tread temperature and wear), a mean-value engine (throttle, intake manifold, turbocharger), brakes whose friction follows their temperature, the engine's cylinder, coolant and oil temperatures with part wear and failures, clutch / H-pattern, sequential and dual-clutch gearboxes with their electronics, front / rear / all-wheel drive through limited-slip differentials, aero elements sensitive to ride height, pitch, yaw and damage, tracks |
 | `crates/env`        | RL environment. The observation uses only quantities that other sims (AC / ACC / iRacing, etc.) also expose as telemetry; ground-truth tyre state can be added via `privileged_obs`          |
 | `crates/api`        | `VecEnv` / `Policy` traits, asset loading, `AgentDriver` (lets a policy drive a car simulated elsewhere)                                                                                     |
 | `crates/track`      | Track package format: centreline, road meshes and walls, render data                                                                                                                         |
@@ -98,7 +98,7 @@ Training (`open-racing-env`) keeps fixed standard conditions (25 °C air and roa
 | T         | switch to the AI driver                                    |
 | M         | mute / unmute sound                                        |
 | Tab       | choose the input device                                    |
-| Esc       | settings: input, force feedback, track, weather, graphics, assists |
+| Esc       | settings: input, force feedback, track, weather, graphics, assists, realism |
 
 Gamepad: left stick to steer, RT/LT for throttle/brake, RB/LB to shift, Select to choose the input device.
 
@@ -134,6 +134,28 @@ The behaviour of each part is set in the car's RON file; every value below has a
 - `clutch`: `bite_point` and `engagement_exponent` (how the capacity grows as the pedal comes back from the bite point: 1 is linear, 2 the default).
 - `gearbox`: `input_inertia` and `input_drag` (the input shaft's inertia and oil drag). `HPattern` adds `sync_window` (speed difference, rad/s, at which the dogs mesh), `grind_time` (how long a synchroniser fights before the gear grinds) and `reverse_synchro` (with `false`, reverse goes in only once the input shaft has stopped; until then it grinds). `DualClutch` adds `control`: the speeds above idle at which its clutch starts to bite with the throttle closed (`bite_rpm`), closes fully (`lock_slip_rpm`, `lock_rpm`) and drops a gear (`downshift_rpm`), and the range over which it engages (`engage_band_rpm`).
 - `electronics`: `blip_band_rpm` (how far short of the incoming gear's speed the auto-blip opens the throttle fully; it also blips a dual clutch's downshifts) and the anti-stall's `band_rpm` (the range above its `rpm` over which it opens the clutch).
+
+A sequential gearbox's actuator gives up on a gear change whose dogs have not let go within half a second, so a downshift asked for on full throttle is dropped rather than carried out once the car has gone much faster.
+
+### Brakes, engine temperatures and failures
+
+Each wheel's brake is three bodies that heat and cool: the disc, the caliper with its pads, pistons and fluid, and the rim with the hub. The kinetic energy the brake takes from the wheel heats the disc (and 6 % of it the pads); the disc sheds heat to the air through its vanes and duct (forced convection, growing with the wheel's speed to the 0.8) and by radiation, and passes some through the pads into the caliper and through its bell into the rim. The pads' friction follows the disc's temperature (`pad_friction`): racing pads bite weakly cold and are at their best from about 350 to 650 °C, road pads fade from about 450 °C, so a road car driven hard on a track fades stop after stop while its tyres could still stop it. A caliper hotter than the fluid's boiling point fills with vapour, which takes much of the pressure the pedal builds. The rim heats the tyre's carcass and the air inside it, so hot brakes raise the tyre's pressure, and a cooler rim takes heat out of it. The HUD shows each disc's and caliper's temperature and the share of its torque the brake gives ("bite").
+
+The engine holds its heat in three bodies: the cylinders (heads, liners and pistons), the coolant with the block, and the oil. A share of the fuel's energy heats the cylinder walls and friction heats the oil and the liners; the coolant carries the heat to the radiator, whose flow the thermostat opens to hold its temperature, and the oil sheds heat in its cooler and to the coolant. The radiator and the oil cooler take the air coming into the nose, or at low speed a fan's (racing cars often have none and overheat standing still); a hit on the nose crushes them. The temperatures change what the engine gives, always:
+
+- cold oil is thick and adds friction (about twice the warm friction at 20 °C), hot oil takes some away;
+- cylinders above 170 °C knock, and the control unit retards the ignition, costing up to a quarter of the torque;
+- coolant above its boiling point leaves the cylinder walls in steam, which carries little heat, so the cylinders overheat.
+
+Two options on the settings screen (Esc, page "realism", saved to `realism.ron`) decide whether anything lasting happens, as in other sims:
+
+- **Damage** (on by default): hits into walls cost downforce and crush the radiator and oil cooler. Off, the car takes no damage.
+- **Failures** (on by default): engine parts beyond their limits wear — the pistons and head gasket in cylinders above 230 °C, the bearings in oil above 150 °C (their life halves for every 15 K more), the valvetrain above the over-rev speed (7 % over the limiter unless the car says otherwise; far over it the valves hit the pistons at once). Worn pistons and valves lose compression and power, worn bearings add friction, and a broken part stops the engine for good. Off, parts do not wear, though heat still costs power.
+
+Putting the car back on the track (Backspace) repairs it. Every value has a default that matches the bundled cars:
+
+- `brakes`: `pad_friction` (friction against the disc temperature, °C, relative to its peak, where `max_torque` applies; road pads when left out), `disc_mass` and `disc_cooling` for the front and rear discs (kg, and W/K at 50 m/s; sized from the brake torque when left out), `fluid_boiling_point` (260 °C) and `start_temperature` (the discs' temperature after a reset, 150 °C). The GT3 runs racing pads on ducted 11 / 8.5 kg discs with racing fluid, warmed to 300 °C on the way to the grid.
+- `engine`: `cooling` with `radiator` and `oil_cooler` (W/K at 50 m/s with the thermostat open; sized from the engine's peak power when left out), `thermostat` (85 °C), `boiling_point` (125 °C, under the cap's pressure) and `fan` (`true`; the GT3 has none); `over_rev_rpm`.
 
 ## Adding content
 
@@ -223,13 +245,14 @@ How the folder is converted:
 - **Tyres:** the power-law load sensitivity (`LS_EXPX`, `LS_EXPY`), the grip left past the peak (`FALLOFF_LEVEL`, as the Magic Formula's shape), the loss with sliding speed (`SPEED_SENSITIVITY`), the camber that grips most and how fast grip falls away from it (`DCAMBER_0`, `DCAMBER_1`), the pressure's effect on stiffness (`PRESSURE_SPRING_GAIN`) and grip (`PRESSURE_D_GAIN`, fitted a quarter of a bar off the ideal) and the thermal `PERFORMANCE_CURVE` carry over.
 - **Suspension:** the camber gain of double-wishbone (`DWB`) and strut suspensions follows from their geometry in front view (the instant centre of the arms).
 - **Aero:** every `[WING_n]` becomes an element with its lift and drag against the angle of attack (`LUT_AOA_CL`, `LUT_AOA_CD` and their gains, at its `ANGLE`), against the ride height (`LUT_GH_CL`, `LUT_GH_CD`, read at the ride heights of `[RIDE]` in `car.ini`), its `YAW_CL_GAIN` and its damage zones (`ZONE_*_CL`, `ZONE_*_CD`, taking the game's damage as the impact speed in km/h).
+- **Engine damage:** `[DAMAGE] RPM_THRESHOLD` in `engine.ini` becomes the over-rev speed above which the valvetrain wears.
 - **Gearbox:** a car with `[GEARBOX] SUPPORTS_SHIFTER=1` gets an H-pattern manual, the others a sequential gearbox with an ignition cut. `[AUTOBLIP] ELECTRONIC` and `[DOWNSHIFT_PROTECTION]` become the car's auto-blip and downshift protection, and an automatic clutch the car always has (`[AUTOCLUTCH] FORCED_ON=1`) becomes anti-stall that opens the clutch between `MAX_RPM` and `MIN_RPM`.
 
 Limitations:
 
 - The game's electronic and viscous centre couplings (`AWD2`) and active differentials become limited-slip differentials.
 - The game's tyres run on open-racing's tyre model: its Magic Formula curves and thermal model take the values above, but the game's own slip curves (`CX_MULT`, `XMU`, `FALLOFF_SPEED`), relaxation length, flex, graining and blistering and wear curve are not read.
-- Several turbochargers become one; the game's turbo `LAG_DN` is not read. Aero fins (`[FIN_n]`) and active aero (`[DYNAMIC_CONTROLLER_n]`) are not simulated. Damage costs only aerodynamics.
+- Several turbochargers become one; the game's turbo `LAG_DN` is not read. Aero fins (`[FIN_n]`) and active aero (`[DYNAMIC_CONTROLLER_n]`) are not simulated. Damage costs aerodynamics and cooling; the game's turbo and suspension damage are not read, and its brakes keep open-racing's thermal defaults.
 - Skinned meshes (the driver, animated belts), animations (doors, wipers), lights and Custom Shaders Patch extensions are not converted.
 
 ## Tests and benchmarks

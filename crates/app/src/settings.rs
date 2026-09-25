@@ -11,6 +11,8 @@
 //!   shadows, ambient occlusion, ...) tuned one by one, with motion blur and VSync.
 //! - Assists: the clutch assist, auto-blip and automatic gear selection, with the
 //!   gearbox and electronics the car is fitted with.
+//! - Realism: whether hits damage the car and whether its engine's parts can fail, with
+//!   the brakes' and the engine's temperatures now.
 //!
 //! The simulation is paused while the screen is open.
 
@@ -28,6 +30,7 @@ use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::graphics::{GraphicsSettings, GraphicsSupport, Preset, Setting};
 use crate::input::InputSelection;
+use crate::realism::RealismSettings;
 use crate::weather::WeatherConfig;
 
 /// Smallest movement over which an axis counts as moved when it is assigned.
@@ -83,7 +86,27 @@ enum Page {
     Weather,
     Graphics,
     Assists,
+    Realism,
 }
+
+/// The pages in the order Tab steps through them, with their names.
+const PAGES: [(Page, &str); 7] = [
+    (Page::Input, "input"),
+    (Page::ForceFeedback, "force feedback"),
+    (Page::Track, "track"),
+    (Page::Weather, "weather"),
+    (Page::Graphics, "graphics"),
+    (Page::Assists, "assists"),
+    (Page::Realism, "realism"),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum RealismRow {
+    Damage,
+    Failures,
+}
+
+const REALISM_ROWS: [RealismRow; 2] = [RealismRow::Damage, RealismRow::Failures];
 
 #[derive(Clone, Copy, PartialEq)]
 enum AssistRow {
@@ -223,6 +246,7 @@ impl Plugin for SettingsPlugin {
                         navigate_weather,
                         navigate_graphics,
                         navigate_assists,
+                        navigate_realism,
                     )
                         .chain()
                         .run_if(|o: Res<SettingsOpen>| o.0),
@@ -277,14 +301,8 @@ fn toggle(
 
 fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
     if screen.listen.is_none() && keys.just_pressed(KeyCode::Tab) {
-        screen.page = match screen.page {
-            Page::Input => Page::ForceFeedback,
-            Page::ForceFeedback => Page::Track,
-            Page::Track => Page::Weather,
-            Page::Weather => Page::Graphics,
-            Page::Graphics => Page::Assists,
-            Page::Assists => Page::Input,
-        };
+        let i = PAGES.iter().position(|p| p.0 == screen.page).unwrap_or(0);
+        screen.page = PAGES[(i + 1) % PAGES.len()].0;
         screen.row = 0;
         screen.message.clear();
     }
@@ -372,6 +390,33 @@ fn navigate_assists(
     };
     *flag = !*flag;
     settings.save();
+}
+
+fn navigate_realism(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut settings: ResMut<RealismSettings>,
+    mut sim: ResMut<Simulation>,
+) {
+    if screen.page != Page::Realism {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, REALISM_ROWS.len());
+    if !(keys.just_pressed(KeyCode::ArrowLeft)
+        || keys.just_pressed(KeyCode::ArrowRight)
+        || keys.just_pressed(KeyCode::Enter))
+    {
+        return;
+    }
+    let r = &mut settings.0;
+    let flag = match REALISM_ROWS[screen.row] {
+        RealismRow::Damage => &mut r.damage,
+        RealismRow::Failures => &mut r.failures,
+    };
+    *flag = !*flag;
+    sim.set_realism(settings.0);
+    settings.save();
+    screen.message = "Applies from now on; a reset (Backspace) repairs the car.".into();
 }
 
 fn navigate_graphics(
@@ -685,6 +730,7 @@ fn render(
     graphics_support: Res<GraphicsSupport>,
     weather: Res<WeatherConfig>,
     assists: Res<AssistSettings>,
+    realism: Res<RealismSettings>,
     sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
@@ -701,14 +747,17 @@ fn render(
     if !open.0 {
         return;
     }
-    let tabs = match screen.page {
-        Page::Input => "[INPUT]  force feedback   track   weather   graphics   assists ",
-        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   weather   graphics   assists ",
-        Page::Track => " input   force feedback  [TRACK]  weather   graphics   assists ",
-        Page::Weather => " input   force feedback   track  [WEATHER]  graphics   assists ",
-        Page::Graphics => " input   force feedback   track   weather  [GRAPHICS]  assists ",
-        Page::Assists => " input   force feedback   track   weather   graphics  [ASSISTS]",
-    };
+    let tabs = PAGES
+        .iter()
+        .map(|&(page, name)| {
+            if page == screen.page {
+                format!("[{}]", name.to_uppercase())
+            } else {
+                format!(" {name} ")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut s = format!("{tabs}   (Tab page, paused)   Esc close\n\n");
     match screen.page {
         Page::Input => render_input(&mut s, &screen, &bindings, &reported, *selection, &pads),
@@ -717,6 +766,7 @@ fn render(
         Page::Weather => render_weather(&mut s, &screen, &weather, &sim),
         Page::Graphics => render_graphics(&mut s, &screen, &graphics, *graphics_support),
         Page::Assists => render_assists(&mut s, &screen, &assists, &sim),
+        Page::Realism => render_realism(&mut s, &screen, &realism, &sim),
     }
     text.0 = s;
 }
@@ -805,6 +855,53 @@ fn render_assists(s: &mut String, screen: &Screen, settings: &AssistSettings, si
         "\nLeft/Right or Enter toggles. The aids work the pedals as a driver would; what the"
     );
     let _ = writeln!(s, "car is fitted with works regardless.");
+}
+
+fn render_realism(s: &mut String, screen: &Screen, settings: &RealismSettings, sim: &Simulation) {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    for (i, row) in REALISM_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let (name, on, hint) = match row {
+            RealismRow::Damage => (
+                "Damage",
+                settings.0.damage,
+                "hits into walls cost downforce and crush the radiator",
+            ),
+            RealismRow::Failures => (
+                "Failures",
+                settings.0.failures,
+                "overheated or over-revved engine parts wear and break",
+            ),
+        };
+        let _ = writeln!(s, "{cursor} {name:<12} {:<5} {hint}", on_off(on));
+    }
+    let _ = writeln!(
+        s,
+        "\nEither way the brakes and the engine heat and cool: cold or overheated pads bite\n\
+         less, boiling fluid takes the pedal, hot rims warm the tyres, and the engine's\n\
+         power and friction follow its temperatures.\n"
+    );
+    let st = &sim.car.state;
+    let _ = writeln!(
+        s,
+        "discs C {}   fluid boils at {:.0} C",
+        st.wheels
+            .iter()
+            .map(|w| format!("{:4.0}", w.brake.disc))
+            .collect::<Vec<_>>()
+            .join(" "),
+        sim.car.model.params.brakes.fluid_boiling_point
+    );
+    let (h, e) = (&st.drivetrain.engine.heat, &sim.car.model.engine.thermal);
+    let _ = writeln!(
+        s,
+        "coolant {:.0} C (thermostat {:.0}, boils {:.0})   oil {:.0} C   over-rev {:.0} rpm",
+        h.coolant, e.thermostat, e.boiling_point, h.oil, e.over_rev_rpm
+    );
+    let _ = writeln!(s, "\nLeft/Right or Enter toggles.");
+    if !screen.message.is_empty() {
+        let _ = writeln!(s, "{}", screen.message);
+    }
 }
 
 /// "14:05" for 14.08 h.

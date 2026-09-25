@@ -7,6 +7,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::GRAVITY;
+use crate::brakes::BrakeModel;
 use crate::engine::EngineModel;
 use crate::tire::{TireModel, TireParams};
 
@@ -80,10 +81,48 @@ fn default_scrub_radius() -> f64 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrakeParams {
-    /// Total brake torque at full pedal in N·m (all four wheels).
+    /// Total brake torque at full pedal in N·m (all four wheels), with the pads at the
+    /// peak of their friction.
     pub max_torque: f64,
     /// Fraction of torque on the front axle.
     pub front_bias: f64,
+    /// Friction of the pads against the disc temperature (°C), ascending, relative to
+    /// its peak: pads bite less cold and fade when overheated. Road pads when left out.
+    #[serde(default = "default_pad_friction")]
+    pub pad_friction: Vec<(f64, f64)>,
+    /// Mass of one front and one rear disc, kg: its heat capacity. Sized for the brake
+    /// torque when left out.
+    #[serde(default)]
+    pub disc_mass: Option<(f64, f64)>,
+    /// Heat one front and one rear disc sheds to the air through its vanes and duct at
+    /// 50 m/s, W per K above the air. In proportion to the disc's mass when left out.
+    #[serde(default)]
+    pub disc_cooling: Option<(f64, f64)>,
+    /// Boiling point of the brake fluid, °C: above it, vapour in the calipers takes the
+    /// pressure the pedal builds.
+    #[serde(default = "default_fluid_boiling_point")]
+    pub fluid_boiling_point: f64,
+    /// Temperature of the discs after a reset, °C; the calipers and the rims have warmed
+    /// part of the way from the air towards it.
+    #[serde(default = "default_brake_start_temperature")]
+    pub start_temperature: f64,
+}
+
+fn default_pad_friction() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.85),
+        (100.0, 0.95),
+        (250.0, 1.0),
+        (400.0, 0.97),
+        (550.0, 0.8),
+        (700.0, 0.55),
+    ]
+}
+fn default_fluid_boiling_point() -> f64 {
+    260.0
+}
+fn default_brake_start_temperature() -> f64 {
+    150.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +159,43 @@ pub struct EngineParams {
     /// manifold at atmospheric pressure); the boost adds to it.
     #[serde(default)]
     pub turbo: Option<TurboParams>,
+    /// Radiator, oil cooler and thermostat.
+    #[serde(default)]
+    pub cooling: CoolingParams,
+    /// Engine speed above which the valvetrain wears, rpm: the valves float and the
+    /// springs and bearings are overloaded. 7 % above the limiter when left out.
+    #[serde(default)]
+    pub over_rev_rpm: Option<f64>,
+}
+
+/// How the engine sheds its heat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoolingParams {
+    /// Heat the radiator sheds with the thermostat open and air flowing at 50 m/s, W per K
+    /// of coolant above the air. Sized for the engine's power when left out.
+    pub radiator: Option<f64>,
+    /// Likewise for the oil cooler, W/K.
+    pub oil_cooler: Option<f64>,
+    /// Coolant temperature at which the thermostat starts to open, °C.
+    pub thermostat: f64,
+    /// Boiling point of the coolant at the pressure the cap holds, °C.
+    pub boiling_point: f64,
+    /// Whether a fan draws air through the radiator when the car is too slow to; racing
+    /// cars often have none and overheat standing still.
+    pub fan: bool,
+}
+
+impl Default for CoolingParams {
+    fn default() -> Self {
+        Self {
+            radiator: None,
+            oil_cooler: None,
+            thermostat: 85.0,
+            boiling_point: 125.0,
+            fan: true,
+        }
+    }
 }
 
 /// How the pedal works the throttle plate.
@@ -709,6 +785,31 @@ impl CarParams {
              must be positive",
         )?;
         let ascending = |t: &[(f64, f64)]| t.windows(2).all(|w| w[0].0 < w[1].0);
+        let b = &self.brakes;
+        let positive = |pair: Option<(f64, f64)>| pair.is_none_or(|(f, r)| f > 0.0 && r > 0.0);
+        check(
+            b.max_torque >= 0.0
+                && (0.0..=1.0).contains(&b.front_bias)
+                && !b.pad_friction.is_empty()
+                && ascending(&b.pad_friction)
+                && b.pad_friction.iter().all(|p| p.1 > 0.0)
+                && positive(b.disc_mass)
+                && positive(b.disc_cooling),
+            "brakes: front_bias must be in 0..1, pad_friction ascending with positive \
+             friction, disc_mass and disc_cooling positive",
+        )?;
+        let c = &self.engine.cooling;
+        check(
+            c.radiator.is_none_or(|v| v > 0.0)
+                && c.oil_cooler.is_none_or(|v| v > 0.0)
+                && c.boiling_point > c.thermostat
+                && self
+                    .engine
+                    .over_rev_rpm
+                    .is_none_or(|r| r > self.engine.idle_rpm),
+            "engine cooling: radiator and oil_cooler must be positive, boiling_point above \
+             thermostat, over_rev_rpm above idle",
+        )?;
         check(
             self.aero.elements.iter().all(|e| {
                 e.area >= 0.0
@@ -755,6 +856,7 @@ pub struct CarModel {
     pub front_tire: TireModel,
     pub rear_tire: TireModel,
     pub engine: EngineModel,
+    pub brakes: BrakeModel,
 }
 
 impl CarModel {
@@ -827,6 +929,7 @@ impl CarModel {
             sprung_mass,
             corners,
             engine: EngineModel::new(&p.engine),
+            brakes: BrakeModel::new(&p.brakes),
             front_tire: TireModel::new(front_tire),
             rear_tire: TireModel::new(rear_tire),
             params,

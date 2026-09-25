@@ -1144,3 +1144,156 @@ fn a_dual_clutch_creeps_pulls_away_and_stops_on_its_own() {
     let dt = car.state.drivetrain;
     assert!(car.speed() < 0.1 && !dt.stalled && dt.gear == 1, "{dt:?}");
 }
+
+/// Brakes `model` from `from` to `to` km/h at the limit and floors it back up, `stops`
+/// times, on a near-straight, with the gears picked for it. Returns the front-left
+/// brake at the end of each stop and the distance each stop took, m.
+fn brake_repeatedly(
+    model: Arc<CarModel>,
+    from: f64,
+    to: f64,
+    stops: usize,
+) -> (Vec<BrakeState>, Vec<f64>) {
+    let radius = 5000.0;
+    let track = circle(radius);
+    let mut car = Car::new(model, &track, 0.0, 0.0, from / 3.6, 4);
+    let (ratio, wheelbase) = (car.model.params.steering.ratio, car.model.params.wheelbase);
+    let (mut brakes, mut distances) = (Vec::new(), Vec::new());
+    let mut hint = 0;
+    let mut drive = |car: &mut Car, throttle: f64, brake: f64| {
+        // Follows the centreline.
+        let q = track.query(car.state.position, hint);
+        hint = q.index;
+        let fwd = car.state.orientation * DVec3::X;
+        let heading_err = q.tangent.truncate().perp_dot(fwd.truncate()).asin();
+        let steer = (wheelbase / radius).atan() - 0.02 * q.d - 0.5 * heading_err;
+        let shift = AutoShift.shift(car);
+        car.step(
+            &track,
+            &Controls {
+                steer_wheel_angle: steer * ratio,
+                throttle,
+                brake,
+                shift,
+                ..Default::default()
+            },
+        );
+    };
+    for _ in 0..stops {
+        let start = car.state.position;
+        let t = car.state.time;
+        while car.speed() > to / 3.6 {
+            // Eases off as a wheel starts to lock, as ABS would.
+            let locking = car.telemetry.wheels.iter().any(|w| w.slip_ratio < -0.1);
+            drive(&mut car, 0.0, if locking { 0.4 } else { 1.0 });
+            assert!(
+                car.state.time < t + 30.0,
+                "stuck braking at {:.1} m/s",
+                car.speed()
+            );
+        }
+        distances.push((car.state.position - start).length());
+        brakes.push(car.state.wheels[0].brake);
+        let t = car.state.time;
+        while car.speed() < from / 3.6 {
+            drive(&mut car, 1.0, 0.0);
+            assert!(
+                car.state.time < t + 60.0,
+                "stuck at {:.1} m/s: {:?}",
+                car.speed(),
+                car.state.drivetrain
+            );
+        }
+    }
+    (brakes, distances)
+}
+
+#[test]
+fn hard_stops_bring_racing_brakes_up_to_temperature_and_warm_the_rims() {
+    let model = gt3();
+    let start = model.brakes.fresh();
+    let (brakes, _) = brake_repeatedly(model, 200.0, 60.0, 6);
+    eprintln!("{brakes:#?}");
+    let last = brakes[brakes.len() - 1];
+    // Each stop leaves the discs hotter, working up to 400-700 C; the calipers stay far
+    // cooler.
+    assert!(last.disc > brakes[0].disc + 50.0, "{brakes:?}");
+    assert!((400.0..750.0).contains(&last.disc), "{last:?}");
+    assert!(
+        last.effectiveness > 0.95,
+        "racing pads in their window: {last:?}"
+    );
+    assert!(
+        last.caliper > start.caliper && last.caliper < 250.0,
+        "{last:?}"
+    );
+    assert!(
+        last.rim > start.rim + 5.0,
+        "the discs warm the rims: {last:?}"
+    );
+}
+
+#[test]
+fn road_brakes_fade_when_worked_hard() {
+    let (brakes, distances) = brake_repeatedly(asset_car("hot_hatch"), 180.0, 50.0, 8);
+    eprintln!(
+        "stops {distances:.0?} m
+{brakes:#?}"
+    );
+    let (first, last) = (brakes[0], brakes[brakes.len() - 1]);
+    assert!(last.disc > first.disc + 150.0, "{first:?} / {last:?}");
+    assert!(
+        last.effectiveness < 0.9 && first.effectiveness > 0.95,
+        "{first:?} / {last:?}"
+    );
+}
+
+#[test]
+fn damage_can_be_switched_off() {
+    let track = walled_circle();
+    let hit = |damage: bool| {
+        let mut car = Car::new(gt3(), &track, 0.0, 0.0, 25.0, 2);
+        car.realism.damage = damage;
+        for _ in 0..3000 {
+            car.step(&track, &Controls::default());
+        }
+        car.state.damage
+    };
+    assert!(hit(true)[0] > 0.0, "{:?}", hit(true));
+    assert_eq!(hit(false), [0.0; 4]);
+}
+
+/// Holds the GT3's engine at full throttle in neutral at rest for `seconds`.
+fn rev_at_rest(failures: bool, seconds: f64) -> Car {
+    let track = circle(200.0);
+    let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 0);
+    car.realism.failures = failures;
+    for _ in 0..(seconds / DT) as usize {
+        car.step(
+            &track,
+            &Controls {
+                throttle: 1.0,
+                brake: 1.0,
+                ..Default::default()
+            },
+        );
+    }
+    car
+}
+
+#[test]
+fn an_engine_held_on_the_limiter_at_rest_overheats_and_fails() {
+    let mut car = rev_at_rest(true, 600.0);
+    let heat = car.state.drivetrain.engine.heat;
+    eprintln!("{heat:?}");
+    assert!(heat.failed(), "{heat:?}");
+    assert!(car.state.drivetrain.rpm() < 100.0, "a broken engine stops");
+    car.restart_engine();
+    assert!(car.state.drivetrain.stalled, "and does not start again");
+    // Without failures it only runs hot, down on power.
+    let heat = rev_at_rest(false, 600.0).state.drivetrain.engine.heat;
+    assert!(
+        !heat.failed() && heat.coolant > 110.0 && heat.power < 1.0,
+        "{heat:?}"
+    );
+}

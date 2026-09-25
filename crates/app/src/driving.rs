@@ -8,8 +8,8 @@ use glam::{DQuat, DVec3};
 use open_racing_api::{AgentDriver, EnvSpec, LapTimer, Policy};
 use open_racing_sim::weather::{OccluderBuilder, Occluders};
 use open_racing_sim::{
-    AutoShift, BlipAssist, Car, CarState, ClutchAssist, Controls, DT, RubberMap, Shift, Track,
-    TrackEvolution, Weather, WeatherSettings,
+    AutoShift, BlipAssist, Car, CarState, ClutchAssist, Controls, DT, Realism, RubberMap, Shift,
+    Track, TrackEvolution, Weather, WeatherSettings,
 };
 
 use crate::Args;
@@ -156,6 +156,16 @@ impl Simulation {
     /// Starts the weather over from `settings`.
     pub fn restart_weather(&mut self, settings: WeatherSettings) {
         self.weather.restart(settings);
+        if self.mode == Mode::Replay {
+            self.mode = Mode::Human;
+        }
+        self.recording = self.new_recording();
+    }
+
+    /// Sets what the car can come to harm from. The recording starts over, as a replay
+    /// has to run under the same rules.
+    pub fn set_realism(&mut self, realism: Realism) {
+        self.car.realism = realism;
         if self.mode == Mode::Replay {
             self.mode = Mode::Human;
         }

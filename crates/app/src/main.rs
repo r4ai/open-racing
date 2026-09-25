@@ -13,6 +13,7 @@ mod ffb;
 mod graphics;
 mod hud;
 mod input;
+mod realism;
 mod scene;
 mod settings;
 mod track_model;
@@ -70,11 +71,13 @@ fn main() {
         args.track = driving::policy_track(&args);
     }
     let weather = weather::WeatherConfig::load(&args);
-    let (sim, track_model, car_model) =
-        driving::Simulation::new(&args, weather.0).unwrap_or_else(|e| {
+    let realism = realism::RealismSettings::load();
+    let (mut sim, track_model, car_model) = driving::Simulation::new(&args, weather.0)
+        .unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
         });
+    sim.set_realism(realism.0);
 
     let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -104,6 +107,7 @@ fn main() {
         .insert_resource(sim)
         .insert_resource(weather)
         .insert_resource(assists::AssistSettings::load(&args))
+        .insert_resource(realism)
         .insert_resource(track_model)
         .insert_resource(car_model)
         .insert_resource(args.clone())

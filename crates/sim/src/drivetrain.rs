@@ -17,6 +17,10 @@ pub const RPM_PER_RAD_S: f64 = 60.0 / std::f64::consts::TAU;
 /// Speed difference between the engine and the input shaft within which a sequential
 /// gearbox's clutch counts as stuck as its dogs mesh, rad/s.
 const MESH_LOCK_WINDOW: f64 = 3.0;
+/// Time a sequential gearbox's actuator pushes on dogs that will not let go before it
+/// gives the gear change up, s: a downshift asked for on full throttle would otherwise
+/// wait until the driver lifts, however fast the car has got by then.
+const UNLOAD_TIMEOUT: f64 = 0.5;
 /// Gauss-Seidel passes over the couplings per step.
 const ITERATIONS: usize = 8;
 
@@ -94,7 +98,11 @@ impl DrivetrainState {
         self.phase != ShiftPhase::None
     }
 
+    /// Starts a stalled engine, unless a part of it has broken.
     pub fn restart(&mut self, p: &CarParams) {
+        if self.engine.heat.failed() {
+            return;
+        }
         self.stalled = false;
         self.engine_speed = p.engine.idle_rpm / RPM_PER_RAD_S;
     }
@@ -234,9 +242,14 @@ fn advance_shift(s: &mut DrivetrainState, p: &CarParams, input: &DriveInput, out
                     }
                 }
             }
-            if s.phase == ShiftPhase::Unloading && s.clutch_torque.abs() < dog_release_torque {
-                s.gear = 0;
-                begin(s, ShiftPhase::Moving);
+            if s.phase == ShiftPhase::Unloading {
+                if s.clutch_torque.abs() < dog_release_torque {
+                    s.gear = 0;
+                    begin(s, ShiftPhase::Moving);
+                } else if s.phase_time > UNLOAD_TIMEOUT {
+                    s.target_gear = s.gear;
+                    begin(s, ShiftPhase::None);
+                }
             }
             if s.phase == ShiftPhase::Moving && s.phase_time >= shift_time {
                 // The dogs mesh at once: the light input shaft jumps to the gear's speed and

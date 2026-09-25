@@ -1,4 +1,5 @@
-//! Text HUD: speed, gear, rpm, laps, inputs, tyres and force feedback torque.
+//! Text HUD: speed, gear, rpm, laps, inputs, tyres, brakes, engine temperatures and force
+//! feedback torque.
 
 use std::fmt::Write;
 
@@ -40,7 +41,8 @@ T                toggle AI driver (with --ai)
 M                mute / unmute sound
 R                recenter the VR view (with --vr)
 Tab              choose input device (auto / keyboard / each pad or wheel / custom)
-Esc              settings: input, force feedback, track, weather, graphics, assists (Tab)
+Esc              settings: input, force feedback, track, weather, graphics, assists,
+                 realism (Tab)
 H                hide this help
 Gamepad: left stick steer, RT/LT throttle/brake, RB/LB or B/X shift, Select device
 Wheel, pedals and H-shifter: assign them in the Esc settings (input \"custom\")";
@@ -156,7 +158,9 @@ fn update(
         } else {
             format!("manifold {:.2} bar", dt.engine.manifold_pressure / 1e5)
         },
-        if dt.stalled {
+        if dt.engine.heat.failed() {
+            "   ENGINE FAILED (Backspace resets the car)"
+        } else if dt.stalled {
             "   ENGINE STALLED (I)"
         } else if dt.grinding {
             "   GEARS GRINDING (clutch!)"
@@ -208,6 +212,52 @@ fn update(
                 * 100.0
         );
     }
+    let brakes = st.wheels.map(|w| w.brake);
+    let fluid = car.model.params.brakes.fluid_boiling_point;
+    let _ = writeln!(
+        s,
+        "brake  disc C {}   caliper C {}   bite % {}{}",
+        brakes.map(|b| format!("{:4.0}", b.disc)).join(" "),
+        brakes.map(|b| format!("{:4.0}", b.caliper)).join(" "),
+        brakes
+            .map(|b| format!("{:3.0}", b.effectiveness * 100.0))
+            .join(" "),
+        if brakes.iter().any(|b| b.caliper > fluid) {
+            "   FLUID BOILING"
+        } else if brakes.iter().any(|b| b.effectiveness < 0.85) {
+            "   BRAKES FADING"
+        } else {
+            ""
+        }
+    );
+    let h = &dt.engine.heat;
+    let thermal = &car.model.engine.thermal;
+    let w = &h.wear;
+    let _ = writeln!(
+        s,
+        "engine coolant {:.0} C   oil {:.0} C   cylinders {:.0} C   power {:.0} %{}{}",
+        h.coolant,
+        h.oil,
+        h.cylinder,
+        h.power * 100.0,
+        if w.pistons.max(w.bearings).max(w.valvetrain) > 0.0 {
+            format!(
+                "   wear: pistons {:.0} %  bearings {:.0} %  valves {:.0} %",
+                w.pistons * 100.0,
+                w.bearings * 100.0,
+                w.valvetrain * 100.0
+            )
+        } else {
+            String::new()
+        },
+        if h.coolant > thermal.boiling_point {
+            "   COOLANT BOILING"
+        } else if h.coolant > thermal.thermostat + 20.0 {
+            "   OVERHEATING"
+        } else {
+            ""
+        }
+    );
     let q = sim.track.query(st.position, sim.lap.hint());
     let here = sim.evolution.grip_at(q.surface, q.s, q.d);
     let (line, off) = sim.evolution.start_grip();

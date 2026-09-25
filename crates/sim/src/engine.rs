@@ -12,6 +12,7 @@
 use std::f64::consts::PI;
 
 use crate::drivetrain::RPM_PER_RAD_S;
+use crate::engine_thermal::{EngineHeat, EngineThermal};
 use crate::params::{EngineParams, ThrottleKind, TurboParams, lookup};
 use crate::{AMBIENT_TEMPERATURE, DT};
 
@@ -112,6 +113,8 @@ pub struct EngineState {
     pub fuel_flow: f64,
     /// Torque at the crank, N·m.
     pub torque: f64,
+    /// Temperatures and wear of the engine's parts.
+    pub heat: EngineHeat,
 }
 
 impl Default for EngineState {
@@ -125,6 +128,7 @@ impl Default for EngineState {
             air_flow: 0.0,
             fuel_flow: 0.0,
             torque: 0.0,
+            heat: EngineHeat::WARM,
         }
     }
 }
@@ -197,6 +201,8 @@ pub struct EngineModel {
     rpm_step: f64,
     table: Box<[Point]>,
     turbo: Option<Turbo>,
+    /// Cooling system, and the limits of the parts.
+    pub thermal: EngineThermal,
 }
 
 /// Flow through the throttle relative to choked flow at pressure ratio `pr`, and its
@@ -345,7 +351,16 @@ impl EngineModel {
             })
             .collect::<Box<[Point]>>();
 
+        let peak_power = e
+            .torque_curve
+            .iter()
+            .map(|&(rpm, torque)| torque * rpm / RPM_PER_RAD_S)
+            .fold(0.0, f64::max)
+            * e.turbo
+                .as_ref()
+                .map_or(1.0, |t| 1.0 + t.max_boost * BAR / STANDARD_PRESSURE);
         let mut model = Self {
+            thermal: EngineThermal::new(e, displacement, peak_power),
             displacement,
             manifold_volume,
             throttle_gain,
@@ -399,9 +414,10 @@ impl EngineModel {
         }
     }
 
-    /// Advances the manifold and the turbocharger by `dt` at engine speed `speed` (rad/s)
-    /// and returns the torque at the crank. `firing` is false while the fuel or the
-    /// ignition is cut (stalled, overrun, rev limiter, a gearbox's ignition cut).
+    /// Advances the manifold and the turbocharger by `dt` at engine speed `speed` (rad/s),
+    /// heats the engine's parts and returns the torque at the crank. `firing` is false
+    /// while the fuel or the ignition is cut (stalled, overrun, rev limiter, a gearbox's
+    /// ignition cut); a broken engine does not fire.
     pub fn step(
         &self,
         s: &mut EngineState,
@@ -411,6 +427,7 @@ impl EngineModel {
         air: &Ambient,
         dt: f64,
     ) -> f64 {
+        let firing = firing && !s.heat.failed();
         let rt = R_AIR * (air.temperature + KELVIN);
         let point = self.at(speed * RPM_PER_RAD_S);
         let pumping =
@@ -484,12 +501,15 @@ impl EngineModel {
         }
 
         let combustion = if firing {
-            point.combustion * p * air.charge
+            point.combustion * p * air.charge * s.heat.power
         } else {
             0.0
         };
         let pumping_loss = (ambient - p) * self.displacement / (4.0 * PI);
-        s.torque = combustion - pumping_loss - point.friction;
+        let friction = point.friction * s.heat.friction;
+        s.torque = combustion - pumping_loss - friction;
+        self.thermal
+            .heat(&mut s.heat, s.fuel_flow, friction * speed.abs(), dt);
         s.torque
     }
 

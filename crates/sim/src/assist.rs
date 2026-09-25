@@ -33,7 +33,11 @@ impl AutoShift {
         if dt.gear > 1 {
             let g = &p.gearbox.ratios;
             let idx = (dt.gear - 1) as usize;
-            let rpm_after = rpm * g[idx - 1] / g[idx];
+            // Locked wheels do not fool it into a gear the car's speed would over-rev.
+            let driven = if p.drive.drives(false) { 2 } else { 0 };
+            let rolling = car.local_velocity().x.abs() / car.model.tire(driven).p.radius;
+            let rpm_after =
+                rpm.max(gear_ratio(p, dt.gear) * rolling * RPM_PER_RAD_S) * g[idx - 1] / g[idx];
             if rpm_after < 0.85 * limiter && rpm < 0.55 * limiter {
                 return Shift::Down;
             }

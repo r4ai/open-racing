@@ -529,6 +529,10 @@ impl Physics {
         if let Some(v) = get("ENGINE_DATA", "INERTIA").filter(|v| *v > 0.0) {
             e.inertia = v;
         }
+        // The speed above which the game's engine takes damage wears the valvetrain.
+        if let Some(v) = get("DAMAGE", "RPM_THRESHOLD").filter(|v| *v > e.idle_rpm) {
+            e.over_rev_rpm = Some(v);
+        }
         // Coast torque grows about linearly with rpm up to the reference point.
         if let (Some(rpm), Some(nm)) = (get("COAST_REF", "RPM"), get("COAST_REF", "TORQUE"))
             && rpm > 0.0
@@ -924,7 +928,7 @@ pub(crate) mod tests {
             ("tcurve.lut", "0|0.8\n85|1.0\n150|0.9\n"),
             (
                 "engine.ini",
-                "[HEADER]\nPOWER_CURVE=power.lut\n[ENGINE_DATA]\nLIMITER=7500\nMINIMUM=1200\nINERTIA=0.15\n[COAST_REF]\nRPM=7000\nTORQUE=70\n[TURBO_0]\nMAX_BOOST=0.5\nWASTEGATE=0.4\nREFERENCE_RPM=4000\nGAMMA=2.5\nLAG_UP=0.99\n",
+                "[HEADER]\nPOWER_CURVE=power.lut\n[ENGINE_DATA]\nLIMITER=7500\nMINIMUM=1200\nINERTIA=0.15\n[COAST_REF]\nRPM=7000\nTORQUE=70\n[TURBO_0]\nMAX_BOOST=0.5\nWASTEGATE=0.4\nREFERENCE_RPM=4000\nGAMMA=2.5\nLAG_UP=0.99\n[DAMAGE]\nRPM_THRESHOLD=8000\n",
             ),
             ("power.lut", "0|0\n1000|200\n4000|300\n7500|250\n"),
             (
@@ -999,6 +1003,7 @@ pub(crate) mod tests {
         assert!((turbo.spool_time - 1.0 / 3.33).abs() < 1e-9);
         assert_eq!(turbo.flow_exponent, 2.5);
         assert_eq!((c.engine.limiter_rpm, c.engine.idle_rpm), (7500.0, 1200.0));
+        assert_eq!(c.engine.over_rev_rpm, Some(8000.0));
         assert_eq!(c.gearbox.ratios.len(), 5);
         assert_eq!((c.gearbox.reverse, c.gearbox.final_drive), (3.1, 3.9));
         assert_eq!(c.differential.preload, 60.0);

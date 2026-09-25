@@ -52,6 +52,14 @@
     brakes: (
         max_torque: 11000.0,
         front_bias: 0.60,
+        // Racing pads: weak cold, at their best from about 350 to 650 C, fading beyond.
+        pad_friction: [
+            (0.0, 0.65), (150.0, 0.85), (350.0, 1.0), (650.0, 1.0), (800.0, 0.85), (950.0, 0.6),
+        ],
+        disc_mass: Some((11.0, 8.5)),    // ventilated iron, about 380 / 355 mm
+        disc_cooling: Some((110.0, 80.0)),   // ducted
+        fluid_boiling_point: 320.0,      // racing fluid, dry
+        start_temperature: 300.0,        // warmed on the way to the grid
     ),
 
     engine: (
@@ -67,6 +75,7 @@
         idle_rpm: 1500.0,
         limiter_rpm: 9250.0,
         stall_rpm: 700.0,
+        cooling: (fan: false),       // no radiator fan: it overheats standing still
     ),
 
     clutch: (

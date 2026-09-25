@@ -466,6 +466,12 @@ impl TireModel {
             * (1.0 - (0..3).map(|k| COAT_GRIP_LOSS[k] * c.coat[k]).sum::<f64>())
     }
 
+    /// Adds `energy` J to the carcass and the air inside it (heat from the rim).
+    #[inline]
+    pub fn heat_core(&self, c: &mut TireCondition, energy: f64) {
+        c.core_temperature += energy / self.p.thermal.core_capacity;
+    }
+
     /// Advances temperatures and wear by `dt`.
     ///
     /// * `load` – share of the load on each tread zone, see [`Self::tread_load`]

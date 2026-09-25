@@ -10,7 +10,10 @@
 //! - Tyres: transient slips via relaxation length, Magic Formula combined forces,
 //!   grip scaled by load, sliding speed, inflation pressure, tread temperature and wear;
 //!   camber follows the suspension's travel.
-//! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly.
+//! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly. The
+//!   brakes' friction follows their temperature; their heat reaches the tyres through
+//!   the rims.
+//! - The engine's parts heat and cool, and with failures on, wear out.
 //! - Aerodynamics: elements (body, wings, floor) whose coefficients follow their angle
 //!   of attack (the car's pitch), the floor's ride height under them, the
 //!   sideslip and the damage the car has taken.
@@ -18,7 +21,9 @@
 use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec3};
+use serde::{Deserialize, Serialize};
 
+use crate::brakes::BrakeState;
 use crate::controls::Controls;
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::engine::{Ambient, STANDARD_PRESSURE};
@@ -27,7 +32,7 @@ use crate::params::{CarModel, DAMAGE_ZONES, SteeringParams, lookup};
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
 use crate::weather::Weather;
-use crate::{DT, FL, GRAVITY, RL};
+use crate::{DT, FL, GRAVITY, RL, THERMAL_STEPS};
 
 /// Below this speed a slip-velocity damping term is blended in so the relaxation
 /// length model does not oscillate at standstill.
@@ -74,6 +79,7 @@ pub struct WheelState {
     /// Track query hint.
     pub hint: usize,
     pub tire: TireCondition,
+    pub brake: BrakeState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +99,8 @@ pub struct CarState {
     pub damage: [f64; DAMAGE_ZONES],
     /// Simulated time in s.
     pub time: f64,
+    /// Physics steps taken since the reset.
+    pub steps: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -163,12 +171,36 @@ pub struct Telemetry {
     pub barrier_impact: f64,
 }
 
+/// What the car can come to harm from, chosen by the driver as in other sims. Heat
+/// always changes what the brakes and the engine give; these decide whether anything
+/// is lasting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Realism {
+    /// Hits into walls damage the body: its aerodynamics, and the radiator and oil
+    /// cooler behind the nose.
+    pub damage: bool,
+    /// The engine's parts wear when overheated or over-revved, and a broken one stops
+    /// the engine for good.
+    pub failures: bool,
+}
+
+impl Default for Realism {
+    fn default() -> Self {
+        Self {
+            damage: true,
+            failures: true,
+        }
+    }
+}
+
 /// A car driving on a track.
 #[derive(Clone, Debug)]
 pub struct Car {
     pub model: Arc<CarModel>,
     pub state: CarState,
     pub telemetry: Telemetry,
+    pub realism: Realism,
 }
 
 impl Car {
@@ -185,8 +217,10 @@ impl Car {
                 drivetrain: DrivetrainState::new(&model.params, gear),
                 damage: [0.0; DAMAGE_ZONES],
                 time: 0.0,
+                steps: 0,
             },
             telemetry: Telemetry::default(),
+            realism: Realism::default(),
             model,
         };
         car.reset(track, s, d, speed, gear);
@@ -209,6 +243,7 @@ impl Car {
                 spin: speed / tire.p.radius,
                 hint,
                 tire: tire.fresh(),
+                brake: m.brakes.fresh(),
                 ..Default::default()
             };
         }
@@ -231,6 +266,7 @@ impl Car {
             drivetrain,
             damage: [0.0; DAMAGE_ZONES],
             time: 0.0,
+            steps: 0,
         };
         self.telemetry = Telemetry::default();
     }
@@ -495,12 +531,7 @@ impl Car {
             let axle = model.axle(i);
             let w = &mut st.wheels[i];
             let drive_torque = drive[i];
-            let share = if i < 2 {
-                p.brakes.front_bias
-            } else {
-                1.0 - p.brakes.front_bias
-            };
-            let brake_torque = c.brake * p.brakes.max_torque * share * 0.5;
+            let brake_torque = model.brakes.torque(i, c.brake, &w.brake);
             let free = w.spin + dt * (road_torque + drive_torque) / axle.wheel_inertia;
             let brake_dv = dt * brake_torque / axle.wheel_inertia;
             w.spin = if free.abs() <= brake_dv {
@@ -508,6 +539,12 @@ impl Car {
             } else {
                 free - brake_dv * free.signum()
             };
+            // The kinetic energy the brake took from the wheel heats it.
+            model.brakes.heat(
+                i,
+                &mut w.brake,
+                0.5 * axle.wheel_inertia * (free * free - w.spin * w.spin),
+            );
             w.angle = (w.angle + w.spin * dt).rem_euclid(std::f64::consts::TAU);
         }
 
@@ -647,7 +684,7 @@ impl Car {
         // ---- Walls and the barrier at the edge of the run-off --------------------------
         let (impact, push) = collide(model, track, st, barrier_clearance);
         tel.barrier_impact = impact;
-        if impact > DAMAGE_THRESHOLD {
+        if impact > DAMAGE_THRESHOLD && self.realism.damage {
             // The wall is on the side the car was pushed away from.
             let away = st.orientation.inverse() * push;
             let zone = if away.x.abs() >= away.y.abs() {
@@ -659,6 +696,34 @@ impl Car {
             };
             st.damage[zone] += impact - DAMAGE_THRESHOLD;
         }
+
+        // ---- Heat among the brakes' and the engine's parts and the air ----------------
+        if st.steps.is_multiple_of(THERMAL_STEPS) {
+            let dt = THERMAL_STEPS as f64 * dt;
+            for (i, w) in st.wheels.iter_mut().enumerate() {
+                let tire = model.tire(i);
+                let to_tyre = model.brakes.exchange(
+                    i,
+                    &mut w.brake,
+                    w.spin * tire.p.radius,
+                    air.temperature,
+                    w.tire.core_temperature,
+                    dt,
+                );
+                tire.heat_core(&mut w.tire, to_tyre * dt);
+            }
+            let d = &mut st.drivetrain;
+            model.engine.thermal.exchange(
+                &mut d.engine.heat,
+                d.engine_speed,
+                v_body.x,
+                air.temperature,
+                st.damage[0],
+                self.realism.failures,
+                dt,
+            );
+        }
+        st.steps += 1;
     }
 }
 
