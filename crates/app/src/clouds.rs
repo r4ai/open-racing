@@ -82,17 +82,18 @@ pub fn cloud_map_image(map: &CloudMap) -> Image {
 
 fn volume(size: usize, data: Vec<u8>) -> Image {
     let (data, levels) = mip_chain(size, data);
-    let mut image = Image::new(
+    // `Image::new` asserts the data is the base level alone; this holds the mip chain.
+    let mut image = Image::new_uninit(
         Extent3d {
             width: size as u32,
             height: size as u32,
             depth_or_array_layers: size as u32,
         },
         TextureDimension::D3,
-        data,
         TextureFormat::R8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
+    image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;
     image
 }
