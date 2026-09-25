@@ -260,6 +260,8 @@ pub struct Air {
     pub wind: DVec3,
     /// Full-throttle engine torque relative to standard conditions (SAE J1349).
     pub engine: f64,
+    /// Pressure, hPa.
+    pub pressure: f64,
 }
 
 /// Sunlight at the track, W/m².
@@ -824,6 +826,7 @@ impl Weather {
                 density: self.density,
                 wind: DVec3::ZERO,
                 engine: self.engine,
+                pressure: self.pressure,
             };
         }
         let base = self.road.as_ref().map_or(0.0, RoadTemperature::base_height);
@@ -837,6 +840,7 @@ impl Weather {
             density: self.density,
             wind: (dir * speed).extend(0.0),
             engine: self.engine,
+            pressure: self.pressure,
         }
     }
 

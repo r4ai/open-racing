@@ -8,8 +8,12 @@
 //!   anti-roll bar and bump stops; an unsprung mass on the strut; a tyre with
 //!   vertical stiffness/damping against the road surface.
 //! - Tyres: transient slips via relaxation length, Magic Formula combined forces,
-//!   grip scaled by inflation pressure, tread temperature and wear.
+//!   grip scaled by load, sliding speed, inflation pressure, tread temperature and wear;
+//!   camber follows the suspension's travel.
 //! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly.
+//! - Aerodynamics: elements (body, wings, floor) whose coefficients follow their angle
+//!   of attack (the car's pitch), the floor's ride height under them, the
+//!   sideslip and the damage the car has taken.
 
 use std::sync::Arc;
 
@@ -17,8 +21,9 @@ use glam::{DMat3, DQuat, DVec3};
 
 use crate::controls::Controls;
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
+use crate::engine::{Ambient, STANDARD_PRESSURE};
 use crate::evolution::TrackEvolution;
-use crate::params::{CarModel, SteeringParams};
+use crate::params::{CarModel, DAMAGE_ZONES, SteeringParams, lookup};
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
 use crate::weather::Weather;
@@ -40,6 +45,10 @@ const TRAIL_REVERSAL_SPEED: f64 = 0.5;
 /// How far the air around a tyre is from the air temperature towards the road's: the
 /// air in the first centimetres over sunlit asphalt is well above the air temperature.
 const NEAR_ROAD_AIR: f64 = 0.2;
+/// Impact speed into a wall that leaves no damage, m/s.
+const DAMAGE_THRESHOLD: f64 = 2.0;
+/// Pa per hPa.
+const HECTOPASCAL: f64 = 100.0;
 /// Standard weather for [`Car::step_evolving`], a static so that no step builds and
 /// drops a copy of it.
 static STANDARD_WEATHER: Weather = Weather::STANDARD;
@@ -79,6 +88,9 @@ pub struct CarState {
     pub angular_velocity: DVec3,
     pub wheels: [WheelState; 4],
     pub drivetrain: DrivetrainState,
+    /// Impact damage per zone of the body (front, rear, left, right): the speed of the
+    /// hits into walls in that direction beyond a light touch, summed, m/s.
+    pub damage: [f64; DAMAGE_ZONES],
     /// Simulated time in s.
     pub time: f64,
 }
@@ -144,6 +156,8 @@ pub struct Telemetry {
     /// Aerodynamic downforce, front / rear, N.
     pub downforce: [f64; 2],
     pub drag: f64,
+    /// Ride height of the floor at the front / rear axle, m.
+    pub ride_height: [f64; 2],
     /// Speed into a wall or the run-off barrier taken away by a hit this step, m/s
     /// (0 without an impact).
     pub barrier_impact: f64,
@@ -169,6 +183,7 @@ impl Car {
                 angular_velocity: DVec3::ZERO,
                 wheels: [WheelState::default(); 4],
                 drivetrain: DrivetrainState::new(&model.params, gear),
+                damage: [0.0; DAMAGE_ZONES],
                 time: 0.0,
             },
             telemetry: Telemetry::default(),
@@ -205,6 +220,7 @@ impl Car {
         if ratio != 0.0 {
             drivetrain.input_speed = wheel_spin * ratio;
         }
+        drivetrain.engine = m.engine.settled(drivetrain.rpm(), 0.0);
 
         self.state = CarState {
             position: surface + normal * m.params.cg_height,
@@ -213,6 +229,7 @@ impl Car {
             angular_velocity: DVec3::ZERO,
             wheels,
             drivetrain,
+            damage: [0.0; DAMAGE_ZONES],
             time: 0.0,
         };
         self.telemetry = Telemetry::default();
@@ -289,6 +306,8 @@ impl Car {
         let mut contact_body = [DVec3::ZERO; 4];
         let mut road_torque = [0.0; 4];
         let mut steering_torque = 0.0;
+        // Tyre deflection, m (negative: the tyre is off the ground by that much).
+        let mut deflection = [0.0; 4];
         // Closest any wheel comes to the run-off barrier, m.
         let mut barrier_clearance = f64::INFINITY;
 
@@ -310,6 +329,7 @@ impl Car {
             let n = q.normal;
             let height = (center - q.surface_point).dot(n);
             let penetration = tp.radius - height;
+            deflection[i] = penetration;
             let pressure = w.tire.pressure(axle.pressure);
             let fz = if penetration > 0.0 {
                 (tire.vertical_stiffness(pressure) * penetration
@@ -322,7 +342,9 @@ impl Car {
             // Wheel frame projected onto the road.
             let delta = steer[i];
             let (sd, cd) = delta.sin_cos();
-            let (sc, cc) = axle.static_camber.sin_cos();
+            let camber =
+                axle.static_camber + axle.camber_gain * (corner.static_extension - w.extension);
+            let (sc, cc) = camber.sin_cos();
             let forward = rot * DVec3::new(cd, sd, 0.0);
             let axis = rot * DVec3::new(-sd * cc, cd * cc, -corner.side * sc);
             let long = (forward - n * forward.dot(n)).normalize();
@@ -352,12 +374,15 @@ impl Car {
             let camber_grip =
                 (1.0 - tp.camber_grip_loss * (inclination - optimal).powi(2)).max(0.5);
             let alpha_eff = w.alpha - tp.camber_thrust * inclination;
+            // Speed at which the contact patch slides over the road.
+            let slide_speed = (slip_vel * slip_vel + vy * vy).sqrt();
             // Lateral force towards the centreline per unit load, from the pure-slip curve.
             let inward_force = -corner.side * tp.mu_y * tire.lat.eval(alpha_eff);
             let tread_load = tire.tread_load(corner.side * inclination, inward_force, pressure);
             let mu = q.grip
                 * evolution.grip_at(q.surface, q.s, q.d)
                 * camber_grip
+                * tire.slide_grip(slide_speed)
                 * tire.condition_grip(&w.tire, &tread_load, pressure);
             let mut f = tire.forces(w.kappa, alpha_eff, fz, mu, pressure);
             // The pneumatic trail lies behind the patch's middle in the direction the
@@ -384,8 +409,6 @@ impl Car {
                 f.fy = (f.fy - damping * vy).clamp(-limit_y, limit_y);
             }
 
-            // Speed at which the contact patch slides over the road.
-            let slide_speed = (slip_vel * slip_vel + vy * vy).sqrt();
             if fz > 0.0 {
                 let shed = w
                     .tire
@@ -449,13 +472,18 @@ impl Car {
         let drive = drivetrain::step(
             &mut st.drivetrain,
             p,
+            &model.engine,
             &DriveInput {
                 throttle: c.throttle,
                 brake: c.brake,
                 clutch_pedal: c.clutch,
                 shift: c.shift,
                 selector: c.selector,
-                power: air.engine,
+                air: Ambient {
+                    pressure: air.pressure * HECTOPASCAL,
+                    temperature: air.temperature,
+                    charge: air.engine * STANDARD_PRESSURE / (air.pressure * HECTOPASCAL),
+                },
                 wheel_speed: st.wheels.map(|w| w.spin),
                 wheel_torque: road_torque,
                 wheel_inertia: [0, 1, 2, 3].map(|i| model.axle(i).wheel_inertia),
@@ -526,21 +554,58 @@ impl Car {
         // Airspeed: the car's velocity through the moving air.
         let v_body = rot_t * (st.velocity - air.wind);
         let q_dyn = 0.5 * air.density * v_body.x * v_body.x;
-        let downforce = [
-            q_dyn * p.aero.downforce_area_front,
-            q_dyn * p.aero.downforce_area_rear,
-        ];
-        let drag = -0.5 * air.density * p.aero.drag_area * v_body.length() * v_body;
-        let drag_point = DVec3::new(0.0, 0.0, p.aero.drag_height);
-        force += drag;
-        torque += drag_point.cross(drag);
-        for (k, &fd) in downforce.iter().enumerate() {
-            let f = DVec3::new(0.0, 0.0, -fd);
-            force += f;
-            torque += model.corners[k * 2].hardpoint.with_y(0.0).cross(f);
+        let mut downforce = [0.0; 2];
+        // Drag per m² of drag area.
+        let drag_unit = -0.5 * air.density * v_body.length() * v_body;
+        let mut drag = DVec3::ZERO;
+        let ride = ride_heights(model, st, &deflection);
+        {
+            let (front_x, rear_x) = (model.corners[FL].hardpoint.x, model.corners[RL].hardpoint.x);
+            let wheelbase = front_x - rear_x;
+            let [front_static, rear_static] = p.aero.ride_height;
+            // Nose down positive, from the attitude at rest.
+            let pitch = ((ride[1] - ride[0]) - (rear_static - front_static)) / wheelbase;
+            let sideslip = if v_body.x.abs() > 1.0 {
+                (v_body.y / v_body.x.abs()).atan().abs()
+            } else {
+                0.0
+            };
+            let damage = st.damage;
+            let intact = |loss: &[f64; DAMAGE_ZONES]| {
+                (1.0 - (0..DAMAGE_ZONES).map(|z| loss[z] * damage[z]).sum::<f64>()).max(0.0)
+            };
+            for e in &p.aero.elements {
+                // Where the element sits between the axles, 0 at the front, 1 at the rear.
+                let t = (front_x - e.position[0]) / wheelbase;
+                let height = (ride[0] + (ride[1] - ride[0]) * t).max(0.0);
+                let map = |table: &[(f64, f64)]| {
+                    if table.is_empty() {
+                        1.0
+                    } else {
+                        lookup(table, height)
+                    }
+                };
+                let aoa = e.angle + pitch;
+                let lift = q_dyn
+                    * e.area
+                    * lookup(&e.lift, aoa)
+                    * map(&e.height_lift)
+                    * (1.0 + e.yaw_lift * sideslip)
+                    * intact(&e.damage_lift);
+                let element_drag = drag_unit
+                    * (e.area * lookup(&e.drag, aoa) * map(&e.height_drag))
+                    * intact(&e.damage_drag);
+                let f = element_drag - DVec3::Z * lift;
+                force += f;
+                torque += DVec3::new(e.position[0], 0.0, e.position[1]).cross(f);
+                drag += element_drag;
+                downforce[0] += lift * (1.0 - t);
+                downforce[1] += lift * t;
+            }
         }
         tel.downforce = downforce;
         tel.drag = drag.length();
+        tel.ride_height = ride;
 
         let accel = DVec3::new(
             force.x / p.mass,
@@ -580,14 +645,48 @@ impl Car {
         st.time += dt;
 
         // ---- Walls and the barrier at the edge of the run-off --------------------------
-        tel.barrier_impact = collide(model, track, st, barrier_clearance);
+        let (impact, push) = collide(model, track, st, barrier_clearance);
+        tel.barrier_impact = impact;
+        if impact > DAMAGE_THRESHOLD {
+            // The wall is on the side the car was pushed away from.
+            let away = st.orientation.inverse() * push;
+            let zone = if away.x.abs() >= away.y.abs() {
+                if away.x < 0.0 { 0 } else { 1 }
+            } else if away.y < 0.0 {
+                2
+            } else {
+                3
+            };
+            st.damage[zone] += impact - DAMAGE_THRESHOLD;
+        }
     }
 }
 
+/// Ride height of the floor at the front / rear axle: the static ride height raised by
+/// how far the springs have extended and lowered by how far the tyres are deflected,
+/// from rest.
+fn ride_heights(model: &CarModel, st: &CarState, deflection: &[f64; 4]) -> [f64; 2] {
+    let lift = |i: usize| {
+        let c = &model.corners[i];
+        (st.wheels[i].extension - c.static_extension) - (deflection[i] - c.static_deflection)
+    };
+    let [front, rear] = model.params.aero.ride_height;
+    [
+        front + 0.5 * (lift(0) + lift(1)),
+        rear + 0.5 * (lift(2) + lift(3)),
+    ]
+}
+
 /// Pushes the car back so no wheel is inside a wall or beyond the run-off barrier, and
-/// takes away the speed into it. Returns that speed, m/s (0 without an impact).
+/// takes away the speed into it. Returns that speed, m/s (0 without an impact), and the
+/// direction the car was pushed (world).
 /// `barrier_clearance` is how far inside the barrier the wheels were before the step.
-fn collide(model: &CarModel, track: &Track, st: &mut CarState, barrier_clearance: f64) -> f64 {
+fn collide(
+    model: &CarModel,
+    track: &Track,
+    st: &mut CarState,
+    barrier_clearance: f64,
+) -> (f64, DVec3) {
     let rot = DMat3::from_quat(st.orientation);
     let mut push = DVec3::ZERO;
     let mut depth = 0.0;
@@ -610,19 +709,19 @@ fn collide(model: &CarModel, track: &Track, st: &mut CarState, barrier_clearance
         }
     }
     if depth <= 0.0 {
-        return 0.0;
+        return (0.0, push);
     }
     st.position += push * depth;
     let outward = -st.velocity.dot(push);
     if outward <= 0.0 {
-        return 0.0;
+        return (0.0, push);
     }
     // Inelastic hit; friction against the barrier scrubs speed along it.
     let impulse = (1.0 + BARRIER_RESTITUTION) * outward;
     let along = st.velocity + push * outward;
     let scrub = (BARRIER_FRICTION * impulse / along.length().max(1e-9)).min(1.0);
     st.velocity = push * (BARRIER_RESTITUTION * outward) + along * (1.0 - scrub);
-    outward
+    (outward, push)
 }
 
 /// Torque about a front wheel's steering axis, positive turning it left, from the

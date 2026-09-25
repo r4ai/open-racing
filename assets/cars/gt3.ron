@@ -24,6 +24,7 @@
         droop_travel: 0.070,
         bump_stop_rate: 1000000.0,
         static_camber: -0.061,       // -3.5 deg
+        camber_gain: -0.5,           // double wishbones: ~0.3 deg more negative per cm of bump
     ),
 
     rear: (
@@ -39,6 +40,7 @@
         droop_travel: 0.070,
         bump_stop_rate: 1000000.0,
         static_camber: -0.044,       // -2.5 deg
+        camber_gain: -0.4,
     ),
 
     steering: (
@@ -96,10 +98,45 @@
         coast_ramp: 0.25,
     ),
 
+    // At rest and 0 pitch the elements give 1.2 / 1.8 m² of downforce area front / rear
+    // and 0.85 m² of drag area. The splitter and the floor work in ground
+    // effect (most downforce a little below the static ride height, stalling lower); the
+    // wing follows its angle of attack, which the car's pitch changes.
     aero: (
-        drag_area: 0.85,
-        downforce_area_front: 1.2,
-        downforce_area_rear: 1.8,
-        drag_height: 0.10,
+        ride_height: (0.065, 0.090),
+        elements: [
+            (name: "body", position: (0.0, 0.10), area: 0.57, lift: [(0.0, 0.0)], drag: [(0.0, 1.0)]),
+            (
+                name: "splitter",
+                position: (2.10, -0.36),
+                area: 1.0,
+                lift: [(-0.1, 0.75), (0.0, 1.03), (0.1, 1.25)],
+                drag: [(-0.1, 0.04), (0.0, 0.05), (0.1, 0.07)],
+                height_lift: [(0.0, 0.95), (0.02, 1.12), (0.059, 1.0), (0.1, 0.8), (0.2, 0.6)],
+                yaw_lift: -0.3,
+                damage_lift: (0.03, 0.0, 0.01, 0.01),
+            ),
+            (
+                name: "floor",
+                position: (-0.20, -0.35),
+                area: 3.0,
+                lift: [(-0.05, 0.21), (0.0, 0.257), (0.05, 0.30)],
+                drag: [(0.0, 0.0167)],
+                height_lift: [(0.02, 0.7), (0.045, 1.15), (0.0806, 1.0), (0.12, 0.82), (0.25, 0.55)],
+                yaw_lift: -0.3,
+                damage_lift: (0.005, 0.01, 0.01, 0.01),
+            ),
+            (
+                name: "rear wing",
+                position: (-2.00, 0.80),
+                area: 0.9,
+                angle: 0.14,             // 8 deg
+                lift: [(-0.1, 0.55), (0.0, 0.95), (0.14, 1.333), (0.25, 1.6), (0.35, 1.55)],
+                drag: [(-0.1, 0.07), (0.0, 0.1), (0.14, 0.2), (0.25, 0.3), (0.35, 0.45)],
+                yaw_lift: -0.5,
+                damage_lift: (0.0, 0.04, 0.005, 0.005),
+                damage_drag: (0.0, 0.02, 0.0, 0.0),
+            ),
+        ],
     ),
 )

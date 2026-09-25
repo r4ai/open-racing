@@ -7,6 +7,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::GRAVITY;
+use crate::engine::EngineModel;
 use crate::tire::{TireModel, TireParams};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +35,11 @@ pub struct AxleParams {
     pub bump_stop_rate: f64,
     /// Static camber in radians, negative = top leaning inwards.
     pub static_camber: f64,
+    /// Camber change per metre of bump travel from the static ride height, rad/m
+    /// (negative: the wheel gains negative camber as it rises, as on double wishbones
+    /// whose arms converge inboard).
+    #[serde(default)]
+    pub camber_gain: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +106,69 @@ pub struct EngineParams {
     /// below `idle_rpm`, up to `idle_authority`, rpm.
     #[serde(default = "default_idle_band_rpm")]
     pub idle_band_rpm: f64,
+    /// Swept volume, l. Estimated from the torque curve when left out.
+    #[serde(default)]
+    pub displacement: Option<f64>,
+    /// Volume of the intake manifold behind the throttle, l. 1.5 × the displacement
+    /// when left out.
+    #[serde(default)]
+    pub manifold_volume: Option<f64>,
+    /// How the pedal works the throttle.
+    #[serde(default)]
+    pub throttle: ThrottleKind,
+    /// Turbocharger, if any. The torque curve is then the engine's without boost (the
+    /// manifold at atmospheric pressure); the boost adds to it.
+    #[serde(default)]
+    pub turbo: Option<TurboParams>,
+}
+
+/// How the pedal works the throttle plate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum ThrottleKind {
+    /// A control unit opens the plate by a motor so that the torque follows the pedal
+    /// evenly.
+    #[default]
+    DriveByWire,
+    /// The pedal turns the plate directly: a butterfly uncovers most of the air a low
+    /// engine speed needs early in its travel.
+    Cable,
+}
+
+/// An exhaust-driven turbocharger with a wastegate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TurboParams {
+    /// Boost at which the wastegate holds the pressure ahead of the throttle, bar (gauge).
+    pub max_boost: f64,
+    /// Engine speed at which the exhaust at full throttle spins the turbo up to
+    /// `max_boost` with the wastegate shut, rpm: the turbine's size.
+    pub reference_rpm: f64,
+    /// Time the shaft takes to spool up at the reference flow, s: its inertia.
+    #[serde(default = "default_spool_time")]
+    pub spool_time: f64,
+    /// How steeply the boost the exhaust can give grows with the air flow: the steady
+    /// compressor work goes with the flow raised to this.
+    #[serde(default = "default_flow_exponent")]
+    pub flow_exponent: f64,
+    /// Boost range over which the wastegate goes from shut to fully open, bar.
+    #[serde(default = "default_wastegate_band")]
+    pub wastegate_band: f64,
+    /// Whether a blow-off valve vents the boost when the throttle shuts, so the shaft
+    /// keeps spinning.
+    #[serde(default = "default_blow_off_valve")]
+    pub blow_off_valve: bool,
+}
+
+fn default_spool_time() -> f64 {
+    0.4
+}
+fn default_flow_exponent() -> f64 {
+    2.0
+}
+fn default_wastegate_band() -> f64 {
+    0.1
+}
+fn default_blow_off_valve() -> bool {
+    true
 }
 
 fn default_idle_authority() -> f64 {
@@ -383,15 +452,52 @@ impl Drive {
     }
 }
 
+/// The car's aerodynamics: the body, wings, splitter and floor, each an element whose
+/// forces follow the car's attitude.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AeroParams {
-    /// Drag coefficient × frontal area, m².
-    pub drag_area: f64,
-    /// Downforce coefficient × area at the front / rear axle, m².
-    pub downforce_area_front: f64,
-    pub downforce_area_rear: f64,
-    /// Height of the centre of pressure above the CG, m.
-    pub drag_height: f64,
+    /// Ride height of the floor at the front / rear axle at rest, m: where the elements'
+    /// ride-height maps are read at static ride height.
+    pub ride_height: [f64; 2],
+    pub elements: Vec<AeroElement>,
+}
+
+/// Damage zones of the body, in the order of [`crate::CarState::damage`].
+pub const DAMAGE_ZONES: usize = 4;
+
+/// One aerodynamic element: a wing, the floor or the body.
+///
+/// Its downforce is `q · area · lift(angle of attack) · height_lift(ride height)` and its
+/// drag likewise, where the angle of attack is its setup `angle` plus the car's pitch
+/// (nose down positive) and the ride height is the floor's height under it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AeroElement {
+    pub name: String,
+    /// Centre of pressure relative to the CG at static ride height: forward, up, m.
+    pub position: [f64; 2],
+    /// Reference area, m².
+    pub area: f64,
+    /// Angle of attack at rest, rad.
+    #[serde(default)]
+    pub angle: f64,
+    /// Downforce and drag coefficients against the angle of attack (rad), ascending.
+    pub lift: Vec<(f64, f64)>,
+    pub drag: Vec<(f64, f64)>,
+    /// Multipliers of the downforce and drag coefficients against the ride height at
+    /// the element (m), ascending; none when left out.
+    #[serde(default)]
+    pub height_lift: Vec<(f64, f64)>,
+    #[serde(default)]
+    pub height_drag: Vec<(f64, f64)>,
+    /// Relative change of the downforce per radian of sideslip.
+    #[serde(default)]
+    pub yaw_lift: f64,
+    /// Share of the downforce / drag lost per m/s of impact damage in each zone (front,
+    /// rear, left, right).
+    #[serde(default)]
+    pub damage_lift: [f64; DAMAGE_ZONES],
+    #[serde(default)]
+    pub damage_drag: [f64; DAMAGE_ZONES],
 }
 
 /// Complete description of a car, deserialised from `assets/cars/*.ron`.
@@ -586,6 +692,36 @@ impl CarParams {
             (0.0..=1.0).contains(&self.drive.front_share()),
             "drive: front_share must be in 0..1",
         )?;
+        check(
+            self.engine.displacement.is_none_or(|v| v > 0.0)
+                && self.engine.manifold_volume.is_none_or(|v| v > 0.0),
+            "engine displacement and manifold_volume must be positive",
+        )?;
+        check(
+            self.engine.turbo.as_ref().is_none_or(|t| {
+                t.max_boost > 0.0
+                    && t.reference_rpm > 0.0
+                    && t.spool_time > 0.0
+                    && t.flow_exponent > 0.0
+                    && t.wastegate_band > 0.0
+            }),
+            "turbo: max_boost, reference_rpm, spool_time, flow_exponent and wastegate_band \
+             must be positive",
+        )?;
+        let ascending = |t: &[(f64, f64)]| t.windows(2).all(|w| w[0].0 < w[1].0);
+        check(
+            self.aero.elements.iter().all(|e| {
+                e.area >= 0.0
+                    && !e.lift.is_empty()
+                    && !e.drag.is_empty()
+                    && ascending(&e.lift)
+                    && ascending(&e.drag)
+                    && ascending(&e.height_lift)
+                    && ascending(&e.height_drag)
+            }),
+            "aero elements need a non-negative area and ascending, non-empty lift and drag \
+             tables",
+        )?;
         let sprung = self.mass - 2.0 * (self.front.unsprung_mass + self.rear.unsprung_mass);
         check(sprung > 0.0, "unsprung mass exceeds total mass")
     }
@@ -606,6 +742,8 @@ pub struct CornerModel {
     pub spring_free_extension: f64,
     pub min_extension: f64,
     pub max_extension: f64,
+    /// Tyre deflection under the static load, m.
+    pub static_deflection: f64,
 }
 
 /// Simulation-ready car: validated params plus derived constants.
@@ -616,6 +754,7 @@ pub struct CarModel {
     pub corners: [CornerModel; 4],
     pub front_tire: TireModel,
     pub rear_tire: TireModel,
+    pub engine: EngineModel,
 }
 
 impl CarModel {
@@ -626,6 +765,18 @@ impl CarModel {
         rear_tire: TireParams,
     ) -> Result<Self, ParamsError> {
         params.validate()?;
+        for tire in [&front_tire, &rear_tire] {
+            let curve = &tire.thermal.grip_curve;
+            if curve.is_empty()
+                || curve.iter().any(|g| g.1 <= 0.0)
+                || curve.windows(2).any(|w| w[0].0 >= w[1].0)
+                || tire.thermal.wear_window <= 0.0
+            {
+                return Err(ParamsError::Invalid(
+                    "tyre grip_curve must be ascending with positive grip, wear_window positive",
+                ));
+            }
+        }
         let p = &params;
         let unsprung_total = 2.0 * (p.front.unsprung_mass + p.rear.unsprung_mass);
         let sprung_mass = p.mass - unsprung_total;
@@ -662,6 +813,7 @@ impl CarModel {
                 spring_free_extension: static_extension + spring_load / axle.spring_rate,
                 min_extension: static_extension - axle.bump_travel,
                 max_extension: static_extension + axle.droop_travel,
+                static_deflection: tire_deflection,
             }
         };
 
@@ -674,6 +826,7 @@ impl CarModel {
         Ok(Self {
             sprung_mass,
             corners,
+            engine: EngineModel::new(&p.engine),
             front_tire: TireModel::new(front_tire),
             rear_tire: TireModel::new(rear_tire),
             params,

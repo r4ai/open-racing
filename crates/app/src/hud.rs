@@ -148,9 +148,14 @@ fn update(
     let _ = writeln!(s, "input: {} (Tab)", selection.label(&pads));
     let _ = writeln!(
         s,
-        "{:5.0} km/h   gear {gear}   {:5.0} rpm{}",
+        "{:5.0} km/h   gear {gear}   {:5.0} rpm   {}{}",
         car.speed() * 3.6,
         dt.rpm(),
+        if car.model.engine.turbocharged() {
+            format!("boost {:+.2} bar", dt.engine.boost / 1e5)
+        } else {
+            format!("manifold {:.2} bar", dt.engine.manifold_pressure / 1e5)
+        },
         if dt.stalled {
             "   ENGINE STALLED (I)"
         } else if dt.grinding {
@@ -235,12 +240,25 @@ fn update(
     let a = car.telemetry.acceleration;
     let _ = write!(
         s,
-        "g long {:+.2}  lat {:+.2}   FFB {:+5.1} Nm   downforce {:.0} N",
+        "g long {:+.2}  lat {:+.2}   FFB {:+5.1} Nm   downforce {:.0} N ({:.0} % front)   ride {:.0}/{:.0} mm",
         a.x / 9.81,
         a.y / 9.81,
         car.telemetry.steering_torque,
-        car.telemetry.downforce[0] + car.telemetry.downforce[1]
+        car.telemetry.downforce[0] + car.telemetry.downforce[1],
+        100.0 * car.telemetry.downforce[0]
+            / (car.telemetry.downforce[0] + car.telemetry.downforce[1]).max(1.0),
+        car.telemetry.ride_height[0] * 1e3,
+        car.telemetry.ride_height[1] * 1e3
     );
+    let damage = car.state.damage;
+    if damage.iter().any(|&d| d > 0.0) {
+        let _ = write!(
+            s,
+            "
+damage front {:.0}  rear {:.0}  left {:.0}  right {:.0}",
+            damage[0], damage[1], damage[2], damage[3]
+        );
+    }
     if !ffb.cut.is_empty() {
         let _ = write!(
             s,

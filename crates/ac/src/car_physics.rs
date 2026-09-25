@@ -13,9 +13,11 @@
 use std::f64::consts::PI;
 use std::path::Path;
 
-use open_racing_sim::params::DifferentialParams;
+use open_racing_sim::params::{DAMAGE_ZONES, DifferentialParams};
 use open_racing_sim::tire::TireParams;
-use open_racing_sim::{AntiStall, CarParams, Drive, ElectronicsParams, GearboxKind};
+use open_racing_sim::{
+    AeroElement, AntiStall, CarParams, Drive, ElectronicsParams, GearboxKind, TurboParams,
+};
 
 use crate::ini::{self, Section};
 use crate::json::Value;
@@ -44,6 +46,11 @@ const AWD_FRONT_DIFFERENTIAL: DifferentialParams = DifferentialParams {
 };
 /// Margin of the limiter-limited top speed in top gear over the car's stated top speed.
 const TOP_SPEED_MARGIN: f64 = 1.03;
+/// The game's physics rate, Hz: its turbo lag is a filter applied at each of its steps.
+const GAME_RATE: f64 = 333.0;
+/// Pressure offset at which a tyre's pressure-grip window is fitted to the game's linear
+/// grip loss, bar.
+const PRESSURE_FIT: f64 = 0.25;
 
 /// Wheel centres (body axes, the model's origin), tyre radii and widths from the 3D model,
 /// in the simulation's wheel order.
@@ -315,6 +322,14 @@ impl Physics {
                 m * (w * w + l * l),
             ];
         }
+        // Ride heights at the front and rear pickup points, which the aero maps read.
+        if let (Some(front), Some(rear)) = (
+            get("RIDE", "PICKUP_FRONT_HEIGHT"),
+            get("RIDE", "PICKUP_REAR_HEIGHT"),
+        ) && [front, rear].iter().all(|h| (0.01..0.4).contains(h))
+        {
+            self.params.aero.ride_height = [front, rear];
+        }
         let st = &mut self.params.steering;
         if let Some(lock) = get("CONTROLS", "STEER_LOCK").filter(|l| *l > 0.0) {
             st.lock = lock.to_radians();
@@ -358,6 +373,9 @@ impl Physics {
             }
             if let Some(v) = get("STATIC_CAMBER") {
                 axle.static_camber = v.to_radians();
+            }
+            if let Some(gain) = ini::section(s, sec).and_then(camber_gain) {
+                axle.camber_gain = gain;
             }
             if let Some(v) = get("HUB_MASS").filter(|v| *v > 0.0) {
                 axle.unsprung_mass = v;
@@ -420,9 +438,42 @@ impl Physics {
             if let Some(v) = get("FZ0").filter(|v| *v > 0.0) {
                 tire.nominal_load = v;
             }
-            // μ ∝ (load / FZ0)^(LS_EXPY − 1).
-            if let Some(v) = get("LS_EXPY").filter(|v| (0.0..=1.0).contains(v)) {
-                tire.load_sensitivity = v - 1.0;
+            // μ ∝ (load / FZ0)^(LS_EXP − 1).
+            if let Some(v) = get("LS_EXPY").filter(|v| (0.0..=1.2).contains(v)) {
+                tire.load_exponent_y = v;
+            }
+            if let Some(v) = get("LS_EXPX").filter(|v| (0.0..=1.2).contains(v)) {
+                tire.load_exponent_x = v;
+            }
+            // Grip left far past the peak: the Magic Formula tends to sin(C·π/2).
+            if let Some(level) = get("FALLOFF_LEVEL").filter(|v| (0.3..1.0).contains(v)) {
+                let shape = (2.0 - 2.0 * level.asin() / PI).clamp(1.05, 1.95);
+                tire.lateral.shape = shape;
+                tire.longitudinal.shape = shape;
+            }
+            if let Some(v) = get("SPEED_SENSITIVITY").filter(|v| (0.0..0.1).contains(v)) {
+                tire.speed_sensitivity = v;
+            }
+            // Camber grip 1 + D0·γ + D1·γ², a parabola peaking at −D0 / 2·D1.
+            if let (Some(d0), Some(d1)) = (get("DCAMBER_0"), get("DCAMBER_1"))
+                && d1 < 0.0
+            {
+                let best = (-d0 / (2.0 * d1)).abs().min(0.1);
+                tire.optimal_camber = -best;
+                tire.camber_grip_loss = -d1 / (1.0 + d0.abs() * best + d1 * best * best);
+            }
+            if let Some(v) = get("PRESSURE_SPRING_GAIN").filter(|v| *v > 0.0) {
+                tire.pressure.stiffness_per_bar = v / PSI;
+            }
+            // Grip lost per psi off the ideal pressure: the window is fitted to lose as
+            // much a quarter of a bar off.
+            if let Some(v) = get("PRESSURE_D_GAIN").filter(|v| (0.0..0.2).contains(v))
+                && v > 0.0
+            {
+                let pp = &mut tire.pressure;
+                let loss = (v * PRESSURE_FIT / PSI).min(0.5);
+                pp.grip_loss = pp.grip_loss.max(1.5 * loss).min(0.75);
+                pp.window = PRESSURE_FIT / (-(1.0 - loss / pp.grip_loss).ln()).sqrt();
             }
             if let Some(v) = get("FRICTION_LIMIT_ANGLE").filter(|v| (1.0..20.0).contains(v)) {
                 tire.lateral.peak_slip = v.to_radians();
@@ -448,31 +499,26 @@ impl Physics {
                 .and_then(|t| t.get("PERFORMANCE_CURVE"))
                 .map(table)
                 .unwrap_or_default();
-            if let Some(&(temp, _)) = curve.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
-                tire.thermal.optimal_temperature = temp;
+            if curve.len() >= 2 && curve.iter().all(|g| g.1 > 0.0) {
+                tire.thermal.grip_curve = curve;
             }
         }
     }
 
     fn apply_engine(&mut self, s: &[Section], table: &dyn Fn(&str) -> Vec<(f64, f64)>) {
         let get = |sec: &str, key: &str| ini::section(s, sec)?.get_f64(key);
-        let boost: f64 = s
-            .iter()
-            .filter(|sec| sec.name.to_ascii_uppercase().starts_with("TURBO_"))
-            .filter_map(|sec| sec.get_f64("MAX_BOOST"))
-            .sum();
+        // The game's curve is the engine without boost, as open-racing's is.
         let curve: Vec<(f64, f64)> = ini::section(s, "HEADER")
             .and_then(|h| h.get("POWER_CURVE"))
             .map(table)
             .unwrap_or_default()
             .into_iter()
             .filter(|&(rpm, nm)| rpm > 0.0 && nm > 0.0)
-            // Turbochargers add their boost; the curve is taken at full boost.
-            .map(|(rpm, nm)| (rpm, nm * (1.0 + boost.max(0.0))))
             .collect();
         if curve.len() >= 2 {
             self.set_torque_curve(curve);
         }
+        self.apply_turbos(s);
         let e = &mut self.params.engine;
         if let Some(v) = get("ENGINE_DATA", "LIMITER").filter(|v| *v > 1000.0) {
             e.limiter_rpm = v;
@@ -491,6 +537,54 @@ impl Physics {
             let top = e.limiter_rpm.max(rpm) * 1.05;
             e.drag_curve = vec![(0.0, 0.15 * nm), (rpm, nm), (top, nm * top / rpm)];
         }
+    }
+
+    /// The game's turbochargers (`[TURBO_n]`) as one: their boosts, capped by their
+    /// wastegates, add up; the reference speed, response and lag are averaged, weighted
+    /// by boost. The game's lag is a filter per step of its physics.
+    fn apply_turbos(&mut self, s: &[Section]) {
+        // Each turbocharger's section and its boost, capped by its wastegate.
+        let turbos: Vec<(&Section, f64)> = s
+            .iter()
+            .filter(|sec| sec.name.to_ascii_uppercase().starts_with("TURBO_"))
+            .filter_map(|t| {
+                let max = t.get_f64("MAX_BOOST").filter(|b| *b > 0.0)?;
+                let gate = t.get_f64("WASTEGATE").filter(|w| *w > 0.0).unwrap_or(max);
+                Some((t, max.min(gate)))
+            })
+            .collect();
+        let boost: f64 = turbos.iter().map(|t| t.1).sum();
+        if boost <= 0.0 {
+            return;
+        }
+        // Boost-weighted mean of `key` over the turbochargers that give a valid one.
+        let mean = |key: &str, valid: fn(f64) -> bool| {
+            let (sum, weight) = turbos
+                .iter()
+                .filter_map(|(t, b)| Some((t.get_f64(key).filter(|v| valid(*v))?, *b)))
+                .fold((0.0, 0.0), |(sum, weight), (v, b)| {
+                    (sum + v * b, weight + b)
+                });
+            (weight > 0.0).then(|| sum / weight)
+        };
+        let limiter = self.params.engine.limiter_rpm;
+        self.params.engine.turbo = Some(TurboParams {
+            max_boost: boost,
+            reference_rpm: mean("REFERENCE_RPM", |r| r > 0.0)
+                .unwrap_or(0.5 * limiter)
+                .clamp(0.1 * limiter, limiter),
+            spool_time: mean("LAG_UP", |l| (0.0..1.0).contains(&l))
+                .map_or(0.4, |l| 1.0 / (GAME_RATE * (1.0 - l)))
+                .clamp(0.05, 5.0),
+            flow_exponent: mean("GAMMA", |g| g > 0.0).unwrap_or(2.0).clamp(0.5, 5.0),
+            wastegate_band: (0.1 * boost).clamp(0.02, 0.2),
+            blow_off_valve: true,
+        });
+        self.note(format!(
+            "turbo: {} turbocharger(s) simulated as one with a wastegate at {boost:.2} bar, \
+             spooling from the exhaust flow",
+            turbos.len()
+        ));
     }
 
     fn apply_drivetrain(&mut self, s: &[Section], _: &dyn Fn(&str) -> Vec<(f64, f64)>) {
@@ -623,13 +717,11 @@ impl Physics {
         }
     }
 
-    /// Wings and the body, each an area with lift and drag coefficients at its angle,
-    /// become drag and downforce areas, the downforce split between the axles by where
-    /// each wing sits.
+    /// Wings and the body (`[WING_n]`) become aero elements: an area with lift and drag
+    /// coefficients against the angle of attack and multipliers against the ride height
+    /// under it, set at its angle, losing downforce with sideslip and damage.
     fn apply_aero(&mut self, s: &[Section], table: &dyn Fn(&str) -> Vec<(f64, f64)>) {
-        let p = &mut self.params;
-        let front_x = p.wheelbase * (1.0 - p.front_weight);
-        let (mut drag, mut front, mut rear, mut wings) = (0.0, 0.0, 0.0, 0);
+        let mut elements = Vec::new();
         for w in s
             .iter()
             .filter(|w| w.name.to_ascii_uppercase().starts_with("WING_"))
@@ -637,31 +729,114 @@ impl Physics {
             let (Some(chord), Some(span)) = (w.get_f64("CHORD"), w.get_f64("SPAN")) else {
                 continue;
             };
-            let angle = w.get_f64("ANGLE").unwrap_or(0.0);
-            let coefficient = |key: &str, gain: &str| {
-                let t = w.get(key).map(table).unwrap_or_default();
-                lut::lookup(&t, angle).unwrap_or(0.0) * w.get_f64(gain).unwrap_or(1.0)
+            // Tables against the angle of attack in degrees, scaled by the gain.
+            let by_angle = |key: &str, gain: &str| -> Vec<(f64, f64)> {
+                let gain = w.get_f64(gain).unwrap_or(1.0);
+                let t: Vec<(f64, f64)> = w
+                    .get(key)
+                    .map(table)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(deg, c)| (deg.to_radians(), c * gain))
+                    .collect();
+                if t.is_empty() { vec![(0.0, 0.0)] } else { t }
             };
-            let area = chord * span;
-            let x = w
-                .get_f64s("POSITION")
-                .and_then(|v| v.get(2).copied())
-                .unwrap_or(0.0);
-            let share = ((x - (front_x - p.wheelbase)) / p.wheelbase).clamp(0.0, 1.0);
-            let lift = area * coefficient("LUT_AOA_CL", "CL_GAIN");
-            drag += area * coefficient("LUT_AOA_CD", "CD_GAIN");
-            front += lift * share;
-            rear += lift * (1.0 - share);
-            wings += 1;
+            let by_height = |key: &str| w.get(key).map(table).unwrap_or_default();
+            // The game's damage is the impact speed in km/h; its zones' factors cost
+            // downforce and drag per unit of it.
+            let zones = |kind: &str| -> [f64; DAMAGE_ZONES] {
+                ["FRONT", "REAR", "LEFT", "RIGHT"].map(|zone| {
+                    w.get_f64(&format!("ZONE_{zone}_{kind}"))
+                        .map_or(0.0, |v| (v.abs() * 3.6).min(1.0))
+                })
+            };
+            let position = w.get_f64s("POSITION").unwrap_or_default();
+            let at = |k: usize| position.get(k).copied().unwrap_or(0.0);
+            elements.push(AeroElement {
+                name: w.get("NAME").unwrap_or(&w.name).to_string(),
+                // The game's axes: x left-right, y up, z forward, from the CG.
+                position: [at(2), at(1)],
+                area: chord * span,
+                angle: w.get_f64("ANGLE").unwrap_or(0.0).to_radians(),
+                lift: by_angle("LUT_AOA_CL", "CL_GAIN"),
+                drag: by_angle("LUT_AOA_CD", "CD_GAIN"),
+                height_lift: by_height("LUT_GH_CL"),
+                height_drag: by_height("LUT_GH_CD"),
+                yaw_lift: w.get_f64("YAW_CL_GAIN").unwrap_or(0.0),
+                damage_lift: zones("CL"),
+                damage_drag: zones("CD"),
+            });
         }
-        if wings > 0 && drag > 0.0 {
-            let a = &mut p.aero;
-            a.drag_area = drag;
-            // The game's lift is positive downwards; the simulation has no lift.
-            a.downforce_area_front = front.max(0.0);
-            a.downforce_area_rear = rear.max(0.0);
+        if elements.is_empty() {
+            return;
+        }
+        self.params.aero.elements = elements;
+        let skipped: Vec<&str> = ["FIN_", "DYNAMIC_CONTROLLER_"]
+            .into_iter()
+            .filter(|prefix| {
+                s.iter()
+                    .any(|sec| sec.name.to_ascii_uppercase().starts_with(prefix))
+            })
+            .collect();
+        if !skipped.is_empty() {
+            self.note(format!(
+                "aero: {} sections (fins, active aero) are not simulated",
+                skipped.join(", ")
+            ));
         }
     }
+}
+
+/// Camber change per metre of bump travel of a double-wishbone (`DWB`) or strut
+/// (`STRUT`) suspension, from its geometry in front view: the upright turns about the
+/// instant centre, where the arms' lines (or the lower arm's and the line square to the
+/// strut through its top) meet, so a wheel rising by dz turns by dz / the instant
+/// centre's distance inboard of the contact patch. The game's points are relative to
+/// the hub: x across, y up, z along the car.
+fn camber_gain(s: &Section) -> Option<f64> {
+    let point = |key: &str| -> Option<[f64; 2]> {
+        let v = s.get_f64s(key)?;
+        Some([*v.first()?, *v.get(1)?])
+    };
+    let mid = |a: &str, b: &str| -> Option<[f64; 2]> {
+        let (a, b) = (point(a)?, point(b)?);
+        Some([0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])])
+    };
+    let kind = s.get("TYPE")?.to_ascii_uppercase();
+    let lower = (
+        mid("WBCAR_BOTTOM_FRONT", "WBCAR_BOTTOM_REAR")?,
+        point("WBTYRE_BOTTOM")?,
+    );
+    // Second line: a point on it and its direction.
+    let (inner, outer, (origin, direction)) = match kind.as_str() {
+        "DWB" => {
+            let top = mid("WBCAR_TOP_FRONT", "WBCAR_TOP_REAR")?;
+            let tyre = point("WBTYRE_TOP")?;
+            (top[0], tyre[0], (top, [tyre[0] - top[0], tyre[1] - top[1]]))
+        }
+        "STRUT" => {
+            let (car, tyre) = (point("STRUT_CAR")?, point("STRUT_TYRE")?);
+            let axis = [car[0] - tyre[0], car[1] - tyre[1]];
+            (car[0], tyre[0], (car, [-axis[1], axis[0]]))
+        }
+        _ => return None,
+    };
+    // Inboard is the way from the upright's joints to the car's.
+    let inboard = if inner + lower.0[0] > outer + lower.1[0] {
+        1.0
+    } else {
+        -1.0
+    };
+    let d1 = [lower.1[0] - lower.0[0], lower.1[1] - lower.0[1]];
+    let det = d1[0] * direction[1] - d1[1] * direction[0];
+    if det.abs() < 1e-9 {
+        // Parallel arms: the upright moves without turning.
+        return Some(0.0);
+    }
+    let w = [origin[0] - lower.0[0], origin[1] - lower.0[1]];
+    let t = (w[0] * direction[1] - w[1] * direction[0]) / det;
+    let centre = inboard * (lower.0[0] + t * d1[0]);
+    Some((-1.0 / centre).clamp(-3.0, 3.0))
 }
 
 /// The first number in a text such as `1,400kg` or `270+km/h`, times the factor of the
@@ -736,20 +911,20 @@ pub(crate) mod tests {
         let files = [
             (
                 "car.ini",
-                "[BASIC]\nTOTALMASS=1200\nINERTIA=1.9,1.1,4.5\n[FUEL]\nFUEL=40\n[CONTROLS]\nSTEER_LOCK=360\nSTEER_RATIO=12\n",
+                "[BASIC]\nTOTALMASS=1200\nINERTIA=1.9,1.1,4.5\n[FUEL]\nFUEL=40\n[CONTROLS]\nSTEER_LOCK=360\nSTEER_RATIO=12\n[RIDE]\nPICKUP_FRONT_HEIGHT=0.06\nPICKUP_REAR_HEIGHT=0.09\n",
             ),
             (
                 "suspensions.ini",
-                "[BASIC]\nWHEELBASE=2.5\nCG_LOCATION=0.48\n[FRONT]\nTRACK=1.6\nSPRING_RATE=90000\nDAMP_BUMP=4000\nDAMP_REBOUND=7000\nSTATIC_CAMBER=-3\nHUB_MASS=40\nBASEY=-0.08\n[REAR]\nTRACK=1.58\nSPRING_RATE=100000\nBASEY=-0.07\n[ARB]\nFRONT=50000\nREAR=30000\n",
+                "[BASIC]\nWHEELBASE=2.5\nCG_LOCATION=0.48\n[FRONT]\nTYPE=DWB\nTRACK=1.6\nSPRING_RATE=90000\nDAMP_BUMP=4000\nDAMP_REBOUND=7000\nSTATIC_CAMBER=-3\nHUB_MASS=40\nBASEY=-0.08\nWBCAR_TOP_FRONT=0.3,0.12,0.15\nWBCAR_TOP_REAR=0.3,0.12,-0.15\nWBCAR_BOTTOM_FRONT=0.35,-0.1,0.2\nWBCAR_BOTTOM_REAR=0.35,-0.1,-0.2\nWBTYRE_TOP=0.05,0.15,0\nWBTYRE_BOTTOM=0.05,-0.1,0\n[REAR]\nTRACK=1.58\nSPRING_RATE=100000\nBASEY=-0.07\n[ARB]\nFRONT=50000\nREAR=30000\n",
             ),
             (
                 "tyres.ini",
-                "[FRONT]\nRADIUS=0.33\nWIDTH=0.28\nDY_REF=1.5\nDX_REF=1.55\nLS_EXPY=0.85\nFRICTION_LIMIT_ANGLE=7.5\nPRESSURE_STATIC=22\nPRESSURE_IDEAL=27\nANGULAR_INERTIA=1.3\n[THERMAL_FRONT]\nPERFORMANCE_CURVE=tcurve.lut\n[REAR]\nRADIUS=0.34\nWIDTH=0.3\n",
+                "[FRONT]\nRADIUS=0.33\nWIDTH=0.28\nDY_REF=1.5\nDX_REF=1.55\nLS_EXPY=0.85\nFRICTION_LIMIT_ANGLE=7.5\nPRESSURE_STATIC=22\nPRESSURE_IDEAL=27\nANGULAR_INERTIA=1.3\nLS_EXPX=0.8\nFALLOFF_LEVEL=0.8\nSPEED_SENSITIVITY=0.003\nDCAMBER_0=1.2\nDCAMBER_1=-13\nPRESSURE_D_GAIN=0.004\nPRESSURE_SPRING_GAIN=5000\n[THERMAL_FRONT]\nPERFORMANCE_CURVE=tcurve.lut\n[REAR]\nRADIUS=0.34\nWIDTH=0.3\n",
             ),
             ("tcurve.lut", "0|0.8\n85|1.0\n150|0.9\n"),
             (
                 "engine.ini",
-                "[HEADER]\nPOWER_CURVE=power.lut\n[ENGINE_DATA]\nLIMITER=7500\nMINIMUM=1200\nINERTIA=0.15\n[COAST_REF]\nRPM=7000\nTORQUE=70\n[TURBO_0]\nMAX_BOOST=0.5\n",
+                "[HEADER]\nPOWER_CURVE=power.lut\n[ENGINE_DATA]\nLIMITER=7500\nMINIMUM=1200\nINERTIA=0.15\n[COAST_REF]\nRPM=7000\nTORQUE=70\n[TURBO_0]\nMAX_BOOST=0.5\nWASTEGATE=0.4\nREFERENCE_RPM=4000\nGAMMA=2.5\nLAG_UP=0.99\n",
             ),
             ("power.lut", "0|0\n1000|200\n4000|300\n7500|250\n"),
             (
@@ -759,7 +934,7 @@ pub(crate) mod tests {
             ("brakes.ini", "[DATA]\nMAX_TORQUE=3000\nFRONT_SHARE=0.62\n"),
             (
                 "aero.ini",
-                "[WING_0]\nCHORD=1\nSPAN=2\nPOSITION=0,0,0\nLUT_AOA_CD=(|0=0.35|10=0.5|)\nLUT_AOA_CL=(|0=0.2|)\n[WING_1]\nCHORD=0.3\nSPAN=1.6\nPOSITION=0,0.9,-2.0\nANGLE=5\nLUT_AOA_CL=wing.lut\nLUT_AOA_CD=(|0=0.1|)\nCL_GAIN=1\n",
+                "[WING_0]\nCHORD=1\nSPAN=2\nPOSITION=0,0,0\nLUT_AOA_CD=(|0=0.35|10=0.5|)\nLUT_AOA_CL=(|0=0.2|)\nLUT_GH_CL=(|0.02=0.8|0.08=1.0|)\nZONE_FRONT_CL=0.01\n[WING_1]\nCHORD=0.3\nSPAN=1.6\nPOSITION=0,0.9,-2.0\nANGLE=5\nLUT_AOA_CL=wing.lut\nLUT_AOA_CD=(|0=0.1|)\nCL_GAIN=1\n",
             ),
             ("wing.lut", "0|1.0\n10|2.0\n"),
         ];
@@ -791,22 +966,58 @@ pub(crate) mod tests {
             (p.front.radius, p.front.mu_y, p.rear.width),
             (0.33, 1.5, 0.3)
         );
-        assert!((p.front.load_sensitivity + 0.15).abs() < 1e-12);
+        assert_eq!(
+            (p.front.load_exponent_x, p.front.load_exponent_y),
+            (0.8, 0.85)
+        );
+        let shape = 2.0 - 2.0 * 0.8f64.asin() / PI;
+        assert!((p.front.lateral.shape - shape).abs() < 1e-12);
+        assert_eq!(p.front.speed_sensitivity, 0.003);
+        assert!((p.front.optimal_camber + 1.2 / 26.0).abs() < 1e-12);
+        assert!((p.front.pressure.stiffness_per_bar - 5000.0 / PSI).abs() < 1e-6);
+        // A quarter of a bar off loses what the game's linear loss does there.
+        let pp = &p.front.pressure;
+        let lost = pp.grip_loss * (1.0 - (-(PRESSURE_FIT / pp.window).powi(2)).exp());
+        assert!((lost - 0.004 * PRESSURE_FIT / PSI).abs() < 1e-9);
+        assert_eq!(
+            p.front.thermal.grip_curve,
+            [(0.0, 0.8), (85.0, 1.0), (150.0, 0.9)]
+        );
+        // The arms meet 2.13 m inboard: the wheel gains 1 / 2.13 rad of negative camber
+        // per metre it rises. The rear has no geometry and keeps the base car's.
+        assert!(
+            (c.front.camber_gain + 0.3 / 0.64).abs() < 1e-9,
+            "{}",
+            c.front.camber_gain
+        );
+        assert_eq!(c.rear.camber_gain, base().params.rear.camber_gain);
         assert!((c.front.pressure - 22.0 * PSI).abs() < 1e-12);
-        assert_eq!(p.front.thermal.optimal_temperature, 85.0);
-        assert_eq!(c.engine.torque_curve[1], (4000.0, 450.0));
+        // The curve stays the engine's without boost; the turbo adds it.
+        assert_eq!(c.engine.torque_curve[1], (4000.0, 300.0));
+        let turbo = c.engine.turbo.as_ref().unwrap();
+        assert_eq!((turbo.max_boost, turbo.reference_rpm), (0.4, 4000.0));
+        assert!((turbo.spool_time - 1.0 / 3.33).abs() < 1e-9);
+        assert_eq!(turbo.flow_exponent, 2.5);
         assert_eq!((c.engine.limiter_rpm, c.engine.idle_rpm), (7500.0, 1200.0));
         assert_eq!(c.gearbox.ratios.len(), 5);
         assert_eq!((c.gearbox.reverse, c.gearbox.final_drive), (3.1, 3.9));
         assert_eq!(c.differential.preload, 60.0);
         assert_eq!((c.brakes.max_torque, c.brakes.front_bias), (6000.0, 0.62));
-        assert!((c.aero.drag_area - (2.0 * 0.35 + 0.48 * 0.1)).abs() < 1e-9);
-        // The rear wing sits behind the rear axle: all its 1.5 · 0.48 m² goes to the rear.
-        let body = 2.0 * 0.2;
-        let front_x: f64 = 2.5 * 0.52;
-        let share = ((0.0 - (front_x - 2.5)) / 2.5).clamp(0.0, 1.0);
-        assert!((c.aero.downforce_area_front - body * share).abs() < 1e-9);
-        assert!((c.aero.downforce_area_rear - (body * (1.0 - share) + 0.72)).abs() < 1e-9);
+        // Each wing becomes an element.
+        let a = &c.aero;
+        assert_eq!(a.ride_height, [0.06, 0.09]);
+        let [body, wing] = &a.elements[..] else {
+            panic!("{:?}", a.elements);
+        };
+        assert_eq!((body.area, body.lift[..].to_vec()), (2.0, vec![(0.0, 0.2)]));
+        assert!((body.drag[1].0 - 10f64.to_radians()).abs() < 1e-12);
+        assert_eq!(body.height_lift, [(0.02, 0.8), (0.08, 1.0)]);
+        assert!((body.damage_lift[0] - 0.036).abs() < 1e-12);
+        assert_eq!(body.damage_lift[1..], [0.0; 3]);
+        assert_eq!(wing.position, [-2.0, 0.9]);
+        assert!((wing.area - 0.48).abs() < 1e-12);
+        assert!((wing.angle - 5f64.to_radians()).abs() < 1e-12);
+        assert_eq!(wing.lift[1].1, 2.0);
         CarModel::new(p.params.clone(), p.front.clone(), p.rear.clone()).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }

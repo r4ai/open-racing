@@ -95,10 +95,13 @@
         coast_ramp: 0.05,
     ),
 
+    // The body's drag and lift at the axles; a road car's barely change with its attitude.
     aero: (
-        drag_area: 0.72,
-        downforce_area_front: 0.03,
-        downforce_area_rear: 0.05,
-        drag_height: 0.15,
+        ride_height: (0.13, 0.14),
+        elements: [
+            (name: "body", position: (0.0, 0.15), area: 0.72, lift: [(0.0, 0.0)], drag: [(0.0, 1.0)]),
+            (name: "front", position: (1.0257, 0.0), area: 0.03, lift: [(0.0, 1.0)], drag: [(0.0, 0.0)]),
+            (name: "rear", position: (-1.6043, 0.0), area: 0.05, lift: [(0.0, 1.0)], drag: [(0.0, 0.0)]),
+        ],
     ),
 )

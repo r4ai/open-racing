@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::AMBIENT_TEMPERATURE;
+use crate::params::lookup;
 use crate::track::Surface;
 
 /// Shape of one Magic Formula curve, specified by physically meaningful numbers.
@@ -123,10 +124,16 @@ pub struct TireParams {
     pub mu_x: f64,
     /// Friction coefficient at `nominal_load`, lateral.
     pub mu_y: f64,
-    /// Nominal load in N used for load sensitivity.
+    /// Load at which the friction coefficients are `mu_x` and `mu_y`, N.
     pub nominal_load: f64,
-    /// Relative change of μ per unit relative load change (negative: μ drops with load).
-    pub load_sensitivity: f64,
+    /// Load sensitivity, longitudinal / lateral: the friction force grows with the load
+    /// raised to this (below 1: μ drops as the load grows).
+    pub load_exponent_x: f64,
+    pub load_exponent_y: f64,
+    /// Relative loss of μ per m/s of sliding speed: rubber grips less the faster it
+    /// slides over the road.
+    #[serde(default)]
+    pub speed_sensitivity: f64,
     /// Force curves at the optimal pressure.
     pub longitudinal: CurveParams,
     pub lateral: CurveParams,
@@ -193,13 +200,11 @@ pub struct PressureParams {
 /// its temperature. Grip follows the load-weighted surface temperature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThermalParams {
-    /// Surface temperature at which grip peaks, °C.
-    pub optimal_temperature: f64,
-    /// Temperature distance below / above the optimum over which grip falls away, K.
-    pub cold_window: f64,
-    pub hot_window: f64,
-    /// Fraction of grip lost far outside the window.
-    pub window_grip_loss: f64,
+    /// Grip against the surface temperature (°C), ascending, relative to its peak.
+    pub grip_curve: Vec<(f64, f64)>,
+    /// Temperature rise above the grip curve's peak over which wear speeds up by one
+    /// rate, K.
+    pub wear_window: f64,
     /// Temperature of tread and carcass after a reset (out of the tyre blankets), °C.
     pub start_temperature: f64,
     /// Heat capacity of the whole tread surface layer / the carcass, J/K.
@@ -224,7 +229,7 @@ pub struct ThermalParams {
     /// (the carcass rolling onto its outer shoulder in a corner).
     pub carcass_roll: f64,
     /// Tread worn away per MJ of sliding energy up to the optimal temperature (1 = worn out).
-    /// Wear speeds up by one rate per `hot_window` above the optimum.
+    /// Wear speeds up by one rate per `wear_window` above the optimum.
     pub wear_rate: f64,
     /// Fraction of grip lost with a worn-out tread.
     pub wear_grip_loss: f64,
@@ -341,15 +346,38 @@ pub struct TireModel {
     pub p: TireParams,
     pub long: Curve,
     pub lat: Curve,
+    /// Surface temperature at which the thermal grip curve peaks, °C, and its peak.
+    optimal_temperature: f64,
+    grip_curve_peak: f64,
 }
 
 impl TireModel {
     pub fn new(p: TireParams) -> Self {
+        let (optimal_temperature, grip_curve_peak) = p
+            .thermal
+            .grip_curve
+            .iter()
+            .copied()
+            .fold((0.0, 0.0), |best, g| if g.1 > best.1 { g } else { best });
         Self {
             long: Curve::new(&p.longitudinal),
             lat: Curve::new(&p.lateral),
+            optimal_temperature,
+            grip_curve_peak,
             p,
         }
+    }
+
+    /// Surface temperature at which the tread grips most, °C.
+    #[inline]
+    pub fn optimal_temperature(&self) -> f64 {
+        self.optimal_temperature
+    }
+
+    /// Grip multiplier for the contact patch sliding at `slide_speed` m/s.
+    #[inline]
+    pub fn slide_grip(&self, slide_speed: f64) -> f64 {
+        1.0 / (1.0 + self.p.speed_sensitivity * slide_speed)
     }
 
     /// A new tyre at its start temperature.
@@ -430,16 +458,7 @@ impl TireModel {
     #[inline]
     pub fn condition_grip(&self, c: &TireCondition, load: &[f64; 3], pressure: f64) -> f64 {
         let t = &self.p.thermal;
-        let dt = c.surface_temperature(load) - t.optimal_temperature;
-        let temperature = window_grip(
-            dt,
-            if dt < 0.0 {
-                t.cold_window
-            } else {
-                t.hot_window
-            },
-            t.window_grip_loss,
-        );
+        let temperature = lookup(&t.grip_curve, c.surface_temperature(load)) / self.grip_curve_peak;
         let pp = &self.p.pressure;
         temperature
             * window_grip(pressure - pp.optimal, pp.window, pp.grip_loss)
@@ -472,7 +491,7 @@ impl TireModel {
     ) {
         let t = &self.p.thermal;
         let overheat =
-            (c.surface_temperature(load) - t.optimal_temperature).max(0.0) / t.hot_window;
+            (c.surface_temperature(load) - self.optimal_temperature).max(0.0) / t.wear_window;
         c.wear = (c.wear + t.wear_rate * 1e-6 * slide_power * (1.0 + overheat) * dt).min(1.0);
 
         let old = c.tread_temperature;
@@ -516,8 +535,9 @@ impl TireModel {
         if fz <= 0.0 {
             return TireForce::default();
         }
-        let dfz = (fz - self.p.nominal_load) / self.p.nominal_load;
-        let load_mu = (1.0 + self.p.load_sensitivity * dfz).max(0.2) * mu_scale;
+        // μ ∝ (load / nominal)^(exponent − 1), from one logarithm.
+        let log_load = (fz / self.p.nominal_load).ln();
+        let load_mu = |exponent: f64| mu_scale * ((exponent - 1.0) * log_load).exp();
 
         // Normalised combined slip: each direction is scaled by its own peak slip, then
         // the pure-slip curve is evaluated at the combined magnitude and split back.
@@ -530,8 +550,18 @@ impl TireModel {
         if rho < 1e-9 {
             return TireForce::default();
         }
-        let fx = self.p.mu_x * load_mu * fz * self.long.eval(rho * self.long.peak_slip) * sx / rho;
-        let fy = self.p.mu_y * load_mu * fz * self.lat.eval(rho * self.lat.peak_slip) * sy / rho;
+        let fx = self.p.mu_x
+            * load_mu(self.p.load_exponent_x)
+            * fz
+            * self.long.eval(rho * self.long.peak_slip)
+            * sx
+            / rho;
+        let fy = self.p.mu_y
+            * load_mu(self.p.load_exponent_y)
+            * fz
+            * self.lat.eval(rho * self.lat.peak_slip)
+            * sy
+            / rho;
 
         // The pneumatic trail scales with the contact patch's length, which grows as the
         // square root of the tyre's deflection: more load or less pressure, more trail.
@@ -624,7 +654,7 @@ mod tests {
     #[test]
     fn grip_peaks_at_optimal_temperature_and_pressure_and_drops_with_wear() {
         let tire = front();
-        let (t, p) = (tire.p.thermal.optimal_temperature, tire.p.pressure.optimal);
+        let (t, p) = (tire.optimal_temperature(), tire.p.pressure.optimal);
         let even = [1.0 / 3.0; 3];
         let at = |temperature: f64, pressure: f64, wear: f64| {
             tire.condition_grip(
@@ -644,6 +674,38 @@ mod tests {
         assert!(at(t, p - 0.3, 0.0) < at(t, p - 0.1, 0.0));
         assert!(at(t, p + 0.3, 0.0) < at(t, p + 0.1, 0.0));
         assert!(at(t, p, 1.0) < at(t, p, 0.5));
+    }
+
+    #[test]
+    fn grip_follows_the_temperature_curve_relative_to_its_peak() {
+        let mut p = front().p;
+        p.thermal.grip_curve = vec![(20.0, 1.4), (80.0, 2.0), (140.0, 1.6)];
+        let tire = TireModel::new(p);
+        let at = |temperature: f64| {
+            let mut c = tire.fresh();
+            c.tread_temperature = [temperature; 3];
+            tire.condition_grip(&c, &[1.0 / 3.0; 3], tire.p.pressure.optimal)
+        };
+        assert_eq!(tire.optimal_temperature(), 80.0);
+        assert!((at(80.0) - 1.0).abs() < 1e-12);
+        assert!((at(50.0) - 0.85).abs() < 1e-12);
+        assert!((at(200.0) - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn grip_falls_with_load_by_a_power_law_and_with_sliding_speed() {
+        let mut p = front().p;
+        p.load_exponent_y = 0.8;
+        p.speed_sensitivity = 0.01;
+        let tire = TireModel::new(p);
+        let pressure = tire.p.pressure.optimal;
+        let peak = tire.lat.peak_slip;
+        let mu = |fz: f64| tire.forces(0.0, peak, fz, 1.0, pressure).fy / fz;
+        let nominal = tire.p.nominal_load;
+        assert!((mu(nominal) - tire.p.mu_y).abs() < 1e-9);
+        assert!((mu(2.0 * nominal) / mu(nominal) - 2f64.powf(-0.2)).abs() < 1e-9);
+        assert!(mu(20.0 * nominal) > 0.0);
+        assert!((tire.slide_grip(10.0) - 1.0 / 1.1).abs() < 1e-12);
     }
 
     #[test]

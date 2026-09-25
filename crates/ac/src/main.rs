@@ -129,12 +129,16 @@ fn run_car(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 /// settles at its ride height.
 fn report_car(model: &CarModel) {
     let p = &model.params;
-    let peak = p
-        .engine
-        .torque_curve
-        .iter()
-        .fold((0.0f64, 0.0f64), |(t, w), &(rpm, nm)| {
-            (t.max(nm), w.max(nm * rpm * std::f64::consts::PI / 30.0))
+    // Full load in standard air, boost included, over the rev range.
+    let peak = (1..=40)
+        .map(|k| k as f64 / 40.0 * p.engine.limiter_rpm)
+        .map(|rpm| (rpm, model.engine.full_load(rpm)))
+        .fold((0.0f64, 0.0f64, 0.0f64), |(t, w, b), (rpm, (nm, boost))| {
+            (
+                t.max(nm),
+                w.max(nm * rpm * std::f64::consts::PI / 30.0),
+                b.max(boost),
+            )
         });
     let drive = match p.drive {
         Drive::Rear => "rear-wheel drive".to_string(),
@@ -160,9 +164,15 @@ fn report_car(model: &CarModel) {
         model.rear_tire.p.radius * 1e3
     );
     println!(
-        "engine: {:.0} N·m, {:.0} kW, limiter {:.0} rpm, {} gears",
+        "engine: {:.0} N·m, {:.0} kW{}, {:.1} l, limiter {:.0} rpm, {} gears",
         peak.0,
         peak.1 / 1e3,
+        if model.engine.turbocharged() {
+            format!(" at {:.2} bar boost", peak.2)
+        } else {
+            String::new()
+        },
+        model.engine.displacement * 1e3,
         p.engine.limiter_rpm,
         p.gearbox.ratios.len()
     );
@@ -221,6 +231,17 @@ fn report_car(model: &CarModel) {
         }
     }
     let time = |t: Option<f64>| t.map_or("-".into(), |t| format!("{t:.1} s"));
+    let tel = &car.telemetry;
+    let q = 0.5 * open_racing_sim::AIR_DENSITY * car.speed().powi(2);
+    println!(
+        "aero at {:.0} km/h: drag area {:.2} m², downforce areas {:.2} / {:.2} m², ride heights {:.0} / {:.0} mm",
+        car.speed() * 3.6,
+        tel.drag / q.max(1.0),
+        tel.downforce[0] / q.max(1.0),
+        tel.downforce[1] / q.max(1.0),
+        tel.ride_height[0] * 1e3,
+        tel.ride_height[1] * 1e3
+    );
     println!(
         "check: settles {:+.0} mm from its ride height, 0-100 km/h {}, 0-200 km/h {}, {:.0} km/h after 60 s",
         sag * 1e3,

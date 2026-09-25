@@ -12,6 +12,7 @@ pub mod assist;
 pub mod car;
 pub mod controls;
 pub mod drivetrain;
+pub mod engine;
 pub mod evolution;
 pub mod ground;
 pub mod params;
@@ -23,11 +24,12 @@ pub use assist::{AutoShift, BlipAssist, ClutchAssist};
 pub use car::{Car, CarState, Telemetry, WheelState, WheelTelemetry};
 pub use controls::{Controls, Shift};
 pub use drivetrain::ShiftPhase;
+pub use engine::{EngineModel, EngineState};
 pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{
-    AntiStall, CarModel, CarParams, Drive, DualClutchControl, ElectronicsParams, GearboxKind,
-    ParamsError,
+    AeroElement, AntiStall, CarModel, CarParams, Drive, DualClutchControl, ElectronicsParams,
+    GearboxKind, ParamsError, ThrottleKind, TurboParams,
 };
 pub use tire::TireCondition;
 pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};

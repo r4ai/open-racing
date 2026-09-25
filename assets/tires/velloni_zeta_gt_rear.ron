@@ -11,7 +11,8 @@
     mu_x: 1.65,
     mu_y: 1.60,
     nominal_load: 4000.0,
-    load_sensitivity: -0.12,
+    load_exponent_x: 0.88,          // friction force ∝ load^exponent
+    load_exponent_y: 0.88,
     longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
     lateral: (peak_slip: 0.105, shape: 1.45, curvature: 0.3),   // ~6.0 deg
     relaxation_x: 0.15,
@@ -33,10 +34,9 @@
     ),
 
     thermal: (
-        optimal_temperature: 90.0,
-        cold_window: 50.0,
-        hot_window: 35.0,
-        window_grip_loss: 0.15,
+        // Grip against the tread surface temperature, °C.
+        grip_curve: [(-10.0, 0.853), (27.5, 0.881), (60.0, 0.955), (90.0, 1.0), (111.0, 0.955), (133.75, 0.881), (160.0, 0.853)],
+        wear_window: 35.0,
         start_temperature: 75.0,         // out of the tyre blankets
         surface_capacity: 1600.0,
         core_capacity: 16000.0,

@@ -9,7 +9,8 @@
 //! driveline.
 
 use crate::controls::Shift;
-use crate::params::{CarParams, DifferentialParams, Drive, DualClutchControl, GearboxKind, lookup};
+use crate::engine::{Ambient, EngineModel, EngineState};
+use crate::params::{CarParams, DifferentialParams, Drive, DualClutchControl, GearboxKind};
 
 pub const RPM_PER_RAD_S: f64 = 60.0 / std::f64::consts::TAU;
 
@@ -57,6 +58,8 @@ pub struct DrivetrainState {
     pub clutch_torque: f64,
     /// A synchroniser has been fighting a turning engine: the gear grinds.
     pub grinding: bool,
+    /// Manifold, turbocharger and flows of the engine.
+    pub engine: EngineState,
 }
 
 impl DrivetrainState {
@@ -73,6 +76,7 @@ impl DrivetrainState {
             clutch_locked: [true; 2],
             clutch_torque: 0.0,
             grinding: false,
+            engine: EngineState::default(),
         }
     }
 
@@ -134,8 +138,8 @@ pub struct DriveInput {
     pub shift: Shift,
     /// H-pattern lever gate held by the driver, if a shifter is used.
     pub selector: Option<i32>,
-    /// Full-throttle torque relative to the engine's curve: the air's density.
-    pub power: f64,
+    /// The air the engine breathes.
+    pub air: Ambient,
     /// Spin rates of the wheels, rad/s.
     pub wheel_speed: [f64; 4],
     /// Net torque on each wheel from the road, excluding the drivetrain, N·m.
@@ -390,8 +394,14 @@ fn dual_clutch_capacity(
     creep + p.clutch.max_torque * ((rpm - bite) / control.engage_band_rpm).clamp(0.0, 1.0)
 }
 
-/// Advances the engine and gearbox and returns the drive torque applied to each wheel.
-pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [f64; 4] {
+/// Advances the engine (`engine`, the model of `p.engine`) and gearbox and returns the
+/// drive torque applied to each wheel.
+pub fn step(
+    state: &mut DrivetrainState,
+    p: &CarParams,
+    engine: &EngineModel,
+    input: &DriveInput,
+) -> [f64; 4] {
     let dt = input.dt;
     let out = driveline_speed(p, &input.wheel_speed);
     advance_shift(state, p, input, out);
@@ -405,13 +415,10 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
     let target_rpm = gear_ratio(p, s.target_gear) * out * RPM_PER_RAD_S;
     let upshift = target_rpm < rpm;
     let mut throttle = input.throttle;
-    if el.ignition_cut
+    let ignition_cut = el.ignition_cut
         && matches!(p.gearbox.kind, GearboxKind::Sequential { .. })
         && matches!(s.phase, ShiftPhase::Unloading | ShiftPhase::Moving)
-        && upshift
-    {
-        throttle = 0.0;
-    }
+        && upshift;
     // The blip waits for the dogs to let go: while they carry it, it only loads them.
     if el.auto_blip
         && !matches!(s.phase, ShiftPhase::None | ShiftPhase::Unloading)
@@ -419,19 +426,25 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
     {
         throttle = throttle.max(blip_throttle(target_rpm, rpm, el.blip_band_rpm));
     }
-    let engine_torque = if s.stalled {
-        -lookup(&e.drag_curve, rpm)
-    } else {
+    if !s.stalled {
         // Idle control: opens the throttle just enough to hold idle.
         let idle_throttle = ((e.idle_rpm - rpm) / e.idle_band_rpm).clamp(0.0, e.idle_authority);
-        let mut throttle = throttle.max(idle_throttle);
-        if rpm >= e.limiter_rpm {
-            throttle = 0.0;
-        }
-        let full = lookup(&e.torque_curve, rpm) * input.power;
-        let drag = lookup(&e.drag_curve, rpm);
-        throttle * full - (1.0 - throttle) * drag
-    };
+        throttle = throttle.max(idle_throttle);
+    }
+    // The injectors cut on overrun above idle, at the rev limiter and for the gearbox's
+    // ignition cut; the throttle stays where it is, so the torque returns at once.
+    let firing = !s.stalled
+        && !ignition_cut
+        && rpm < e.limiter_rpm
+        && (throttle > 0.0 || rpm < e.idle_rpm + e.idle_band_rpm);
+    let engine_torque = engine.step(
+        &mut s.engine,
+        s.engine_speed,
+        throttle,
+        firing,
+        &input.air,
+        dt,
+    );
 
     // The driven wheels seen at the gearbox output.
     let driven = |v: &[f64; 4]| {

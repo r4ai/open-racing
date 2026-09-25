@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use open_racing_sim::drivetrain::{self, DriveInput, DrivetrainState, RPM_PER_RAD_S, gear_ratio};
+use open_racing_sim::engine::Ambient;
 use open_racing_sim::*;
 
 fn asset_car(name: &str) -> CarParams {
@@ -34,7 +35,7 @@ fn held(wheel_speed: f64) -> DriveInput {
         clutch_pedal: 0.0,
         shift: Shift::None,
         selector: None,
-        power: 1.0,
+        air: Ambient::STANDARD,
         wheel_speed: [wheel_speed; 4],
         wheel_torque: [0.0; 4],
         wheel_inertia: [1e9; 4],
@@ -57,26 +58,27 @@ fn at_rpm(p: &CarParams, gear: i32, rpm: f64) -> DrivetrainState {
 
 /// Steps once and returns the state after it.
 fn step(mut s: DrivetrainState, p: &CarParams, input: &DriveInput) -> DrivetrainState {
-    drivetrain::step(&mut s, p, input);
+    drivetrain::step(&mut s, p, &EngineModel::new(&p.engine), input);
     s
 }
 
 #[test]
 fn the_ecu_blip_opens_fully_over_its_band() {
-    // Between gears on a downshift, the engine 250 rpm short of 2nd's speed.
-    let gain = |band| {
+    // Between gears on a downshift, the engine 250 rpm short of 2nd's speed; the throttle
+    // motor starts towards the blip.
+    let blip = |band| {
         let mut p = asset_car("gt3");
         p.electronics.blip_band_rpm = band;
         let input = held(wheel_speed_for(&p, 2, 5000.0));
         let mut s = at_rpm(&p, 0, 4750.0);
         s.target_gear = 2;
         s.phase = ShiftPhase::Moving;
-        step(s, &p, &input).rpm() - 4750.0
+        step(s, &p, &input).engine.throttle
     };
-    let (wide, narrow) = (gain(500.0), gain(250.0));
+    let (wide, narrow) = (blip(500.0), blip(250.0));
     assert!(
-        wide > 0.0 && narrow > 1.5 * wide,
-        "{wide:.2} / {narrow:.2} rpm"
+        wide > 0.0 && (narrow / wide - 2.0).abs() < 1e-9,
+        "{wide:.4} / {narrow:.4}"
     );
 }
 
@@ -196,7 +198,7 @@ fn into_reverse(reverse: bool) -> (Option<f64>, bool) {
     let mut s = at_rpm(&p, 0, p.engine.idle_rpm);
     let mut ground = false;
     for k in 0..5000 {
-        drivetrain::step(&mut s, &p, &input);
+        drivetrain::step(&mut s, &p, &EngineModel::new(&p.engine), &input);
         ground |= s.grinding;
         if s.gear == -1 {
             return (Some(k as f64 * DT), ground);
@@ -230,7 +232,7 @@ fn a_dual_clutch_bites_later_pulling_away_with_a_higher_bite_speed() {
         };
         let mut s = at_rpm(&p, 1, p.engine.idle_rpm);
         for _ in 0..1000 {
-            drivetrain::step(&mut s, &p, &input);
+            drivetrain::step(&mut s, &p, &EngineModel::new(&p.engine), &input);
         }
         s.rpm()
     };
@@ -265,6 +267,7 @@ fn closing(control: DualClutchControl, gear: i32, gear_rpm: f64, slip: f64) -> f
         ..held(wheel_speed_for(&p, gear, gear_rpm))
     };
     let mut s = at_rpm(&p, gear, gear_rpm + slip);
+    s.engine = EngineModel::new(&p.engine).settled(gear_rpm + slip, 1.0);
     s.clutch_locked = [false; 2];
     step(s, &p, &input).clutch_torque
 }
