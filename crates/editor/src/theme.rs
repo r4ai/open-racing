@@ -8,6 +8,8 @@ use bevy_egui::egui::Color32;
 
 /// The selected item, and the lines of what is selected.
 pub const SELECTED: Color = Color::srgb(1.0, 0.63, 0.16);
+/// Items selected with the active one, darker as Blender's.
+pub const SELECTED_OTHER: Color = Color::srgb(0.85, 0.42, 0.05);
 /// Selected nodes.
 pub const SELECTED_NODE: Color = Color::srgb(1.0, 0.45, 0.0);
 /// The active node.
@@ -29,6 +31,7 @@ pub const SNAP: Color = Color::srgb(1.0, 0.2, 0.85);
 
 /// The same in the panels.
 pub const SELECTED_UI: Color32 = Color32::from_rgb(255, 160, 40);
+pub const SELECTED_OTHER_UI: Color32 = Color32::from_rgb(217, 107, 13);
 pub const SELECTED_NODE_UI: Color32 = Color32::from_rgb(255, 115, 0);
 pub const UNSELECTED_UI: Color32 = Color32::from_gray(215);
 pub const STRIP_UI: Color32 = Color32::from_rgb(51, 217, 191);

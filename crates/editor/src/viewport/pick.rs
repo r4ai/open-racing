@@ -116,6 +116,32 @@ pub(super) fn pick(
 /// nodes (all of them with none selected, as moving the whole line).
 pub fn selection_pivot(editor: &Editor, built: &Built) -> Option<DVec3> {
     let item = editor.selection.item?;
+    // Several items: the middle of all of them.
+    if !editor.selection.others.is_empty() && editor.selection.nodes.is_empty() {
+        let points: Vec<DVec3> = editor
+            .selection
+            .items()
+            .into_iter()
+            .flat_map(|i| match i {
+                Item::Prop(p) => editor
+                    .project
+                    .props
+                    .get(p)
+                    .map(|x| Placement::of(x, built.ground.as_deref()).pos)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                _ => item_line(&editor.project, i).map_or(vec![], |(_, nodes, _)| {
+                    nodes
+                        .iter()
+                        .map(|n| shown_pos(editor, built, i, n.pos))
+                        .collect()
+                }),
+            })
+            .collect();
+        if !points.is_empty() {
+            return Some(points.iter().sum::<DVec3>() / points.len() as f64);
+        }
+    }
     if let Item::Prop(i) = item {
         let prop = editor.project.props.get(i)?;
         return Some(Placement::of(prop, built.ground.as_deref()).pos);

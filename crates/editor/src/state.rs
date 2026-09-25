@@ -25,12 +25,17 @@ pub enum Item {
     Prop(usize),
 }
 
-/// The selected item and, as in Blender's edit mode, its selected nodes.
+/// The selected item and, as in Blender's edit mode, its selected nodes; in object mode,
+/// other items selected with it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
+    /// The active item: the properties show it.
     pub item: Option<Item>,
     /// Selected nodes of the item's line, the active one last.
     pub nodes: Vec<usize>,
+    /// Other items selected with the active one (Shift + click, a box), moved,
+    /// turned, scaled and deleted with it.
+    pub others: Vec<Item>,
 }
 
 impl Selection {
@@ -64,12 +69,41 @@ impl Selection {
     pub fn select(&mut self, item: Item) {
         self.item = Some(item);
         self.nodes.clear();
+        self.others.clear();
     }
 
     /// Selects one node of an item.
     pub fn select_node(&mut self, item: Item, node: usize) {
         self.item = Some(item);
         self.nodes = vec![node];
+        self.others.clear();
+    }
+
+    /// Adds an item to the selection and makes it the active one, or takes it out if
+    /// it is the active one already (Shift + click in Blender's object mode).
+    pub fn toggle_item(&mut self, item: Item) {
+        self.nodes.clear();
+        if self.item == Some(item) {
+            self.item = self.others.pop();
+        } else {
+            self.others.retain(|&o| o != item);
+            if let Some(active) = self.item.replace(item) {
+                self.others.push(active);
+            }
+        }
+    }
+
+    /// Whether an item is selected, active or not.
+    pub fn has(&self, item: Item) -> bool {
+        self.item == Some(item) || self.others.contains(&item)
+    }
+
+    /// Every selected item, the active one first.
+    pub fn items(&self) -> Vec<Item> {
+        self.item
+            .into_iter()
+            .chain(self.others.iter().copied())
+            .collect()
     }
 
     /// Adds a node to the selection, or takes it out if it is the active one already
@@ -141,6 +175,7 @@ impl Editor {
             selection: Selection {
                 item: Some(Item::Road(0)),
                 nodes: Vec::new(),
+                others: vec![],
             },
             status,
             dragging: false,

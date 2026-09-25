@@ -289,8 +289,12 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "Select",
         &[
             ("Click", "Select a node, road, kerb or prop"),
-            ("Shift+click", "Add a node to the selection"),
-            ("Drag on empty space", "Box select"),
+            (
+                "Shift+click",
+                "Add a node (edit mode) or an item (object mode)",
+            ),
+            ("Ctrl/Shift+click in the outliner", "Add an item"),
+            ("Drag on empty space", "Box select nodes, or items"),
             ("A / Alt+A", "All / none of the line's nodes"),
             ("Ctrl I", "Invert"),
             ("Ctrl Numpad + / -", "Select more / less"),
@@ -311,8 +315,9 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "Drag a road edge square",
                 "Width on that side at the selected nodes",
             ),
+            ("  B", "Both sides alike"),
             (
-                "Drag a stretch's yellow square",
+                "Drag a stretch's square",
                 "Strip width, or a wall's distance",
             ),
             (

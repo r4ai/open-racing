@@ -111,6 +111,19 @@ pub fn start_modal(
                 },
             }
         }
+        _ if !tool.edit && !editor.selection.others.is_empty() => {
+            let (mut lines, mut props) = (Vec::new(), Vec::new());
+            for item in editor.selection.items() {
+                if let Item::Prop(i) = item {
+                    if let Some(p) = editor.project.props.get(i) {
+                        props.push((i, p.pos, p.yaw, p.scale));
+                    }
+                } else if let Some((_, nodes, _)) = item_line(&editor.project, item) {
+                    lines.push((item, nodes.iter().map(|n| n.pos).enumerate().collect()));
+                }
+            }
+            Target::Many { lines, props }
+        }
         _ if editor.selection.prop().is_some() => {
             let index = editor.selection.prop().expect("a prop");
             let Some(p) = editor.project.props.get(index) else {
@@ -147,6 +160,14 @@ pub fn start_modal(
                 .map_or(c, |(_, p)| *p);
             let pivot = if mode == Mode::Grab { active } else { c };
             (mode, shown_pos(editor, built, *item, pivot))
+        }
+        Target::Many { lines, props } => {
+            let all: Vec<DVec3> = lines
+                .iter()
+                .flat_map(|(_, s)| s.iter().map(|(_, p)| *p))
+                .chain(props.iter().map(|p| p.1))
+                .collect();
+            (mode, all.iter().sum::<DVec3>() / all.len().max(1) as f64)
         }
         Target::Handle { node, start, .. } => (Mode::Grab, *node + *start),
         Target::Marker { .. } => (Mode::Grab, tool.pointer.unwrap_or_default()),
@@ -435,6 +456,49 @@ pub(super) fn transform_ops(
             let readout = match snapped {
                 Some(what) => format!("{readout} → on {what}"),
                 None => readout,
+            };
+            (ops, readout)
+        }
+        Target::Many { lines, props } => {
+            // Moved, turned about the pivot or scaled from it, all alike.
+            let (angle, k, d) = match m.mode {
+                Mode::Grab => (0.0, 1.0, slide()),
+                Mode::Rotate => (turn(m, center, cursor, typed, snap), 1.0, DVec3::ZERO),
+                Mode::Scale => (0.0, stretch(m, center, cursor, typed, snap), DVec3::ZERO),
+                Mode::Width | Mode::Tilt => return (vec![], String::new()),
+            };
+            let (pivot, rot) = (m.pivot, DVec2::from_angle(angle));
+            let place = |p: DVec3| {
+                let q = (p - pivot).truncate();
+                let q = rot.rotate(q) * k;
+                (pivot.truncate() + q).extend(p.z) + d
+            };
+            let mut ops = Vec::new();
+            for (item, start) in lines {
+                let Some((name, ..)) = item_line(&editor.project, *item) else {
+                    continue;
+                };
+                ops.extend(start.iter().map(|&(index, p)| Op::MoveNode {
+                    line: name.to_string(),
+                    index,
+                    pos: place(p),
+                }));
+            }
+            for &(i, pos, yaw, scale) in props {
+                if let Some(p) = editor.project.props.get(i) {
+                    ops.push(Op::MoveProp {
+                        name: p.name.clone(),
+                        pos: Some(place(pos)),
+                        yaw: Some(yaw + angle),
+                        scale: Some((scale * k).max(1e-3)),
+                    });
+                }
+            }
+            let n = lines.len() + props.len();
+            let readout = match m.mode {
+                Mode::Grab => format!("{n} items Δ ({:.2}, {:.2}, {:.2}) m", d.x, d.y, d.z),
+                Mode::Rotate => format!("{n} items {:.1}°", angle.to_degrees()),
+                _ => format!("{n} items ×{k:.3}"),
             };
             (ops, readout)
         }

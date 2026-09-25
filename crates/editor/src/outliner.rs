@@ -156,6 +156,8 @@ fn item_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item, icon:
     let selected = c.editor.selection.item == Some(item);
     let text = if selected {
         egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_UI)
+    } else if c.editor.selection.has(item) {
+        egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_OTHER_UI)
     } else {
         egui::RichText::new(format!("{icon} {name}"))
     };
@@ -164,7 +166,11 @@ fn item_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item, icon:
         c.tool.outliner_hover = Some(item);
     }
     if resp.clicked() {
-        if !selected {
+        // Ctrl or Shift adds to the selection, as Blender's outliner.
+        let m = ui.input(|i| i.modifiers);
+        if m.ctrl || m.shift {
+            c.editor.selection.toggle_item(item);
+        } else if !selected || !c.editor.selection.others.is_empty() {
             c.editor.selection.select(item);
         }
         c.shell.tab = PropTab::Object;

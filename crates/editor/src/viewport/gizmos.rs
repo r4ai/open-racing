@@ -22,12 +22,14 @@ pub fn gizmos(
             continue;
         };
         let selected = sel.item == Some(item);
-        if !overlays.lines && !selected {
+        if !overlays.lines && !sel.has(item) {
             continue;
         }
         let hovered_body = hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item);
         let line = if selected {
             theme::SELECTED
+        } else if sel.has(item) {
+            theme::SELECTED_OTHER
         } else if hovered_body {
             theme::HOVER
         } else {
@@ -190,6 +192,8 @@ pub fn gizmos(
         }
         let color = if sel.item == Some(item) {
             theme::SELECTED
+        } else if sel.has(item) {
+            theme::SELECTED_OTHER
         } else if hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item) {
             theme::HOVER
         } else {

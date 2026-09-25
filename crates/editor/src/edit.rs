@@ -466,6 +466,7 @@ mod tests {
         e.selection = Selection {
             item: Some(Item::Road(0)),
             nodes: vec![0],
+            others: vec![],
         };
         select_more(&mut e);
         let mut got = e.selection.nodes.clone();
@@ -490,6 +491,7 @@ mod tests {
         e.selection = Selection {
             item: Some(Item::Road(0)),
             nodes: vec![2, 3],
+            others: vec![],
         };
         subdivide(&mut e, &Built::default());
         let nodes = &e.project.roads[0].nodes;
@@ -560,6 +562,7 @@ mod tests {
         e.selection = Selection {
             item: Some(Item::Road(0)),
             nodes: vec![0],
+            others: vec![],
         };
         let mut p = e.project.roads[0].nodes[4].pos;
         p.z = 12.0;

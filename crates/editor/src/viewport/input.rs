@@ -298,8 +298,10 @@ pub(super) fn click(
         Some(Hit::Node(item, n)) if shift => editor.selection.toggle_node(item, n),
         Some(Hit::Node(item, n)) => editor.selection.select_node(item, n),
         Some(Hit::Handle(item, n, _)) if alt => crate::edit::auto_handles(editor, item, n),
+        // In object mode Shift adds items to the selection, or takes the active out.
+        Some(Hit::Body(item)) if shift && !edit => editor.selection.toggle_item(item),
         Some(Hit::Body(item)) => {
-            if editor.selection.item != Some(item) {
+            if editor.selection.item != Some(item) || !editor.selection.others.is_empty() {
                 editor.selection.select(item);
             } else if !shift {
                 editor.selection.nodes.clear();
@@ -358,13 +360,32 @@ pub(super) fn box_select(
         }
         return;
     }
-    let best = items(editor)
+    // Every line with nodes in the box, and every prop standing in it; the line with
+    // most nodes in it active, unless adding to what is selected.
+    let mut found: Vec<(Item, usize)> = items(editor)
         .map(|i| (i, inside(i).len()))
-        .max_by_key(|&(_, n)| n);
-    match best {
-        Some((item, n)) if n > 0 => editor.selection.select(item),
-        _ if !add => editor.selection = Default::default(),
-        _ => {}
+        .filter(|&(_, n)| n > 0)
+        .collect();
+    for (i, prop) in editor.project.props.iter().enumerate() {
+        let at = Placement::of(prop, built.ground.as_deref()).pos;
+        if view
+            .screen(at + DVec3::Z * LIFT)
+            .is_some_and(|s| r.contains(s))
+        {
+            found.push((Item::Prop(i), 1));
+        }
+    }
+    found.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    if !add {
+        editor.selection = Default::default();
+    }
+    for (item, _) in found {
+        let sel = &mut editor.selection;
+        if sel.item.is_none() {
+            sel.select(item);
+        } else if !sel.has(item) {
+            sel.others.push(item);
+        }
     }
 }
 
@@ -385,11 +406,14 @@ pub fn delete_selected(editor: &mut Editor, tool: &Tool) {
     delete(editor);
 }
 
-/// Deletes the selected nodes, or else the selected spline, road or prop.
+/// Deletes the selected nodes, or else every selected spline, road and prop.
 pub fn delete(editor: &mut Editor) {
     let Some(item) = editor.selection.item else {
         return;
     };
+    if editor.selection.nodes.is_empty() && !editor.selection.others.is_empty() {
+        return delete_items(editor);
+    }
     if let Item::Prop(i) = item {
         let Some(name) = editor.project.props.get(i).map(|p| p.name.clone()) else {
             return;
@@ -428,6 +452,48 @@ pub fn delete(editor: &mut Editor) {
         if whole || editor.line().is_none() {
             editor.selection = Default::default();
         }
+    }
+}
+
+/// Deletes every selected item but the main road, by name so that their places in
+/// the lists do not matter.
+fn delete_items(editor: &mut Editor) {
+    let p = &editor.project;
+    let mut ops = Vec::new();
+    let mut kept = false;
+    for item in editor.selection.items() {
+        match item {
+            Item::Road(r) => match p.roads.get(r) {
+                Some(road) if road.name == p.main_road => kept = true,
+                Some(road) => ops.push(Op::RemoveRoad {
+                    road: road.name.clone(),
+                }),
+                None => {}
+            },
+            Item::Spline(s) => {
+                if let Some(sp) = p.splines.get(s) {
+                    ops.push(Op::RemoveSpline {
+                        name: sp.name.clone(),
+                    });
+                }
+            }
+            Item::Prop(i) => {
+                if let Some(x) = p.props.get(i) {
+                    ops.push(Op::RemoveProp {
+                        name: x.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    let n = ops.len();
+    if !ops.is_empty() && editor.apply(ops, None) {
+        editor.selection = Default::default();
+        editor.status = if kept {
+            format!("deleted {n}; the main road stays")
+        } else {
+            format!("deleted {n}")
+        };
     }
 }
 

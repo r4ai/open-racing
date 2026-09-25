@@ -175,6 +175,12 @@ enum Target {
         item: Item,
         start: Vec<(usize, DVec3)>,
     },
+    /// Several whole items, in object mode: every node of each line, and props.
+    Many {
+        lines: Vec<(Item, Vec<(usize, DVec3)>)>,
+        /// (index, place, turn, size)
+        props: Vec<(usize, DVec3, f64, f64)>,
+    },
     Handle {
         item: Item,
         index: usize,
@@ -877,6 +883,84 @@ mod tests {
         editor.selection.select_node(Item::Road(0), 1);
         sync_mode(&editor, &mut tool);
         assert!(tool.edit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn several_items_select_move_and_delete_together() {
+        let (mut editor, _, camera, t, dir) = top_down("many", DVec3::new(120.0, -30.0, 0.0));
+        for (name, y) in [("a", -30.0), ("b", -45.0)] {
+            let spline = crate::presets::named(&editor.project, "concrete wall")
+                .unwrap()
+                .spline(
+                    &editor.project,
+                    vec![DVec3::new(100.0, y, 0.0), DVec3::new(150.0, y, 0.0)],
+                )
+                .unwrap();
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                drape: false,
+                ..spline
+            };
+            assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        }
+        let built = built_of(&editor);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        // Shift + click adds, the one clicked last active; a click alone selects one.
+        click(
+            &mut editor,
+            &built,
+            Some(Hit::Body(Item::Spline(0))),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        click(
+            &mut editor,
+            &built,
+            Some(Hit::Body(Item::Spline(1))),
+            None,
+            true,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            editor.selection.items(),
+            vec![Item::Spline(1), Item::Spline(0)]
+        );
+        // A box round both selects both.
+        editor.selection = Default::default();
+        let corners = [DVec3::new(90.0, -20.0, 0.0), DVec3::new(160.0, -55.0, 0.0)]
+            .map(|p| view.screen(p).unwrap());
+        let r = Rect::from_corners(corners[0], corners[1]);
+        box_select(&mut editor, &built, view, r, false, false);
+        let mut items = editor.selection.items();
+        items.sort_by_key(|i| format!("{i:?}"));
+        assert_eq!(items, vec![Item::Spline(0), Item::Spline(1)]);
+        // Grabbed together by 10 m along x.
+        let mut tool = Tool::default();
+        let at = view.screen(DVec3::new(125.0, -37.5, 0.0)).unwrap();
+        start_modal(&mut editor, &mut tool, &built, Mode::Grab, None, at, false);
+        let m = tool.modal.as_ref().unwrap();
+        let to = view.screen(DVec3::new(135.0, -37.5, 0.0)).unwrap();
+        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        assert!(readout.contains("2 items"), "{readout}");
+        assert!(editor.apply(ops, None));
+        editor.end_drag();
+        for s in &editor.project.splines {
+            assert!((s.nodes[0].pos.x - 110.0).abs() < 0.01, "{:?}", s.nodes[0]);
+        }
+        // Deleted together; the main road never is.
+        editor.selection.others.push(Item::Road(0));
+        delete(&mut editor);
+        assert!(editor.project.splines.is_empty());
+        assert_eq!(editor.project.roads.len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
