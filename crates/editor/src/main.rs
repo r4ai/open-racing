@@ -6,6 +6,7 @@
 //! change is an operation, saved at once; changes others make to `project.ron` (such as
 //! an agent using `open-racing-trackctl`) are loaded as they happen.
 
+mod assets;
 mod jobs;
 mod menus;
 mod presets;
@@ -33,7 +34,7 @@ struct Args {
     /// scripts and agents see the 3D view.
     #[arg(long)]
     screenshot: Option<PathBuf>,
-    /// Select this road or spline and frame it (with `--screenshot`, to look at it).
+    /// Select this road, spline or prop and frame it (with `--screenshot`, to look at it).
     #[arg(long)]
     focus: Option<String>,
     /// View from above.
@@ -89,16 +90,25 @@ fn main() {
     });
     if let Some(name) = &args.focus {
         let p = &editor.project;
-        let item = p.road_index(name).map(state::Item::Road).or_else(|| {
-            p.splines
-                .iter()
-                .position(|s| &s.name == name)
-                .map(state::Item::Spline)
-        });
+        let item = p
+            .road_index(name)
+            .map(state::Item::Road)
+            .or_else(|| {
+                p.splines
+                    .iter()
+                    .position(|s| &s.name == name)
+                    .map(state::Item::Spline)
+            })
+            .or_else(|| {
+                p.props
+                    .iter()
+                    .position(|x| &x.name == name)
+                    .map(state::Item::Prop)
+            });
         match item {
             Some(item) => editor.selection.select(item),
             None => {
-                eprintln!("no road or spline named \"{name}\"");
+                eprintln!("no road, spline or prop named \"{name}\"");
                 std::process::exit(1);
             }
         }
@@ -131,6 +141,9 @@ fn main() {
     .init_resource::<viewport::Tool>()
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
+    .init_resource::<preview::Props>()
+    .init_resource::<preview::SharedCache>()
+    .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
     .add_systems(Startup, viewport::setup)
     .add_systems(EguiPrimaryContextPass, ui::ui)
@@ -138,9 +151,12 @@ fn main() {
         Update,
         (
             state::watch_file,
+            assets::watch,
+            assets::dropped,
             viewport::input,
             viewport::view_input,
             preview::rebuild,
+            preview::props,
             jobs::poll,
             viewport::gizmos,
             viewport::place_camera,

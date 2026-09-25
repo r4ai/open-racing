@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use open_racing_track_project::{Error, Project, Textures, bake, inspect, ops, preview, validate};
+use open_racing_track_project::{
+    Cache, Error, Project, assets, bake, inspect, ops, preview, validate,
+};
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +60,19 @@ enum Command {
         /// Pixels along the longer side.
         #[arg(long, default_value_t = 1600)]
         size: usize,
+    },
+    /// Lists the project's textures and models, what uses each, and those missing.
+    Assets {
+        project: String,
+        /// As JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copies textures (.png, .dds) and models (.glb, .gltf) into the project's assets/
+    /// and prints the path to refer to each by.
+    Import {
+        project: String,
+        files: Vec<PathBuf>,
     },
     /// Bakes the project and checks the package, without saving it.
     Check {
@@ -166,10 +181,39 @@ fn run(cli: Cli) -> Result<(), Error> {
                 picture.height
             );
         }
+        Command::Assets { project, json } => {
+            let dir = resolve(&project);
+            let p = Project::load(&dir)?;
+            let list = assets::list(&p, &dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&list).expect("assets serialise")
+                );
+            } else {
+                for a in &list {
+                    let size = a.bytes.map_or("MISSING".to_string(), |b| {
+                        format!("{} KiB", b.div_ceil(1024))
+                    });
+                    let used = if a.used_by.is_empty() {
+                        "unused".to_string()
+                    } else {
+                        a.used_by.join(", ")
+                    };
+                    println!("{:?} {} ({size}): {used}", a.kind, a.path.display());
+                }
+            }
+        }
+        Command::Import { project, files } => {
+            let dir = resolve(&project);
+            for f in &files {
+                println!("{}", assets::import(&dir, f)?.display());
+            }
+        }
         Command::Check { project, lap } => {
             let dir = resolve(&project);
             let p = Project::load(&dir)?;
-            let package = bake::bake(&p, &dir, &mut Textures::default())?;
+            let package = bake::bake(&p, &dir, &mut Cache::default())?;
             let report = validate::check(&package, lap);
             print!("{report}");
             if !report.ok() {
@@ -183,7 +227,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         } => {
             let dir = resolve(&project);
             let p = Project::load(&dir)?;
-            let package = bake::bake(&p, &dir, &mut Textures::default())?;
+            let package = bake::bake(&p, &dir, &mut Cache::default())?;
             let report = validate::check(&package, !no_lap);
             print!("{report}");
             let out = out.unwrap_or_else(|| open_racing_track::tracks_dir().join(&p.name));

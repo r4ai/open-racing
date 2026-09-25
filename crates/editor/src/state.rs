@@ -21,6 +21,7 @@ const COALESCE: Duration = Duration::from_millis(800);
 pub enum Item {
     Road(usize),
     Spline(usize),
+    Prop(usize),
 }
 
 /// The selected item and, as in Blender's edit mode, its selected nodes.
@@ -42,6 +43,13 @@ impl Selection {
     pub fn spline(&self) -> Option<usize> {
         match self.item {
             Some(Item::Spline(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn prop(&self) -> Option<usize> {
+        match self.item {
+            Some(Item::Prop(p)) => Some(p),
             _ => None,
         }
     }
@@ -247,6 +255,12 @@ impl Editor {
     }
 
     fn clamp_selection(&mut self) {
+        if let Some(Item::Prop(p)) = self.selection.item {
+            if p >= self.project.props.len() {
+                self.selection = Selection::default();
+            }
+            return;
+        }
         let count = self.line().map(|(_, nodes, _)| nodes.len());
         let s = &mut self.selection;
         match count {
@@ -309,6 +323,7 @@ pub fn item_line(project: &Project, item: Item) -> Option<(&str, &[Node], bool)>
             .splines
             .get(s)
             .map(|s| (s.name.as_str(), s.nodes.as_slice(), s.closed)),
+        Item::Prop(_) => None,
     }
 }
 

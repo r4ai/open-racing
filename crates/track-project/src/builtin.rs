@@ -4,7 +4,7 @@
 use open_racing_sim::{Surface, SurfaceProps};
 use open_racing_track::texture::Image;
 
-use crate::project::{BuiltinTexture, MaterialDef, NamedSurface, TextureSource};
+use crate::project::{Alpha, BuiltinTexture, MaterialDef, NamedSurface, TextureSource};
 
 /// Edge of the generated textures, texels.
 const SIZE: usize = 256;
@@ -35,6 +35,8 @@ pub fn materials() -> Vec<MaterialDef> {
         roughness,
         reflectance: 0.5,
         double_sided,
+        normal: TextureSource::None,
+        alpha: Alpha::Opaque,
     };
     use BuiltinTexture as T;
     vec![
@@ -46,6 +48,11 @@ pub fn materials() -> Vec<MaterialDef> {
         m("armco", T::Armco, [0.8, 4.0], 0.4, true),
         m("paint", T::Paint, [1.0, 1.0], 0.6, false),
         m("dirt", T::Dirt, [5.0, 5.0], 0.95, false),
+        MaterialDef {
+            alpha: Alpha::Mask(0.5),
+            ..m("fence", T::Fence, [2.0, 2.0], 0.5, true)
+        },
+        m("tyres", T::Tyres, [1.0, 1.0], 0.9, false),
     ]
 }
 
@@ -95,6 +102,7 @@ pub fn image(texture: BuiltinTexture) -> Image {
         for x in 0..SIZE {
             let n = fbm(x, y, texture as u32 * 101);
             let grain = noise(x, y, 128, 7 + texture as u32);
+            let mut alpha = 1.0;
             let rgb: [f32; 3] = match texture {
                 BuiltinTexture::Asphalt => {
                     let v = 0.16 + 0.1 * n + 0.08 * grain;
@@ -135,9 +143,31 @@ pub fn image(texture: BuiltinTexture) -> Image {
                     let v = 0.7 + 0.3 * n + 0.1 * grain;
                     [0.4 * v, 0.3 * v, 0.2 * v]
                 }
+                BuiltinTexture::Fence => {
+                    // Diagonal wires, eight diamonds across.
+                    let cell = (SIZE / 8) as f32;
+                    let wire = |a: f32| {
+                        let t = (a / cell).fract();
+                        t.min(1.0 - t) * cell
+                    };
+                    let (u, v) = (x as f32 + y as f32, x as f32 + SIZE as f32 - y as f32);
+                    let near = wire(u).min(wire(v));
+                    alpha = if near < 1.6 { 1.0 } else { 0.0 };
+                    let g = 0.6 + 0.1 * n;
+                    [g, g * 1.02, g * 1.05]
+                }
+                BuiltinTexture::Tyres => {
+                    // Four tyres high, with treads and a lighter sidewall band.
+                    let row = (y * 4 / SIZE) as f32;
+                    let t = (y as f32 * 4.0 / SIZE as f32 - row - 0.5).abs() * 2.0;
+                    let edge = if t > 0.85 { 0.03 } else { 0.0 };
+                    let tread = if (x / 8 + y / 8) % 2 == 0 { 0.012 } else { 0.0 };
+                    let v = 0.055 + 0.02 * n + tread - edge;
+                    [v, v, v]
+                }
             };
             pixels.extend(rgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
-            pixels.push(255);
+            pixels.push((alpha * 255.0f32).round() as u8);
         }
     }
     Image {

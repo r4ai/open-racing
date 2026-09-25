@@ -31,6 +31,10 @@ use open_racing_track_project::ops::Op;
 use open_racing_track_project::project::{Shape, Side};
 use open_racing_track_render::{from_bevy, to_bevy};
 
+use std::path::PathBuf;
+
+use open_racing_track_project::model::Placement;
+
 use crate::presets::{PRESETS, unique_name};
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
@@ -125,6 +129,12 @@ enum Target {
     Marker {
         marker: Marker,
     },
+    Prop {
+        index: usize,
+        pos: DVec3,
+        yaw: f64,
+        scale: f64,
+    },
 }
 
 /// A transform in progress: Blender's G, R and S, or dragging with the mouse.
@@ -186,6 +196,8 @@ pub struct Tool {
     pub snap: bool,
     /// What the view is doing, for the header.
     pub hint: String,
+    /// A model to place with the next click.
+    pub place: Option<PathBuf>,
     /// Where the left button went down, on what, and whether it went down with Alt
     /// (orbiting).
     press: Option<(Vec2, Option<Hit>, bool)>,
@@ -432,6 +444,13 @@ fn pick(
     if let Some((hit, _)) = best {
         return Some(hit);
     }
+    // Props, by where they stand.
+    for (i, prop) in editor.project.props.iter().enumerate() {
+        let at = Placement::of(prop, built.ground.as_deref());
+        if near(at.pos + DVec3::Z * LIFT, 1.5 * PICK_RADIUS).is_some() {
+            return Some(Hit::Body(Item::Prop(i)));
+        }
+    }
     // Markers across the main road.
     let p = &editor.project;
     if let Some(main) = p.road_index(&p.main_road).and_then(|i| built.roads.get(i)) {
@@ -587,6 +606,24 @@ pub fn input(
         return;
     }
 
+    // Placing a model.
+    if let Some(model) = &tool.place {
+        tool.hint = format!(
+            "Place {}: click where it stands · Esc or right click cancels",
+            model.display()
+        );
+        if over.is_some()
+            && buttons.just_pressed(MouseButton::Left)
+            && let Some(at) = tool.pointer
+        {
+            crate::assets::place(editor, model, at);
+            tool.place = None;
+        } else if keys.just_pressed(KeyCode::Escape) || buttons.just_pressed(MouseButton::Right) {
+            tool.place = None;
+        }
+        return;
+    }
+
     let Some(at) = over else {
         tool.press = None;
         return;
@@ -606,6 +643,11 @@ pub fn input(
         } else if buttons.pressed(MouseButton::Left) {
             if from.distance(at) > DRAG_THRESHOLD {
                 match hit {
+                    Some(Hit::Body(item @ Item::Prop(_))) => {
+                        tool.press = None;
+                        editor.selection.select(item);
+                        start_modal(editor, tool, &built, Mode::Grab, None, from, true);
+                    }
                     Some(h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_))) => {
                         tool.press = None;
                         if let Hit::Node(item, n) = h
@@ -860,11 +902,18 @@ fn select_all(editor: &mut Editor) {
     }
 }
 
-/// Deletes the selected nodes, or else the selected spline or road.
+/// Deletes the selected nodes, or else the selected spline, road or prop.
 pub fn delete(editor: &mut Editor) {
     let Some(item) = editor.selection.item else {
         return;
     };
+    if let Item::Prop(i) = item {
+        let name = editor.project.props[i].name.clone();
+        if editor.apply(vec![Op::RemoveProp { name }], None) {
+            editor.selection = Default::default();
+        }
+        return;
+    }
     let Some((name, ..)) = editor.line() else {
         return;
     };
@@ -874,6 +923,7 @@ pub fn delete(editor: &mut Editor) {
         match item {
             Item::Road(_) => vec![Op::RemoveRoad { road: name }],
             Item::Spline(_) => vec![Op::RemoveSpline { name }],
+            Item::Prop(_) => vec![],
         }
     } else {
         nodes.sort_unstable();
@@ -933,7 +983,7 @@ pub fn add_node_at(editor: &mut Editor, built: &Built, pointer: Option<DVec3>) {
             .roads
             .get(r)
             .map_or(pos, |smp| pos.with_z(smp.frames[smp.nearest(pos)].pos.z)),
-        Item::Spline(_) => pos,
+        Item::Spline(_) | Item::Prop(_) => pos,
     };
     let line = name.to_string();
     if editor.apply(
@@ -978,19 +1028,35 @@ fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
     }
 }
 
-/// Shift + D: a copy of the selected spline, grabbed.
+/// Shift + D: a copy of the selected spline or prop, grabbed.
 fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
-    let Some(s) = editor.selection.spline() else {
-        editor.status = "select a spline to duplicate".into();
-        return;
+    let p = &editor.project;
+    let (op, item) = match editor.selection.item {
+        Some(Item::Spline(s)) => {
+            let mut copy = p.splines[s].clone();
+            copy.name = unique_name(p, &copy.name);
+            (
+                Op::PutSpline { spline: copy },
+                Item::Spline(p.splines.len()),
+            )
+        }
+        Some(Item::Prop(i)) => {
+            let mut copy = p.props[i].clone();
+            let base = copy.name.clone();
+            copy.name = (1..)
+                .map(|k| format!("{base}.{k:03}"))
+                .find(|n| p.props.iter().all(|x| &x.name != n))
+                .expect("some name is free");
+            (Op::PutProp { prop: copy }, Item::Prop(p.props.len()))
+        }
+        _ => {
+            editor.status = "select a spline or prop to duplicate".into();
+            return;
+        }
     };
-    let mut copy = editor.project.splines[s].clone();
-    copy.name = unique_name(&editor.project, &copy.name);
     editor.begin_drag();
-    if editor.apply(vec![Op::PutSpline { spline: copy }], None) {
-        editor
-            .selection
-            .select(Item::Spline(editor.project.splines.len() - 1));
+    if editor.apply(vec![op], None) {
+        editor.selection.select(item);
         start_modal(editor, tool, built, Mode::Grab, None, at, false);
     } else {
         editor.cancel_drag();
@@ -1023,6 +1089,16 @@ fn start_modal(
             }
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
+        _ if editor.selection.prop().is_some() => {
+            let index = editor.selection.prop().expect("a prop");
+            let p = &editor.project.props[index];
+            Target::Prop {
+                index,
+                pos: p.pos,
+                yaw: p.yaw,
+                scale: p.scale,
+            }
+        }
         _ => {
             let Some(item) = editor.selection.item else {
                 return;
@@ -1054,6 +1130,10 @@ fn start_modal(
         }
         Target::Handle { node, start, .. } => (Mode::Grab, *node + *start),
         Target::Marker { .. } => (Mode::Grab, tool.pointer.unwrap_or_default()),
+        Target::Prop { index, .. } => (
+            mode,
+            Placement::of(&editor.project.props[*index], built.ground.as_deref()).pos,
+        ),
     };
     if !by_drag || !editor.dragging {
         editor.begin_drag();
@@ -1214,21 +1294,7 @@ fn transform_ops(
                     )
                 }
                 Mode::Rotate => {
-                    let angle = match (typed, center) {
-                        (Some(deg), _) => deg.to_radians(),
-                        (None, Some(c)) => {
-                            let a0 = (m.start_cursor - c).to_angle();
-                            let a1 = (cursor - c).to_angle();
-                            // The screen's y points down: clockwise on screen.
-                            -(a1 - a0) as f64
-                        }
-                        _ => 0.0,
-                    };
-                    let angle = if snap && typed.is_none() {
-                        (angle.to_degrees() / 5.0).round() * 5f64.to_radians()
-                    } else {
-                        angle
-                    };
+                    let angle = turn(m, center, cursor, typed, snap);
                     let (pivot, rot) = (m.pivot.truncate(), DVec2::from_angle(angle));
                     (
                         Box::new(move |p: DVec3| {
@@ -1238,18 +1304,7 @@ fn transform_ops(
                     )
                 }
                 Mode::Scale => {
-                    let k = match (typed, center) {
-                        (Some(k), _) => k,
-                        (None, Some(c)) => {
-                            (cursor.distance(c) / m.start_cursor.distance(c).max(1.0)) as f64
-                        }
-                        _ => 1.0,
-                    };
-                    let k = if snap && typed.is_none() {
-                        (k * 10.0).round() / 10.0
-                    } else {
-                        k
-                    };
+                    let k = stretch(m, center, cursor, typed, snap);
                     let (pivot, axis) = (m.pivot, m.axis);
                     (
                         Box::new(move |p: DVec3| {
@@ -1303,6 +1358,53 @@ fn transform_ops(
                 format!("handle {:.1} m", h.length()),
             )
         }
+        Target::Prop {
+            index,
+            pos,
+            yaw,
+            scale,
+        } => {
+            let name = editor.project.props[*index].name.clone();
+            let (op, readout) = match m.mode {
+                Mode::Grab => {
+                    let d = slide();
+                    (
+                        Op::MoveProp {
+                            name,
+                            pos: Some(*pos + d),
+                            yaw: None,
+                            scale: None,
+                        },
+                        format!("Δ ({:.2}, {:.2}, {:.2}) m", d.x, d.y, d.z),
+                    )
+                }
+                Mode::Rotate => {
+                    let angle = turn(m, center, cursor, typed, snap);
+                    (
+                        Op::MoveProp {
+                            name,
+                            pos: None,
+                            yaw: Some(yaw + angle),
+                            scale: None,
+                        },
+                        format!("{:.1}°", angle.to_degrees()),
+                    )
+                }
+                Mode::Scale => {
+                    let k = stretch(m, center, cursor, typed, snap);
+                    (
+                        Op::MoveProp {
+                            name,
+                            pos: None,
+                            yaw: None,
+                            scale: Some((scale * k).max(1e-3)),
+                        },
+                        format!("×{k:.3}"),
+                    )
+                }
+            };
+            (vec![op], readout)
+        }
         Target::Marker { marker } => {
             let p = &editor.project;
             let Some(main) = p.road_index(&p.main_road).and_then(|i| built.roads.get(i)) else {
@@ -1338,6 +1440,37 @@ fn transform_ops(
             (vec![op], format!("u {u:.2}, s {:.0} m", f.s))
         }
     }
+}
+
+/// The turn a rotation has reached, radians anticlockwise seen from above: typed in
+/// degrees, or the pointer's angle round the pivot on screen.
+fn turn(m: &Modal, center: Option<Vec2>, cursor: Vec2, typed: Option<f64>, snap: bool) -> f64 {
+    let angle = match (typed, center) {
+        (Some(deg), _) => return deg.to_radians(),
+        (None, Some(c)) => {
+            let a0 = (m.start_cursor - c).to_angle();
+            let a1 = (cursor - c).to_angle();
+            // The screen's y points down: clockwise on screen.
+            -(a1 - a0) as f64
+        }
+        _ => 0.0,
+    };
+    if snap {
+        (angle.to_degrees() / 5.0).round() * 5f64.to_radians()
+    } else {
+        angle
+    }
+}
+
+/// The factor a scaling has reached: typed, or the pointer's distance from the pivot on
+/// screen against where it began.
+fn stretch(m: &Modal, center: Option<Vec2>, cursor: Vec2, typed: Option<f64>, snap: bool) -> f64 {
+    let k = match (typed, center) {
+        (Some(k), _) => return k,
+        (None, Some(c)) => (cursor.distance(c) / m.start_cursor.distance(c).max(1.0)) as f64,
+        _ => 1.0,
+    };
+    if snap { (k * 10.0).round() / 10.0 } else { k }
 }
 
 /// Where the draw tool would put a point: the ground under the pointer, or for a band,
@@ -1442,6 +1575,10 @@ fn draw(
 
 /// Frames the selected nodes, or the selected road or spline.
 pub fn frame_selection(editor: &Editor, orbit: &mut Orbit) {
+    if let Some(i) = editor.selection.prop() {
+        let p = to_bevy(editor.project.props[i].pos);
+        return frame(orbit, &[p - Vec3::splat(15.0), p + Vec3::splat(15.0)]);
+    }
     let Some((_, nodes, _)) = editor.line() else {
         return frame_all(editor, orbit);
     };
@@ -1503,7 +1640,7 @@ pub fn gizmos(
         let selected = sel.item == Some(item);
         let base = match item {
             Item::Road(_) => Color::srgb(0.3, 0.9, 1.0),
-            Item::Spline(_) => Color::srgb(1.0, 0.45, 0.8),
+            Item::Spline(_) | Item::Prop(_) => Color::srgb(1.0, 0.45, 0.8),
         };
         let hovered_body = hover == Some(Hit::Body(item));
         let line = if selected || hovered_body {
@@ -1519,6 +1656,7 @@ pub fn gizmos(
         let sampled = match item {
             Item::Road(r) => built.roads.get(r),
             Item::Spline(s) => built.splines.get(s),
+            Item::Prop(_) => None,
         };
         if let Some(smp) = sampled.filter(|s| s.frames.len() > 1) {
             let pts = smp
@@ -1570,6 +1708,28 @@ pub fn gizmos(
                 }
             }
         }
+    }
+
+    // Props: a ring where each stands and a line the way it faces.
+    for (i, prop) in p.props.iter().enumerate() {
+        let at = Placement::of(prop, built.ground.as_deref());
+        let item = Item::Prop(i);
+        let color = if sel.item == Some(item) {
+            Color::srgb(1.0, 0.6, 0.1)
+        } else if hover == Some(Hit::Body(item)) {
+            Color::srgb(1.0, 0.95, 0.6)
+        } else {
+            Color::srgb(0.7, 1.0, 0.4)
+        };
+        let r = 1.5 * node_size(eye, at.pos);
+        let base = lift(at.pos);
+        gizmos.circle(
+            Isometry3d::new(base, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            r,
+            color,
+        );
+        let facing = DVec3::new(at.yaw.cos(), at.yaw.sin(), 0.0);
+        gizmos.line(base, lift(at.pos + facing * (2.0 * r as f64)), color);
     }
 
     // Markers on the main road, from the last build.

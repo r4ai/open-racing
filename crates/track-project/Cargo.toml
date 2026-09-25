@@ -18,3 +18,5 @@ ron.workspace = true
 serde_json.workspace = true
 png = "0.18"
 clap.workspace = true
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
+urlencoding = "2.1.3"

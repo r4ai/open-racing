@@ -8,14 +8,16 @@ use glam::DVec3;
 use open_racing_sim::Surface;
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{
-    Align, Barrier, BuiltinTexture, Grid, MaterialDef, NamedSurface, PaintLine, Pit, Profile,
-    Range, Shape, Side, Spline, Strip, TextureSource,
+    Align, Alpha, Barrier, BuiltinTexture, Grid, MaterialDef, NamedSurface, PaintLine, Pit,
+    Profile, Range, Shape, Side, Spline, Strip, TextureSource,
 };
 use open_racing_track_project::{Project, projects_dir};
 
+use crate::assets::{self, Library};
 use crate::jobs::Jobs;
 use crate::menus;
 use crate::preview::Built;
+use crate::preview::Props;
 use crate::profile::{ProfileView, profile};
 use crate::state::{Editor, Item};
 use crate::viewport::{Orbit, Tool, ViewRect, frame_selection};
@@ -29,6 +31,7 @@ pub enum Tab {
     Terrain,
     Surfaces,
     Materials,
+    Assets,
 }
 
 #[derive(Default)]
@@ -41,6 +44,7 @@ pub struct UiState {
     profile: ProfileView,
     /// The inspector is hidden (N).
     sidebar_hidden: bool,
+    assets: assets::Panel,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,6 +56,8 @@ pub fn ui(
     mut rect: ResMut<ViewRect>,
     mut tool: ResMut<Tool>,
     built: Res<Built>,
+    mut library: ResMut<Library>,
+    props: Res<Props>,
     mut state: Local<UiState>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) -> Result {
@@ -167,12 +173,21 @@ pub fn ui(
             egui::ScrollArea::vertical().show(ui, |ui| match state.tab {
                 Tab::Road => match editor.selection.item {
                     Some(Item::Spline(_)) => spline_inspector(ui, editor, &mut state),
+                    Some(Item::Prop(_)) => prop_inspector(ui, editor, &library),
                     _ => road_inspector(ui, editor, &mut state),
                 },
                 Tab::Markers => markers_inspector(ui, editor),
                 Tab::Terrain => terrain_inspector(ui, editor),
                 Tab::Surfaces => surfaces_inspector(ui, editor, &mut state),
-                Tab::Materials => materials_inspector(ui, editor, &mut state),
+                Tab::Materials => materials_inspector(ui, editor, &mut state, &library),
+                Tab::Assets => assets::panel(
+                    ui,
+                    editor,
+                    &mut library,
+                    &props,
+                    &mut tool,
+                    &mut state.assets,
+                ),
             });
         });
 
@@ -259,11 +274,24 @@ fn outliner(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
         ui.weak("Shift+A in the view to draw one.");
     }
     ui.separator();
+    ui.strong("Props");
+    for (i, p) in editor.project.props.iter().enumerate() {
+        let selected = state.tab == Tab::Road && editor.selection.prop() == Some(i);
+        if ui.selectable_label(selected, &p.name).clicked() {
+            editor.selection.select(Item::Prop(i));
+            state.tab = Tab::Road;
+        }
+    }
+    if editor.project.props.is_empty() {
+        ui.weak("Place models from Assets.");
+    }
+    ui.separator();
     for (tab, name) in [
         (Tab::Markers, "Race markers"),
         (Tab::Terrain, "Terrain"),
         (Tab::Surfaces, "Surfaces"),
         (Tab::Materials, "Materials"),
+        (Tab::Assets, "Assets"),
     ] {
         if ui.selectable_label(state.tab == tab, name).clicked() {
             state.tab = tab;
@@ -1221,8 +1249,59 @@ fn surfaces_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiStat
     });
 }
 
-fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
+/// A texture: none, a built-in one, or a file among the project's textures.
+fn texture_picker(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    source: &mut TextureSource,
+    library: &Library,
+    builtins: bool,
+) -> bool {
+    let text = match &*source {
+        TextureSource::None => "none".to_string(),
+        TextureSource::Builtin(t) => format!("{t:?} (built in)"),
+        TextureSource::File(p) => p.to_string_lossy().into_owned(),
+    };
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(text)
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(source, TextureSource::None, "none")
+                .changed();
+            if builtins {
+                for t in BuiltinTexture::ALL {
+                    changed |= ui
+                        .selectable_value(
+                            source,
+                            TextureSource::Builtin(t),
+                            format!("{t:?} (built in)"),
+                        )
+                        .changed();
+                }
+            }
+            for a in library.textures() {
+                changed |= ui
+                    .selectable_value(
+                        source,
+                        TextureSource::File(a.path.clone()),
+                        a.path.to_string_lossy(),
+                    )
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn materials_inspector(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    state: &mut UiState,
+    library: &Library,
+) {
     ui.heading("Materials");
+    ui.small("Import textures in Assets to use them here.");
     let materials = editor.project.materials.clone();
     for (i, m) in materials.iter().enumerate() {
         let mut m = m.clone();
@@ -1234,41 +1313,35 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
                     ui.label("tint");
                     changed |= ui.color_edit_button_rgb(&mut m.color).changed();
                 });
-                let current = match &m.texture {
-                    TextureSource::None => "none".to_string(),
-                    TextureSource::Builtin(t) => format!("{t:?}"),
-                    TextureSource::File(_) => "file".to_string(),
-                };
-                egui::ComboBox::from_id_salt(("tex", i))
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut m.texture, TextureSource::None, "none")
-                            .changed();
-                        for t in BuiltinTexture::ALL {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut m.texture,
-                                    TextureSource::Builtin(t),
-                                    format!("{t:?}"),
-                                )
-                                .changed();
-                        }
-                        if !matches!(m.texture, TextureSource::File(_))
-                            && ui.selectable_label(false, "file…").clicked()
-                        {
-                            m.texture = TextureSource::File("textures/texture.png".into());
-                            changed = true;
-                        }
-                    });
-                if let TextureSource::File(path) = &mut m.texture {
-                    let mut s = path.to_string_lossy().into_owned();
-                    if ui.text_edit_singleline(&mut s).lost_focus() {
-                        *path = s.into();
+                ui.horizontal(|ui| {
+                    ui.label("texture");
+                    changed |= texture_picker(ui, ("tex", i), &mut m.texture, library, true);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("normal map");
+                    changed |= texture_picker(ui, ("normal", i), &mut m.normal, library, false);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("alpha");
+                    let mut kind = match m.alpha {
+                        Alpha::Opaque => 0,
+                        Alpha::Mask(_) => 1,
+                        Alpha::Blend => 2,
+                    };
+                    let before = kind;
+                    for (k, label) in ["opaque", "cut out", "blend"].iter().enumerate() {
+                        ui.selectable_value(&mut kind, k, *label);
+                    }
+                    if kind != before {
+                        m.alpha = [Alpha::Opaque, Alpha::Mask(0.5), Alpha::Blend][kind];
                         changed = true;
                     }
-                    ui.small("PNG or DDS, relative to the project directory");
-                }
+                    if let Alpha::Mask(c) = &mut m.alpha {
+                        changed |= ui
+                            .add(egui::DragValue::new(c).speed(0.01).range(0.0..=1.0))
+                            .changed();
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("tile m");
                     changed |= ui
@@ -1328,10 +1401,75 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
                 roughness: 0.8,
                 reflectance: 0.5,
                 double_sided: false,
+                normal: TextureSource::None,
+                alpha: Alpha::Opaque,
             };
             if editor.apply(vec![Op::PutMaterial { material }], None) {
                 state.new_material.clear();
             }
         }
     });
+}
+
+fn prop_inspector(ui: &mut egui::Ui, editor: &mut Editor, library: &Library) {
+    let Some(i) = editor
+        .selection
+        .prop()
+        .filter(|&i| i < editor.project.props.len())
+    else {
+        ui.label("Select a prop.");
+        return;
+    };
+    let before = editor.project.props[i].clone();
+    let mut p = before.clone();
+    ui.horizontal(|ui| {
+        ui.label("Prop");
+        ui.strong(&p.name);
+    });
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("model");
+        egui::ComboBox::from_id_salt(("prop model", i))
+            .selected_text(p.model.to_string_lossy())
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                for a in library.models() {
+                    changed |= ui
+                        .selectable_value(&mut p.model, a.path.clone(), a.path.to_string_lossy())
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        for (axis, v) in ["x", "y", "z"]
+            .iter()
+            .zip([&mut p.pos.x, &mut p.pos.y, &mut p.pos.z])
+        {
+            ui.label(*axis);
+            changed |= ui.add(egui::DragValue::new(v).speed(0.25)).changed();
+        }
+    });
+    let mut deg = p.yaw.to_degrees();
+    if drag(ui, "turn °", &mut deg, 1.0, -360.0..=360.0) {
+        p.yaw = deg.to_radians();
+        changed = true;
+    }
+    changed |= drag(ui, "scale", &mut p.scale, 0.01, 0.01..=100.0);
+    changed |= ui
+        .checkbox(&mut p.drape, "stand on the ground")
+        .on_hover_text("Its height comes from the road or terrain under it")
+        .changed();
+    changed |= ui
+        .checkbox(&mut p.collide, "cars collide with it")
+        .changed();
+    if changed {
+        editor.apply(
+            vec![Op::PutProp { prop: p }],
+            Some(&format!("prop {}", before.name)),
+        );
+    }
+    ui.small("G: move · R: turn · S: scale · Shift+D: duplicate · X: delete");
+    if ui.button("Delete prop").clicked() {
+        crate::viewport::delete(editor);
+    }
 }

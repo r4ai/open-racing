@@ -3,7 +3,7 @@
 A track project is the editable source of a circuit, kept in a directory:
 
 - `project.ron`: everything about the track. It is plain text, and names tie its parts together.
-- Texture files that the materials name, if there are any. The built-in textures need no files.
+- `assets/textures/` and `assets/models/`: the textures (PNG, DDS) and glTF models (.glb, .gltf) the project uses, if there are any. The built-in textures need no files.
 
 `open-racing-editor` edits projects in 3D. `open-racing-trackctl` edits them from the command line.
 Both apply the same operations and check the result the same way.
@@ -14,6 +14,8 @@ trackctl new my-track                   # content/track-src/my-track/, with a sm
 trackctl info my-track [--json]         # roads, nodes and their distances, radii, grades, markers, warnings
 trackctl apply my-track ops.ron         # or ops.json, or - for stdin; all or nothing
 trackctl preview my-track               # plan view: my-track/preview.png
+trackctl import my-track a.png b.glb    # copy into my-track/assets/, print the paths to use
+trackctl assets my-track [--json]       # textures and models, what uses each, unused and missing ones
 trackctl check my-track --lap           # bake in memory, check, drive a test lap
 trackctl bake my-track                  # write content/tracks/<name>/ (then: open-racing-app --track <name>)
 trackctl guide                          # this text
@@ -82,7 +84,13 @@ trackctl guide                          # this text
     terrain: (enabled: true, surface: "grass", material: "grass", margin: 200, cell: 8),
     surfaces: [(name: "asphalt", props: (kind: Asphalt, grip: 1.0, drag: 0.0)), ...],
     materials: [(name: "asphalt", color: (1, 1, 1), texture: Builtin(Asphalt),
-                 tile: (4, 4), roughness: 0.8, reflectance: 0.5), ...],
+                 tile: (4, 4), roughness: 0.8, reflectance: 0.5), ...,
+                (name: "sponsor", color: (1, 1, 1), texture: File("assets/textures/sponsor.png"),
+                 normal: File("assets/textures/sponsor_n.png"),   // optional normal map
+                 alpha: Mask(0.5),            // Opaque (default), Mask(cut-off) or Blend
+                 tile: (6, 1), roughness: 0.6, reflectance: 0.5, double_sided: true)],
+    props: [(name: "main stand", model: "assets/models/stand.glb", pos: (120, 35, 0),
+             yaw: 0.0, scale: 1.0, drape: true, collide: true)],
 )
 ```
 
@@ -111,9 +119,19 @@ trackctl guide                          # this text
 - `drag` adds rolling resistance.
 - `Asphalt` and `Kerb` count as track. Everything else is off track.
 
-**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint` and `Dirt`. The alternative is `File("textures/x.png")`, a path relative to the project.
+**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint`, `Dirt`, `Fence` (chain link, see-through with `alpha: Mask`) and `Tyres`. The alternative is `File("assets/textures/x.png")`, a path relative to the project; `trackctl import` puts files there.
 
 - `tile` gives the metres covered by one repetition of the texture, across the road and then along it.
+- `normal` is a tangent-space normal map, tiled like the texture.
+- `alpha` says what the texture's alpha does: nothing (`Opaque`), cut out below a value (`Mask`, for fences and foliage) or blend (`Blend`, for glass).
+
+**Props.** A prop is a glTF model placed in the scene: a grandstand, a sign, a tree, a building.
+
+- `pos` is where the model's origin goes. `yaw` turns it anticlockwise seen from above, in radians, and `scale` resizes it.
+- `drape: true` stands it on the road or terrain under `pos`, ignoring the height.
+- `collide: true` makes its triangles walls for the cars. Leave it off for things out of reach, as it costs physics time.
+- Models are Y-up as glTF has them. Their own materials and textures come along; the project's materials are not used.
+- The files a project refers to, and those it does not, are listed by `trackctl assets`.
 
 **Pit lane.** The pit lane is a separate, open road. It starts where it leaves the track and ends where it rejoins.
 
@@ -190,6 +208,13 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | --- | --- | --- |
 | `PutSurface` / `RemoveSurface` | `surface` / `name` | adds, replaces or removes a surface |
 | `PutMaterial` / `RemoveMaterial` | `material` / `name` | adds, replaces or removes a material |
+
+**Props**
+
+| operation | fields | what it does |
+| --- | --- | --- |
+| `PutProp` / `RemoveProp` | `prop` / `name` | places, replaces or removes a prop |
+| `MoveProp` | `name`, `pos?`, `yaw?`, `scale?` | moves, turns or resizes a prop |
 
 ## Working on a track
 

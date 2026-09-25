@@ -11,10 +11,12 @@
 //! The crate does not depend on any renderer, so projects can be baked and checked from
 //! tests and scripts.
 
+pub mod assets;
 pub mod bake;
 pub mod builtin;
 pub mod curve;
 pub mod inspect;
+pub mod model;
 pub mod ops;
 mod overlap;
 pub mod preview;
@@ -26,7 +28,7 @@ pub mod validate;
 
 use std::path::PathBuf;
 
-pub use bake::{Scene, Textures, bake};
+pub use bake::{Cache, Scene, bake};
 pub use project::*;
 
 #[derive(Debug)]
@@ -88,7 +90,7 @@ mod tests {
     fn baked_package_drives() {
         let project = Project::new("oval");
         let dir = temp_dir("bake");
-        let package = bake(&project, &dir, &mut Textures::default()).unwrap();
+        let package = bake(&project, &dir, &mut Cache::default()).unwrap();
         package.save(&dir).unwrap();
         let package = open_racing_track::TrackPackage::load(&dir, true).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -129,7 +131,7 @@ mod tests {
     #[test]
     fn kerbs_sit_in_the_corners() {
         let project = Project::new("oval");
-        let package = bake(&project, Path::new("."), &mut Textures::default()).unwrap();
+        let package = bake(&project, Path::new("."), &mut Cache::default()).unwrap();
         let track = package.build_track().unwrap();
         // The middle of the first corner: node 3, on the outside (right) and inside.
         let main = curve::Sampled::new(&project.roads[0], 2.0);
@@ -158,7 +160,7 @@ mod tests {
         )
         .unwrap();
         ops::apply_all(&mut project, &ops).unwrap();
-        let package = bake(&project, Path::new("."), &mut Textures::default()).unwrap();
+        let package = bake(&project, Path::new("."), &mut Cache::default()).unwrap();
         let track = package.build_track().unwrap();
         let ground = track.ground.as_ref().unwrap();
         // Along the lane, across its width.
@@ -205,7 +207,7 @@ mod tests {
                 road.right.clear();
                 road.barriers.clear();
             }
-            let package = bake(&project, Path::new("."), &mut Textures::default()).unwrap();
+            let package = bake(&project, Path::new("."), &mut Cache::default()).unwrap();
             let track = package.build_track().unwrap();
             let ground = track.ground.as_ref().unwrap();
             let main = curve::Sampled::new(&project.roads[0], 0.5);
@@ -274,6 +276,80 @@ mod tests {
                 .wall_contact(floor + DVec3::new(0.0, 3.0, 0.6), 0.5)
                 .is_none()
         );
+    }
+
+    /// A 2 m square standing upright, facing glTF's +Z (the simulation's −Y), as a
+    /// .gltf with its buffer beside it.
+    fn write_panel(dir: &Path) {
+        std::fs::create_dir_all(dir.join("assets/models")).unwrap();
+        let mut bin = Vec::new();
+        for v in [[0f32, 0., 0.], [2., 0., 0.], [2., 2., 0.], [0., 2., 0.]] {
+            bin.extend(v.iter().flat_map(|x| x.to_le_bytes()));
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend(i.to_le_bytes());
+        }
+        std::fs::write(dir.join("assets/models/panel.bin"), &bin).unwrap();
+        let gltf = r#"{
+            "asset": {"version": "2.0"},
+            "scene": 0, "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+            "buffers": [{"uri": "panel.bin", "byteLength": 60}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 48},
+                            {"buffer": 0, "byteOffset": 48, "byteLength": 12}],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+                 "min": [0, 0, 0], "max": [2, 2, 0]},
+                {"bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR"}]
+        }"#;
+        std::fs::write(dir.join("assets/models/panel.gltf"), gltf).unwrap();
+    }
+
+    #[test]
+    fn props_stand_where_placed_and_block_when_solid() {
+        let dir = temp_dir("props");
+        write_panel(&dir);
+        let mut project = Project::new("oval");
+        let ops = ops::parse(
+            r#"[
+                PutProp(prop: (name: "board", model: "assets/models/panel.gltf",
+                    pos: (100, 60, 30), yaw: 0, scale: 2, drape: true, collide: true)),
+                MoveProp(name: "board", yaw: Some(0.5)),
+            ]"#,
+        )
+        .unwrap();
+        ops::apply_all(&mut project, &ops).unwrap();
+        let package = bake(&project, &dir, &mut Cache::default()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let track = package.build_track().unwrap();
+        // Turned half a radian, 4 m wide and high, standing on the terrain.
+        let along = DVec3::new(0.5f64.cos(), 0.5f64.sin(), 0.0);
+        let floor = track
+            .ground
+            .as_ref()
+            .unwrap()
+            .raycast_down(DVec3::new(100.0, 60.0, 50.0), 0.0)
+            .unwrap()
+            .point;
+        let mid = floor + along * 2.0 + DVec3::Z * 2.0;
+        assert!(track.wall_contact(mid, 0.3).is_some());
+        assert!(
+            track.wall_contact(mid + DVec3::Z * 3.0, 0.3).is_none(),
+            "4 m high"
+        );
+        assert!(
+            track
+                .wall_contact(floor + along * 5.0 + DVec3::Z, 0.3)
+                .is_none(),
+            "4 m wide"
+        );
+        let visual = package.visual.unwrap();
+        assert!(visual.meshes.iter().any(|m| {
+            m.positions
+                .iter()
+                .any(|p| (p[2] as f64 - floor.z - 4.0).abs() < 1e-3)
+        }));
     }
 
     use std::path::Path;

@@ -2,19 +2,23 @@
 //! centreline of the main road, and the race layout from the markers.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use glam::DVec3;
+use open_racing_sim::GroundMesh;
 use open_racing_sim::track::heading;
 use open_racing_sim::{GridSlot, Layout, PitLane, Pose, Track, TrackDef, TrackPoint};
 use open_racing_track::texture::{self, Mips};
 use open_racing_track::{
-    Ground, Material, PatchKind, Texture, TrackPackage, Visual, VisualBuilder,
+    AlphaMode, Ground, Material, PatchKind, Texture, TrackPackage, Visual, VisualBuilder,
 };
 
 use crate::Error;
 use crate::curve::Sampled;
-use crate::project::{MaterialDef, Project, TextureSource};
+use crate::model::{self, Model, Placement};
+use crate::project::{Alpha, MaterialDef, Project, TextureSource};
 use crate::road::{self, RoadBuild, Solid, SolidPart};
 use crate::spline::{self, SplineBuild};
 use crate::terrain::{self, TerrainBuild};
@@ -91,19 +95,27 @@ fn surface_props(project: &Project) -> Vec<open_racing_sim::SurfaceProps> {
     project.surfaces.iter().map(|s| s.props).collect()
 }
 
-/// Prepared textures, kept between bakes so that each is encoded once.
+/// Prepared textures and loaded models, kept between bakes so that each is read and
+/// encoded once, and again only when its file changes.
 #[derive(Default)]
-pub struct Textures {
-    cache: HashMap<TextureSource, Vec<u8>>,
+pub struct Cache {
+    textures: HashMap<TextureSource, (Option<SystemTime>, Vec<u8>)>,
+    models: HashMap<PathBuf, (Option<SystemTime>, Arc<Model>)>,
 }
 
-impl Textures {
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+impl Cache {
     /// The DDS of a texture; files are read from `dir`.
-    pub fn get(&mut self, source: &TextureSource, dir: &Path) -> Result<Option<&[u8]>, Error> {
-        if *source == TextureSource::None {
-            return Ok(None);
-        }
-        if !self.cache.contains_key(source) {
+    pub fn texture(&mut self, source: &TextureSource, dir: &Path) -> Result<Option<&[u8]>, Error> {
+        let stamp = match source {
+            TextureSource::None => return Ok(None),
+            TextureSource::Builtin(_) => None,
+            TextureSource::File(p) => modified(&dir.join(p)),
+        };
+        if self.textures.get(source).is_none_or(|(s, _)| *s != stamp) {
             let dds = match source {
                 TextureSource::None => unreachable!(),
                 TextureSource::Builtin(t) => texture::encode(crate::builtin::image(*t)),
@@ -114,9 +126,23 @@ impl Textures {
                         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?
                 }
             };
-            self.cache.insert(source.clone(), dds);
+            self.textures.insert(source.clone(), (stamp, dds));
         }
-        Ok(self.cache.get(source).map(Vec::as_slice))
+        Ok(self.textures.get(source).map(|(_, d)| d.as_slice()))
+    }
+
+    /// A model, read from `path` relative to `dir`.
+    pub fn model(&mut self, dir: &Path, path: &Path) -> Result<Arc<Model>, Error> {
+        let full = dir.join(path);
+        let stamp = modified(&full);
+        if let Some((s, m)) = self.models.get(path)
+            && *s == stamp
+        {
+            return Ok(m.clone());
+        }
+        let m = Arc::new(model::load(&full)?);
+        self.models.insert(path.to_path_buf(), (stamp, m.clone()));
+        Ok(m)
     }
 }
 
@@ -133,7 +159,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 pub fn add_materials(
     project: &Project,
     dir: &Path,
-    textures: &mut Textures,
+    cache: &mut Cache,
     visual: &mut VisualBuilder,
 ) -> Result<(), Error> {
     for m in &project.materials {
@@ -143,20 +169,31 @@ pub fn add_materials(
             roughness,
             reflectance,
             double_sided,
+            normal,
+            alpha,
             ..
         } = m;
-        let texture = textures.get(texture, dir)?.map(|data| {
-            visual.add_texture(Texture {
-                data: data.to_vec(),
-            })
-        });
+        let mut add = |source| -> Result<Option<u32>, Error> {
+            Ok(cache.texture(source, dir)?.map(|data| {
+                visual.add_texture(Texture {
+                    data: data.to_vec(),
+                })
+            }))
+        };
+        let (texture, normal) = (add(texture)?, add(normal)?);
         let [r, g, b] = color.map(srgb_to_linear);
         visual.add_material(Material {
             base_color: [r, g, b, 1.0],
             base_color_texture: texture,
+            normal_texture: normal,
             roughness: *roughness,
             reflectance: *reflectance,
             double_sided: *double_sided,
+            alpha_mode: match *alpha {
+                Alpha::Opaque => AlphaMode::Opaque,
+                Alpha::Mask(c) => AlphaMode::Mask(c),
+                Alpha::Blend => AlphaMode::Blend,
+            },
             ..Default::default()
         });
     }
@@ -164,20 +201,93 @@ pub fn add_materials(
 }
 
 /// The project's materials only, for previews that add their own meshes.
-pub fn materials(project: &Project, dir: &Path, textures: &mut Textures) -> Result<Visual, Error> {
+pub fn materials(project: &Project, dir: &Path, cache: &mut Cache) -> Result<Visual, Error> {
     let mut visual = VisualBuilder::new();
-    add_materials(project, dir, textures, &mut visual)?;
+    add_materials(project, dir, cache, &mut visual)?;
     Ok(visual.build())
 }
 
-/// Bakes the project into a package. Textures are read from the project's directory
+/// Adds a model's textures and materials to `visual`; returns the new index of each
+/// of its materials.
+pub fn add_look(model: &Model, visual: &mut VisualBuilder) -> Vec<u32> {
+    let textures: Vec<u32> = model
+        .look
+        .textures
+        .iter()
+        .map(|t| visual.add_texture(t.clone()))
+        .collect();
+    let remap = |i: Option<u32>| i.map(|i| textures[i as usize]);
+    model
+        .look
+        .materials
+        .iter()
+        .map(|m| {
+            visual.add_material(Material {
+                base_color_texture: remap(m.base_color_texture),
+                normal_texture: remap(m.normal_texture),
+                surface_texture: remap(m.surface_texture),
+                ..m.clone()
+            })
+        })
+        .collect()
+}
+
+/// Adds the props: their meshes to `visual`, and those cars collide with to `ground`.
+pub fn add_props(
+    project: &Project,
+    dir: &Path,
+    cache: &mut Cache,
+    under: Option<&GroundMesh>,
+    visual: &mut VisualBuilder,
+    ground: &mut Ground,
+) -> Result<(), Error> {
+    let mut looks: HashMap<&Path, Vec<u32>> = HashMap::new();
+    for prop in &project.props {
+        let model = cache.model(dir, &prop.model)?;
+        let materials = looks
+            .entry(prop.model.as_path())
+            .or_insert_with(|| add_look(&model, visual));
+        let at = Placement::of(prop, under);
+        for m in &model.meshes {
+            let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| at.point(p)).collect();
+            let normals: Vec<[f32; 3]> = m.normals.iter().map(|&n| at.normal(n)).collect();
+            visual.add_mesh(
+                materials[m.material as usize],
+                m.cast_shadows,
+                &positions,
+                &normals,
+                &m.uvs,
+                &m.indices,
+            );
+            if prop.collide {
+                ground.add(PatchKind::Wall, &positions, &[], &m.indices);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bakes the project into a package. Textures and models are read from the project's directory
 /// `dir`.
-pub fn bake(project: &Project, dir: &Path, textures: &mut Textures) -> Result<TrackPackage, Error> {
+pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPackage, Error> {
     project.validate()?;
-    let scene = build(project);
+    let mut scene = build(project);
 
     let mut visual = VisualBuilder::new();
-    add_materials(project, dir, textures, &mut visual)?;
+    add_materials(project, dir, cache, &mut visual)?;
+    let under = project
+        .props
+        .iter()
+        .any(|p| p.drape)
+        .then(|| scene.ground.build(&surface_props(project)));
+    add_props(
+        project,
+        dir,
+        cache,
+        under.as_ref(),
+        &mut visual,
+        &mut scene.ground,
+    )?;
     for part in scene.visual_parts() {
         let m = &part.mesh;
         visual.add_mesh(

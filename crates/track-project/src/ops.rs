@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::project::{
-    Barrier, Grid, Key, MaterialDef, NamedSurface, Node, PaintLine, Pit, Project, Road, Side,
+    Barrier, Grid, Key, MaterialDef, NamedSurface, Node, PaintLine, Pit, Project, Prop, Road, Side,
     Spline, StationCurve, Strip, Terrain,
 };
 
@@ -153,6 +153,24 @@ pub enum Op {
     },
     RemoveSpline {
         name: String,
+    },
+
+    /// Places a 3D model, or replaces the prop of the same name.
+    PutProp {
+        prop: Prop,
+    },
+    RemoveProp {
+        name: String,
+    },
+    /// Moves, turns or resizes a prop; what is left out stays as it is.
+    MoveProp {
+        name: String,
+        #[serde(default)]
+        pos: Option<DVec3>,
+        #[serde(default)]
+        yaw: Option<f64>,
+        #[serde(default)]
+        scale: Option<f64>,
     },
 
     SetMarkers {
@@ -440,6 +458,29 @@ impl Op {
             }
             Op::PutSpline { spline } => put(&mut p.splines, spline, |s| &s.name, None),
             Op::RemoveSpline { name } => remove(&mut p.splines, "spline", &name, |s| &s.name)?,
+            Op::PutProp { prop } => put(&mut p.props, prop, |x| &x.name, None),
+            Op::RemoveProp { name } => remove(&mut p.props, "prop", &name, |x| &x.name)?,
+            Op::MoveProp {
+                name,
+                pos,
+                yaw,
+                scale,
+            } => {
+                let prop = p
+                    .props
+                    .iter_mut()
+                    .find(|x| x.name == name)
+                    .ok_or_else(|| missing("prop", &name))?;
+                if let Some(v) = pos {
+                    prop.pos = v;
+                }
+                if let Some(v) = yaw {
+                    prop.yaw = v;
+                }
+                if let Some(v) = scale {
+                    prop.scale = v;
+                }
+            }
             Op::SetProfile { road, curve, keys } => {
                 let r = road_mut(p, &road)?;
                 let mut keys = keys;
@@ -577,6 +618,9 @@ impl Op {
             Op::RemoveBarrier { .. } => "RemoveBarrier",
             Op::PutSpline { .. } => "PutSpline",
             Op::RemoveSpline { .. } => "RemoveSpline",
+            Op::PutProp { .. } => "PutProp",
+            Op::RemoveProp { .. } => "RemoveProp",
+            Op::MoveProp { .. } => "MoveProp",
             Op::SetMarkers { .. } => "SetMarkers",
             Op::SetPit { .. } => "SetPit",
             Op::SetTerrain { .. } => "SetTerrain",
