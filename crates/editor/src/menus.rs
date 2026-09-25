@@ -169,10 +169,12 @@ fn menu_items(
             }
             if entry(ui, "Automatic handle") {
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line: name.clone(),
                         index: n,
-                        handle: None,
+                        mode: open_racing_track_project::HandleMode::Auto,
+                        incoming: glam::DVec3::ZERO,
+                        outgoing: glam::DVec3::ZERO,
                     }],
                     None,
                 );
@@ -190,10 +192,12 @@ fn menu_items(
             ui.strong(format!("Handle of node {n}"));
             if entry(ui, "Automatic handle") {
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line: name,
                         index: n,
-                        handle: None,
+                        mode: open_racing_track_project::HandleMode::Auto,
+                        incoming: glam::DVec3::ZERO,
+                        outgoing: glam::DVec3::ZERO,
                     }],
                     None,
                 );

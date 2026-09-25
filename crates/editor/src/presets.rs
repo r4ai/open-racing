@@ -146,7 +146,7 @@ impl Preset {
             closed: false,
             nodes: nodes
                 .into_iter()
-                .map(|pos| open_racing_track_project::Node { pos, handle: None })
+                .map(open_racing_track_project::Node::new)
                 .collect(),
             drape: true,
             shape: (self.shape)(project),

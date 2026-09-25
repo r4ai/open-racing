@@ -28,7 +28,7 @@ use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::{Frame, Sampled, handles};
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{Range, Road, Shape, Side};
+use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side};
 use open_racing_track_render::{from_bevy, to_bevy};
 
 use std::path::PathBuf;
@@ -186,6 +186,8 @@ enum Target {
         node: DVec3,
         /// The handle's offset from the node.
         start: DVec3,
+        other: DVec3,
+        handle_mode: HandleMode,
     },
     Marker {
         marker: Marker,
@@ -601,7 +603,39 @@ fn visible_handles(
     let (inc, out) = handles(nodes, closed, index);
     [(inc, false), (out, true)]
         .into_iter()
-        .filter(|(offset, _)| offset.length_squared() > 1e-12)
+        .filter(move |(offset, outgoing)| {
+            offset.length_squared() > 1e-12
+                && (closed
+                    || if *outgoing {
+                        index + 1 < nodes.len()
+                    } else {
+                        index > 0
+                    })
+        })
+}
+
+/// Move one handle while keeping the other independent or aligned as requested.
+fn dragged_handles(mode: HandleMode, out: bool, moved: DVec3, other: DVec3) -> (DVec3, DVec3) {
+    if out {
+        let incoming = if mode == HandleMode::Free {
+            other
+        } else {
+            -moved.normalize_or_zero() * other.length()
+        };
+        (incoming, moved)
+    } else {
+        let outgoing = if mode == HandleMode::Free {
+            other
+        } else {
+            -moved.normalize_or_zero()
+                * if other.length_squared() > 1e-12 {
+                    other.length()
+                } else {
+                    moved.length()
+                }
+        };
+        (moved, outgoing)
+    }
 }
 
 /// The spline or road whose body covers `p`, splines first.
@@ -967,10 +1001,12 @@ fn click(
             if let Some((name, ..)) = item_line(&editor.project, item) {
                 let line = name.to_string();
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line,
                         index: n,
-                        handle: None,
+                        mode: HandleMode::Auto,
+                        incoming: DVec3::ZERO,
+                        outgoing: DVec3::ZERO,
                     }],
                     None,
                 );
@@ -1225,6 +1261,8 @@ fn start_modal(
                 out,
                 node: nodes[index].pos,
                 start: if out { o } else { inc },
+                other: if out { inc } else { o },
+                handle_mode: nodes[index].handles.mode(),
             }
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
@@ -1495,18 +1533,26 @@ fn transform_ops(
             index,
             out,
             start,
+            other,
+            handle_mode,
             ..
         } => {
             let Some((name, ..)) = item_line(&editor.project, *item) else {
                 return (vec![], String::new());
             };
             let h = *start + slide();
-            let handle = if *out { h } else { -h };
+            let (incoming, outgoing) = dragged_handles(*handle_mode, *out, h, *other);
             (
-                vec![Op::SetHandle {
+                vec![Op::SetNodeHandles {
                     line: name.to_string(),
                     index: *index,
-                    handle: Some(handle),
+                    mode: if *handle_mode == HandleMode::Free {
+                        HandleMode::Free
+                    } else {
+                        HandleMode::Aligned
+                    },
+                    incoming,
+                    outgoing,
                 }],
                 format!("handle {:.1} m", h.length()),
             )
@@ -2136,20 +2182,27 @@ mod tests {
 
     #[test]
     fn end_node_has_only_its_nonzero_handle() {
-        let nodes = [
-            Node {
-                pos: DVec3::ZERO,
-                handle: None,
-            },
-            Node {
-                pos: DVec3::X * 30.0,
-                handle: None,
-            },
-        ];
+        let nodes = [Node::new(DVec3::ZERO), Node::new(DVec3::X * 30.0)];
         let first: Vec<_> = visible_handles(&nodes, false, 0).collect();
         let last: Vec<_> = visible_handles(&nodes, false, 1).collect();
         assert_eq!(first, vec![(DVec3::X * 10.0, true)]);
         assert_eq!(last, vec![(-DVec3::X * 10.0, false)]);
+    }
+
+    #[test]
+    fn dragging_handle_respects_aligned_and_free_modes() {
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Aligned, true, DVec3::Y * 5.0, -DVec3::X * 2.0);
+        assert_eq!(incoming, -DVec3::Y * 2.0);
+        assert_eq!(outgoing, DVec3::Y * 5.0);
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Free, false, -DVec3::Y * 3.0, DVec3::X * 4.0);
+        assert_eq!(incoming, -DVec3::Y * 3.0);
+        assert_eq!(outgoing, DVec3::X * 4.0);
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Auto, false, -DVec3::Y * 3.0, DVec3::ZERO);
+        assert_eq!(incoming, -DVec3::Y * 3.0);
+        assert_eq!(outgoing, DVec3::Y * 3.0);
     }
 
     #[test]

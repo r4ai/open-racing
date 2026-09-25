@@ -37,15 +37,16 @@ trackctl guide                          # this text
 
 ```ron
 (
-    format: 1,
+    format: 2,
     name: "my-track",                // name of the baked package
     main_road: "circuit",            // the closed road raced on
     roads: [(
         name: "circuit",
         closed: true,
-        nodes: [(pos: (0, 0, 0)), (pos: (250, 0, 2), handle: Some((60, 0, 0))), ...],
-        //  handle: outgoing Bézier handle offset (the incoming one mirrors it);
-        //  left out, the road is smoothed through the neighbouring nodes.
+        nodes: [(pos: (0, 0, 0)),
+                (pos: (250, 0, 2), handles: Aligned(outgoing: (60, 0, 0), incoming_length: 30)), ...],
+        //  handles: Auto (default), Aligned(outgoing, incoming_length),
+        //  or Free(incoming, outgoing).
         width_left: (keys: [(u: 0, value: 6)]),      // centre to left edge, m
         width_right: (keys: [(u: 0, value: 6)]),
         bank: (keys: [(u: 0, value: 0), (u: 3, value: 0.05)]),  // + raises the right edge
@@ -94,7 +95,7 @@ trackctl guide                          # this text
 )
 ```
 
-**Profiles.** `width_left`, `width_right` and `bank` are keyed along the road and eased between keys. A single key makes the value constant.
+**Profiles.** `width_left`, `width_right` and `bank` are keyed along the road. Keys may set `slope_in` and `slope_out` (value per unit `u`) to control how quickly the value changes on either side. Their default is zero, which gives the eased interpolation. A single key makes the value constant.
 
 **Strips.** A strip is a band beside the road, such as a kerb, run-off, gravel, grass or a verge.
 
@@ -168,7 +169,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | --- | --- | --- |
 | `AddNode` | `line`, `pos`, `before?` | inserts a node before node `before`, or appends one |
 | `MoveNode` | `line`, `index`, `pos` | moves a node |
-| `SetHandle` | `line`, `index`, `handle` | sets a handle: `Some((x, y, z))`, or `None` for an automatic one |
+| `SetNodeHandles` | `line`, `index`, `mode`, `incoming`, `outgoing` | sets both offsets; `mode` is `Auto`, `Aligned` (opposite directions, independent lengths), or `Free` |
 | `RemoveNode` | `line`, `index` | removes a node |
 | `SetNodes` | `line`, `nodes` | replaces the whole polyline, with automatic handles |
 
@@ -178,6 +179,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | --- | --- | --- |
 | `SetProfile` | `road`, `curve`, `keys: [(u, value)]` | replaces a profile. `curve` is `WidthLeft`, `WidthRight`, `Width` (both sides) or `Bank`. |
 | `SetKey` | `road`, `curve`, `u`, `value` | sets or adds one key |
+| `SetKeyTangents` | `road`, `curve`, `u`, `slope_in`, `slope_out` | sets slopes on an existing key, in value per unit `u` |
 
 **Strips, lines and barriers**
 

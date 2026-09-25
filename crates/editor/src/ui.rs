@@ -8,17 +8,18 @@ use glam::DVec3;
 use open_racing_sim::Surface;
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{
-    Align, Alpha, Barrier, BuiltinTexture, Grid, MaterialDef, NamedSurface, PaintLine, Pit,
-    Profile, Range, Shape, Side, Spline, Strip, TextureSource,
+    Align, Alpha, Barrier, BuiltinTexture, Grid, HandleMode, MaterialDef, NamedSurface, PaintLine,
+    Pit, Profile, Range, Shape, Side, Spline, Strip, TextureSource,
 };
 use open_racing_track_project::{Project, projects_dir};
 
 use crate::assets::{self, Library};
+use crate::curve_graph::{self, CurveGraph};
 use crate::jobs::Jobs;
 use crate::menus;
 use crate::preview::Built;
 use crate::preview::Props;
-use crate::profile::{ProfileView, profile};
+use crate::profile::ProfileView;
 use crate::state::{Editor, Item};
 use crate::viewport::{Orbit, Tool, ViewRect, frame_selection};
 
@@ -42,6 +43,7 @@ pub struct UiState {
     new_material: String,
     rename: Option<(Item, String)>,
     profile: ProfileView,
+    curve_graph: CurveGraph,
     /// The inspector is hidden (N).
     sidebar_hidden: bool,
     assets: assets::Panel,
@@ -196,7 +198,12 @@ pub fn ui(
         .default_size(190.0)
         .show(&mut root, |ui| {
             ui.columns(2, |cols| {
-                profile(&mut cols[0], editor, &mut state.profile);
+                let UiState {
+                    profile,
+                    curve_graph,
+                    ..
+                } = &mut *state;
+                curve_graph::panel(&mut cols[0], editor, profile, curve_graph);
                 egui::ScrollArea::vertical()
                     .id_salt("report")
                     .show(&mut cols[1], |ui| {
@@ -520,6 +527,27 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
                             remove = Some(i);
                         }
                     });
+                    ui.horizontal(|ui| {
+                        for (label, slope) in
+                            [("before", &mut k.slope_in), ("after", &mut k.slope_out)]
+                        {
+                            if !road.closed
+                                && ((label == "before" && i == 0)
+                                    || (label == "after" && i + 1 == c.keys.len()))
+                            {
+                                continue;
+                            }
+                            ui.label(label);
+                            let mut v = *slope * scale;
+                            if ui
+                                .add(egui::DragValue::new(&mut v).speed(0.05).suffix(" /u"))
+                                .changed()
+                            {
+                                *slope = v / scale;
+                                changed = true;
+                            }
+                        }
+                    });
                 }
                 if let Some(i) = remove {
                     keys.remove(i);
@@ -529,10 +557,7 @@ fn road_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiState) {
                     && ui.small_button(format!("+ key at node {n}")).clicked()
                 {
                     let v = c.eval(n as f64, period, road.closed);
-                    keys.push(open_racing_track_project::Key {
-                        u: n as f64,
-                        value: v,
-                    });
+                    keys.push(open_racing_track_project::Key::new(n as f64, v));
                     changed = true;
                 }
                 if changed {
@@ -828,30 +853,75 @@ fn node_ui(
             Some(&format!("node {name} {n}")),
         );
     }
-    let mut manual = nd.handle.is_some();
-    let (_, auto) = open_racing_track_project::curve::handles(nodes, closed, n);
-    let mut h = nd.handle.unwrap_or(auto);
-    let mut hchanged = ui
-        .checkbox(&mut manual, "manual handle")
-        .on_hover_text("Drag the handle in the view; Alt+click it for automatic")
-        .changed();
-    if manual {
+    let mut mode = nd.handles.mode();
+    let (mut incoming, mut outgoing) = open_racing_track_project::curve::handles(nodes, closed, n);
+    if mode == HandleMode::Auto && !closed && n + 1 == nodes.len() {
+        outgoing = -incoming;
+    }
+    let previous_mode = mode;
+    egui::ComboBox::from_label("Handle mode")
+        .selected_text(match mode {
+            HandleMode::Auto => "Automatic",
+            HandleMode::Aligned => "Aligned",
+            HandleMode::Free => "Free",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut mode, HandleMode::Auto, "Automatic");
+            ui.selectable_value(&mut mode, HandleMode::Aligned, "Aligned");
+            ui.selectable_value(&mut mode, HandleMode::Free, "Free");
+        });
+    let mut hchanged = mode != previous_mode;
+    if mode != HandleMode::Auto {
+        ui.label("Outgoing offset (m)");
         ui.horizontal(|ui| {
-            for (axis, v) in ["hx", "hy", "hz"]
-                .iter()
-                .zip([&mut h.x, &mut h.y, &mut h.z])
+            for (axis, v) in
+                ["x", "y", "z"]
+                    .iter()
+                    .zip([&mut outgoing.x, &mut outgoing.y, &mut outgoing.z])
             {
                 ui.label(*axis);
                 hchanged |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
             }
         });
+        if mode == HandleMode::Aligned {
+            let mut length = incoming.length();
+            if ui
+                .add(
+                    egui::DragValue::new(&mut length)
+                        .prefix("Incoming length ")
+                        .suffix(" m")
+                        .speed(0.5)
+                        .range(0.0..=f64::MAX),
+                )
+                .changed()
+            {
+                incoming = -outgoing.normalize_or_zero() * length;
+                hchanged = true;
+            }
+            incoming = -outgoing.normalize_or_zero() * incoming.length();
+        } else {
+            ui.label("Incoming offset (m)");
+            ui.horizontal(|ui| {
+                for (axis, v) in
+                    ["x", "y", "z"]
+                        .iter()
+                        .zip([&mut incoming.x, &mut incoming.y, &mut incoming.z])
+                {
+                    ui.label(*axis);
+                    hchanged |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+                }
+            });
+        }
+        ui.small("Drag either handle in the view; Alt+click for automatic");
     }
     if hchanged {
         editor.apply(
-            vec![Op::SetHandle {
+            vec![Op::SetNodeHandles {
                 line: name.to_string(),
                 index: n,
-                handle: manual.then_some(h),
+                mode,
+                incoming,
+                outgoing,
             }],
             Some(&format!("handle {name} {n}")),
         );
