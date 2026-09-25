@@ -20,7 +20,7 @@ pub mod visual;
 
 use std::path::{Path, PathBuf};
 
-use open_racing_sim::{SurfaceProps, Track, TrackDef, TrackError};
+use open_racing_sim::{Layout, SurfaceProps, Track, TrackDef, TrackError};
 use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
@@ -30,7 +30,7 @@ pub use visual::{
 };
 
 /// Version of the package layout and of `track.ron`.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const MANIFEST: &str = "track.ron";
 const GROUND: &str = "ground.bin";
 const VISUAL: &str = "visual.bin";
@@ -95,12 +95,15 @@ struct Manifest {
     centreline: TrackDef,
     /// Surface types; `PatchKind::Ground` indexes into this.
     surfaces: Vec<SurfaceProps>,
+    #[serde(default)]
+    layout: Layout,
 }
 
 #[derive(Clone, Debug)]
 pub struct TrackPackage {
     pub centreline: TrackDef,
     pub surfaces: Vec<SurfaceProps>,
+    pub layout: Layout,
     pub ground: Ground,
     pub visual: Option<Visual>,
 }
@@ -140,6 +143,7 @@ impl TrackPackage {
         Ok(Self {
             centreline: manifest.centreline,
             surfaces: manifest.surfaces,
+            layout: manifest.layout,
             ground,
             visual,
         })
@@ -156,6 +160,7 @@ impl TrackPackage {
             format: FORMAT_VERSION,
             centreline: self.centreline.clone(),
             surfaces: self.surfaces.clone(),
+            layout: self.layout.clone(),
         };
         let ron = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
             .expect("manifest serialises");
@@ -182,7 +187,8 @@ impl TrackPackage {
         }
         Ok(Track::new(&self.centreline)
             .map_err(Error::Track)?
-            .with_ground(self.ground.build(&self.surfaces)))
+            .with_ground(self.ground.build(&self.surfaces))
+            .with_layout(self.layout.clone()))
     }
 }
 
@@ -293,6 +299,11 @@ mod tests {
         TrackPackage {
             centreline,
             surfaces: vec![SurfaceProps::of(Surface::Asphalt)],
+            layout: Layout {
+                sectors: vec![200.0, 400.0],
+                grid: vec![open_racing_sim::GridSlot { s: 620.0, d: 1.5 }],
+                pit: None,
+            },
             ground,
             visual: Some(v.build()),
         }
@@ -316,6 +327,7 @@ mod tests {
         assert!(physics.visual.is_none());
         assert_eq!(physics.ground, pkg.ground);
         assert_eq!(physics.surfaces, pkg.surfaces);
+        assert_eq!(physics.layout, pkg.layout);
         assert_eq!(physics.centreline.points.len(), 64);
 
         let full = TrackPackage::load(&dir, true).unwrap();

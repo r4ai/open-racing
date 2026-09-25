@@ -17,8 +17,9 @@ open-racing-sim.workspace = true
 open-racing-api.workspace = true
 open-racing-track.workspace = true
 open-racing-car.workspace = true
+open-racing-track-render.workspace = true
 open-racing-train-burn = { path = "../train-burn", optional = true }
-bevy = { version = "0.19", features = ["serialize", "dds", "pbr_light_textures"] }
+bevy.workspace = true
 serde.workspace = true
 ron.workspace = true
 half = "2.7"

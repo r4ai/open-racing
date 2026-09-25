@@ -27,7 +27,10 @@ mod reader;
 use std::path::{Path, PathBuf};
 
 use glam::{DVec3, Vec3};
-use open_racing_sim::{Surface, SurfaceProps, TrackDef, TrackPoint};
+use open_racing_sim::track::heading;
+use open_racing_sim::{
+    GridSlot, Layout, PitLane, Pose, Surface, SurfaceProps, Track, TrackDef, TrackPoint,
+};
 use open_racing_track::{Ground, PatchKind, TrackPackage, VisualBuilder};
 
 #[derive(Debug)]
@@ -371,11 +374,66 @@ pub fn convert(dir: &Path, layout: Option<&str>, name: &str) -> Result<TrackPack
         (Some(l), Some(r)) => Some((l + r) * 0.5),
         _ => marker("AC_START_0"),
     };
+    let centreline = centreline(name, &ai_points, start)?;
+    let layout = race_layout(&centreline, &markers)?;
     Ok(TrackPackage {
-        centreline: centreline(name, &ai_points, start)?,
+        centreline,
         surfaces: surface_props(&surfaces),
+        layout,
         ground,
         visual: Some(visual.build()),
+    })
+}
+
+/// Speed limit in pit lanes, which the game sets per server: 80 km/h, the usual one.
+const PIT_SPEED_LIMIT: f64 = 80.0 / 3.6;
+
+/// The race layout from the game's markers: timing lines `AC_TIME_<n>_L/R` (n ≥ 1 are
+/// the sector boundaries; 0 is the start/finish line the centreline starts at), grid
+/// slots `AC_START_<n>` and pit boxes `AC_PIT_<n>`.
+fn race_layout(centreline: &TrackDef, markers: &[(String, DVec3)]) -> Result<Layout, Error> {
+    let track = Track::new(centreline).map_err(|e| Error::Format(e.to_string()))?;
+    let marker = |n: &str| markers.iter().find(|(m, _)| m == n).map(|(_, p)| *p);
+    let locate = |p: DVec3| track.locate(p, track.nearest_index(p));
+    let numbered = |prefix: &str| {
+        (0..)
+            .map_while(|i| marker(&format!("{prefix}{i}")))
+            .collect::<Vec<_>>()
+    };
+    let mut sectors: Vec<f64> = (1..)
+        .map_while(|i| {
+            let (l, r) = (
+                marker(&format!("AC_TIME_{i}_L"))?,
+                marker(&format!("AC_TIME_{i}_R"))?,
+            );
+            Some(locate((l + r) * 0.5).s)
+        })
+        .filter(|&s| s > 0.0)
+        .collect();
+    sectors.sort_by(f64::total_cmp);
+    let grid = numbered("AC_START_")
+        .into_iter()
+        .map(|p| {
+            let c = locate(p);
+            GridSlot { s: c.s, d: c.d }
+        })
+        .collect();
+    let boxes: Vec<Pose> = numbered("AC_PIT_")
+        .into_iter()
+        .map(|p| Pose {
+            pos: p.into(),
+            heading: heading(locate(p).sample.tangent),
+        })
+        .collect();
+    Ok(Layout {
+        sectors,
+        grid,
+        pit: (!boxes.is_empty()).then_some(PitLane {
+            speed_limit: PIT_SPEED_LIMIT,
+            entry: None,
+            exit: None,
+            boxes,
+        }),
     })
 }
 

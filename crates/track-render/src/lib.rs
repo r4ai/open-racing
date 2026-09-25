@@ -1,6 +1,8 @@
 //! Renders a track package's 3D model: standard PBR materials extended with the
 //! package's surface textures (reflection, roughness, reflectance), normal maps and
 //! mask-blended detail layers. Car packages' models share the format and the materials.
+//!
+//! Shared by the app and the track editor.
 
 use bevy::asset::{RenderAssetUsages, embedded_asset};
 use bevy::image::{
@@ -13,10 +15,25 @@ use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, Face, ShaderType};
 use bevy::shader::ShaderRef;
+use glam::{DQuat, DVec3};
 use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, Visual};
 
-use crate::driving::TrackModel;
-use crate::graphics::GraphicsSettings;
+/// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
+pub fn to_bevy(v: DVec3) -> Vec3 {
+    Vec3::new(v.x as f32, v.z as f32, -v.y as f32)
+}
+
+/// Inverse of `to_bevy`.
+pub fn from_bevy(v: Vec3) -> DVec3 {
+    DVec3::new(v.x as f64, -v.z as f64, v.y as f64)
+}
+
+pub fn quat_to_bevy(q: DQuat) -> Quat {
+    let c = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    // The sim's glam and Bevy's glam may be different crate versions.
+    let q = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
+    c * q * c.inverse()
+}
 
 pub type TrackMaterial = ExtendedMaterial<StandardMaterial, TrackExtension>;
 
@@ -99,7 +116,7 @@ impl From<&TrackExtension> for TrackParams {
 
 impl MaterialExtension for TrackExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://open_racing_app/track_material.wgsl".into()
+        "embedded://open_racing_track_render/track_material.wgsl".into()
     }
 }
 
@@ -142,32 +159,36 @@ impl Images<'_> {
     }
 }
 
-/// Spawns the track's model, if it has one: one entity per mesh batch.
-pub fn spawn(
-    mut commands: Commands,
-    mut model: ResMut<TrackModel>,
-    formats: Option<Res<CompressedImageFormatSupport>>,
-    graphics: Res<GraphicsSettings>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<TrackMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+/// Spawns a package's render data: one entity per mesh batch, each with `extra` (e.g. a
+/// marker to find and despawn them again).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_visual(
+    commands: &mut Commands,
+    visual: Visual,
+    formats: CompressedImageFormats,
+    anisotropy: u16,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<TrackMaterial>,
+    images: &mut Assets<Image>,
+    extra: impl Bundle + Clone,
 ) {
-    let Some(visual) = model.0.take() else { return };
-    let formats = formats.map_or(CompressedImageFormats::BC, |f| f.0);
-    let mats = add_materials(
-        &visual,
-        formats,
-        graphics.anisotropy,
-        &mut materials,
-        &mut images,
-    );
+    let mats = add_materials(&visual, formats, anisotropy, materials, images);
     for m in visual.meshes {
         let (material, cast_shadows) = (mats[m.material as usize].clone(), m.cast_shadows);
-        let mut entity = commands.spawn((Mesh3d(meshes.add(to_mesh(m))), MeshMaterial3d(material)));
+        let mut entity = commands.spawn((
+            Mesh3d(meshes.add(to_mesh(m))),
+            MeshMaterial3d(material),
+            extra.clone(),
+        ));
         if !cast_shadows {
             entity.insert(NotShadowCaster);
         }
     }
+}
+
+/// The compressed texture formats the GPU supports, BC when not known yet.
+pub fn formats(support: Option<&CompressedImageFormatSupport>) -> CompressedImageFormats {
+    support.map_or(CompressedImageFormats::BC, |f| f.0)
 }
 
 /// Adds the materials of a package's render data, and the textures they use, filtered

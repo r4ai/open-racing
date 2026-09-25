@@ -1,0 +1,13 @@
+[package]
+name = "open-racing-track-project"
+description = "Editable track projects (road splines, cross-sections, markers) and their baking into track packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-sim.workspace = true
+open-racing-track = { workspace = true, features = ["encode"] }
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true

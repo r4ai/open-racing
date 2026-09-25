@@ -17,7 +17,6 @@ mod input;
 mod realism;
 mod scene;
 mod settings;
-mod track_model;
 mod tyre_dirt;
 mod vr;
 mod weather;

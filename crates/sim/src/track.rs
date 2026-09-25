@@ -247,6 +247,64 @@ impl std::fmt::Display for TrackError {
 
 impl std::error::Error for TrackError {}
 
+/// Where a race is run on a track: timing sectors, grid and pit lane. The start/finish
+/// line is always at s = 0 of the centreline.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    /// Sector boundaries after the start/finish line, as centreline distances in
+    /// (0, length), increasing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sectors: Vec<f64>,
+    /// Grid slots in starting order, pole first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grid: Vec<GridSlot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pit: Option<PitLane>,
+}
+
+/// A grid slot in track coordinates: distance along the centreline and lateral offset
+/// (positive = left).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GridSlot {
+    pub s: f64,
+    pub d: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PitLane {
+    /// Speed limit in the pit lane, m/s.
+    pub speed_limit: f64,
+    /// Centreline distances where the pit lane leaves and rejoins the track, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<f64>,
+    /// Pit boxes: where a car stops, facing its way out.
+    pub boxes: Vec<Pose>,
+}
+
+/// A position (m, world frame) and horizontal heading (radians, atan2(y, x)).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pose {
+    pub pos: (f64, f64, f64),
+    pub heading: f64,
+}
+
+impl Layout {
+    /// Index of the sector that `s` lies in, 0 from the start/finish line.
+    pub fn sector_at(&self, s: f64) -> usize {
+        self.sectors.iter().take_while(|&&b| s >= b).count()
+    }
+
+    /// Where a car starts: the pole slot, or the start line.
+    pub fn start(&self) -> GridSlot {
+        self.grid
+            .first()
+            .copied()
+            .unwrap_or(GridSlot { s: 0.0, d: 0.0 })
+    }
+}
+
 /// Immutable, shareable track.
 #[derive(Clone, Debug)]
 pub struct Track {
@@ -260,6 +318,7 @@ pub struct Track {
     /// Road meshes and walls. When present the tyres ride on the meshes and the
     /// centreline only provides track coordinates (s, d).
     pub ground: Option<Arc<GroundMesh>>,
+    pub layout: Layout,
 }
 
 /// Ridges across the kerbs: their height as a share of the kerb's crown, and the
@@ -317,12 +376,18 @@ impl Track {
             kerb_height: def.kerb_height,
             runoff_width: def.runoff_width,
             ground: None,
+            layout: Layout::default(),
         })
     }
 
     /// Makes the tyres ride on `ground` instead of the surface implied by the centreline.
     pub fn with_ground(mut self, ground: GroundMesh) -> Self {
         self.ground = Some(Arc::new(ground));
+        self
+    }
+
+    pub fn with_layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
         self
     }
 

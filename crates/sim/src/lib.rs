@@ -40,7 +40,10 @@ pub use params::{
     ElectronicsParams, EnginePosition, GearboxKind, ParamsError, ThrottleKind, TurboParams,
 };
 pub use tire::TireCondition;
-pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};
+pub use track::{
+    Coat, GridSlot, Layout, PitLane, Pose, Surface, Track, TrackCoords, TrackDef, TrackError,
+    TrackPoint, TrackQuery,
+};
 pub use weather::{Air, Sky, Weather, WeatherSettings};
 
 /// Fixed physics time step in seconds (1 kHz).

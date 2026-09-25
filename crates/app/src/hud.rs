@@ -179,6 +179,21 @@ fn update(
         time(lap.last_lap),
         time(lap.best_lap)
     );
+    let sectors = (sim.track.layout.sectors.len() + 1).min(open_racing_api::MAX_SECTORS);
+    if sectors > 1 {
+        let _ = write!(s, "sectors");
+        for i in 0..sectors {
+            let t = lap.sectors[i].or(lap.last_sectors[i]);
+            let _ = write!(
+                s,
+                "   S{} {} ({})",
+                i + 1,
+                time(t),
+                time(lap.best_sectors[i])
+            );
+        }
+        let _ = writeln!(s);
+    }
     let _ = writeln!(
         s,
         "throttle {}  brake {}  clutch {}  steer {:+5.0} deg",

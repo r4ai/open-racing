@@ -18,7 +18,7 @@ use open_racing_sim::{
 };
 use rayon::prelude::*;
 
-pub use lap::LapTimer;
+pub use lap::{LapTimer, MAX_SECTORS};
 pub use obs::{AppliedInput, ObsLayout, ObsSpec};
 pub use reward::{DefaultReward, DefaultTermination, Done, RewardFn, StepInfo, TerminationFn};
 pub use rng::Rng;

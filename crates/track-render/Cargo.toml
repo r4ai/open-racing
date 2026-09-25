@@ -1,0 +1,11 @@
+[package]
+name = "open-racing-track-render"
+description = "Bevy rendering of open-racing's track and car render data, shared by the app and the editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-track.workspace = true
+bevy.workspace = true
+glam.workspace = true

@@ -105,8 +105,10 @@ impl Simulation {
         let evolution = TrackEvolution::new(rubber, args.track_grip, args.grip_gain);
         let scenery = model.as_ref().map(|m| Arc::new(scenery(&spec.track, m)));
         let weather = Weather::new(&spec.track, scenery, weather);
-        let mut car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
-        car.reset_in(&spec.track, &weather, 0.0, 0.0, 0.0, 1);
+        // Start from the pole slot, or the start line.
+        let start = spec.track.layout.start();
+        let mut car = Car::new(spec.car.clone(), &spec.track, start.s, start.d, 0.0, 1);
+        car.reset_in(&spec.track, &weather, start.s, start.d, 0.0, 1);
         let sim = Self {
             lap: LapTimer::new(&spec.track, car.state.position),
             previous: car.state,

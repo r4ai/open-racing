@@ -11,19 +11,8 @@ use open_racing_sim::Track;
 
 use crate::driving::{CarModelVisual, Simulation, TrackModel};
 use crate::graphics::GraphicsSettings;
-use crate::track_model::{self, TrackMaterial, TrackModelPlugin};
-
-/// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
-pub fn to_bevy(v: DVec3) -> Vec3 {
-    Vec3::new(v.x as f32, v.z as f32, -v.y as f32)
-}
-
-pub fn quat_to_bevy(q: DQuat) -> Quat {
-    let c = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-    // The sim's glam and Bevy's glam may be different crate versions.
-    let q = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
-    c * q * c.inverse()
-}
+use open_racing_track_render::{self as track_model, TrackMaterial, TrackModelPlugin};
+pub use open_racing_track_render::{quat_to_bevy, to_bevy};
 
 pub struct ScenePlugin;
 
@@ -33,13 +22,36 @@ impl Plugin for ScenePlugin {
             .add_systems(
                 Startup,
                 (
-                    (spawn_track, track_model::spawn).chain(),
+                    (spawn_track, spawn_track_model).chain(),
                     spawn_car,
                     spawn_lights,
                 ),
             )
             .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
     }
+}
+
+/// Spawns the track's model, if it has one.
+fn spawn_track_model(
+    mut commands: Commands,
+    mut model: ResMut<TrackModel>,
+    formats: Option<Res<CompressedImageFormatSupport>>,
+    graphics: Res<GraphicsSettings>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<TrackMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(visual) = model.0.take() else { return };
+    track_model::spawn_visual(
+        &mut commands,
+        visual,
+        track_model::formats(formats.as_deref()),
+        graphics.anisotropy,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        (),
+    );
 }
 
 #[derive(Component)]
@@ -152,7 +164,7 @@ fn spawn_track(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // `track_model::spawn` draws tracks that come with a 3D model.
+    // `spawn_track_model` draws tracks that come with a 3D model.
     if model.0.is_some() {
         return;
     }

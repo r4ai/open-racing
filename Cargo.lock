@@ -6872,6 +6872,7 @@ dependencies = [
  "open-racing-car",
  "open-racing-sim",
  "open-racing-track",
+ "open-racing-track-render",
  "open-racing-train-burn",
  "openxr",
  "raw-window-handle",
@@ -6922,6 +6923,26 @@ dependencies = [
  "ron",
  "serde",
  "texpresso",
+]
+
+[[package]]
+name = "open-racing-track-project"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.8",
+ "open-racing-sim",
+ "open-racing-track",
+ "ron",
+ "serde",
+]
+
+[[package]]
+name = "open-racing-track-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam 0.33.8",
+ "open-racing-track",
 ]
 
 [[package]]
