@@ -185,5 +185,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn roads_stay_on_top_of_the_ground_over_hills() {
+        // The oval over a crest, a sag and banked turns, with and without strips.
+        for strips in [true, false] {
+            let mut project = Project::new("hills");
+            let road = &mut project.roads[0];
+            for (node, z) in road
+                .nodes
+                .iter_mut()
+                .zip([0.0, 12.0, 4.0, -6.0, 8.0, 20.0, 3.0, -4.0, 6.0, 1.0])
+            {
+                node.pos.z = z;
+            }
+            road.bank = project::StationCurve::constant(0.08);
+            if !strips {
+                road.left.clear();
+                road.right.clear();
+                road.barriers.clear();
+            }
+            let package = bake(&project, Path::new("."), &mut Textures::default()).unwrap();
+            let track = package.build_track().unwrap();
+            let ground = track.ground.as_ref().unwrap();
+            let main = curve::Sampled::new(&project.roads[0], 0.5);
+            for f in &main.frames {
+                for d in [-5.9, -4.0, -2.0, 0.0, 2.0, 4.0, 5.9] {
+                    let on_road = f.pos + f.lateral * d;
+                    let hit = ground.raycast_down(on_road + DVec3::Z * 2.0, 4.0).unwrap();
+                    assert_eq!(
+                        hit.surface.kind,
+                        Surface::Asphalt,
+                        "strips {strips}, s = {}, d = {d}",
+                        f.s
+                    );
+                    // The crown lifts the middle by up to 5 cm.
+                    let dz = hit.point.z - on_road.z;
+                    assert!((-0.02..0.08).contains(&dz), "s = {}, d = {d}: {dz}", f.s);
+                }
+            }
+        }
+    }
+
     use std::path::Path;
 }
