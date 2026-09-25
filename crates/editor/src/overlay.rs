@@ -65,9 +65,10 @@ fn info(ctx: &egui::Context, r: egui::Rect, c: &Ctx) {
     } else {
         "Perspective"
     };
-    let name = match ViewDir::of(c.orbit) {
-        Some(v) => format!("{} {projection}", v.label()),
-        None => format!("User {projection}"),
+    let name = match (c.orbit.walk, ViewDir::of(c.orbit)) {
+        (Some(_), _) => "Walking the track (Esc leaves)".to_string(),
+        (None, Some(v)) => format!("{} {projection}", v.label()),
+        (None, None) => format!("User {projection}"),
     };
     outlined(
         &painter,

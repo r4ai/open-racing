@@ -67,6 +67,8 @@ pub struct Orbit {
     /// Orthographic only because a numpad view asked for it: orbiting away goes back to
     /// perspective, as Blender's auto perspective does.
     pub auto_ortho: bool,
+    /// Walking the main road at a driver's eye height: how far along it, m.
+    pub walk: Option<f64>,
 }
 
 impl Default for Orbit {
@@ -78,8 +80,36 @@ impl Default for Orbit {
             distance: 700.0,
             ortho: false,
             auto_ortho: false,
+            walk: None,
         }
     }
+}
+
+/// A driver's eye height above the road, m, and how far ahead the eye looks.
+const EYE: f64 = 1.1;
+const LOOK_AHEAD: f64 = 25.0;
+
+/// The main road as last built, for walking it.
+pub fn main_sampled<'a>(editor: &Editor, built: &'a Built) -> Option<&'a Sampled> {
+    let p = &editor.project;
+    p.road_index(&p.main_road).and_then(|i| built.roads.get(i))
+}
+
+/// Where the camera is and what it looks at, `s` along a road, at a driver's eye.
+fn walk_view(smp: &Sampled, s: f64) -> Transform {
+    let f = smp.frame_at(s);
+    let ahead = smp.frame_at(s + LOOK_AHEAD);
+    let eye = f.pos + f.normal * EYE;
+    let at = ahead.pos + ahead.normal * EYE;
+    Transform::from_translation(to_bevy(eye)).looking_at(to_bevy(at), to_bevy(f.normal))
+}
+
+/// Starts walking the main road at the start line, or stops.
+pub fn toggle_walk(editor: &Editor, built: &Built, orbit: &mut Orbit) {
+    orbit.walk = match orbit.walk {
+        Some(_) => None,
+        None => main_sampled(editor, built).map(|smp| smp.s_at(editor.project.markers.start)),
+    };
 }
 
 /// The part of the window the 3D view covers, logical pixels, set by the UI each frame.
@@ -467,10 +497,22 @@ fn perspective() -> Projection {
 pub fn place_camera(
     orbit: Res<Orbit>,
     rect: Res<ViewRect>,
+    editor: Res<Editor>,
+    built: Res<Built>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Camera, &mut Transform, &mut Projection), With<EditorCamera>>,
 ) {
     let (cam, transform, projection) = &mut *camera;
+    if let Some(s) = orbit.walk
+        && let Some(smp) = main_sampled(&editor, &built)
+    {
+        **transform = walk_view(smp, s);
+        if matches!(**projection, Projection::Orthographic(_)) {
+            **projection = perspective();
+        }
+        set_viewport(cam, &rect, &window);
+        return;
+    }
     let dir = Vec3::new(
         orbit.pitch.cos() * orbit.yaw.cos(),
         orbit.pitch.sin(),
@@ -498,6 +540,11 @@ pub fn place_camera(
     } else if ortho {
         **projection = perspective();
     }
+    set_viewport(cam, &rect, &window);
+}
+
+/// Keeps the 3D camera's viewport on the part of the window the view covers.
+fn set_viewport(cam: &mut Camera, rect: &ViewRect, window: &Window) {
     if let Some(r) = rect.0 {
         let scale = window.scale_factor();
         let pos = (r.min * scale).max(Vec2::ZERO).as_uvec2();
@@ -938,6 +985,12 @@ pub fn input(
     let view = View { cam, t };
     let tool = &mut *tool;
     let editor = &mut *editor;
+    // Walking the track takes the keys; the view only looks.
+    if orbit.walk.is_some() {
+        tool.hover = None;
+        tool.pointer = None;
+        return;
+    }
     let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none() && !tool.blocked;
     let keys_free = !wants.wants_any_keyboard_input() && !tool.blocked;
     let anywhere = window.cursor_position();
@@ -1312,12 +1365,56 @@ pub fn set_view(orbit: &mut Orbit, yaw: f32, pitch: f32) {
 /// The view keys, outside of transforms and text fields.
 pub fn view_input(
     editor: Res<Editor>,
+    built: Res<Built>,
     mut orbit: ResMut<Orbit>,
-    tool: Res<Tool>,
+    mut tool: ResMut<Tool>,
     wants: Res<EguiWantsInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
 ) {
-    if tool.modal.is_none() && !tool.blocked && !wants.wants_any_keyboard_input() {
+    let free = tool.modal.is_none() && !tool.blocked && !wants.wants_any_keyboard_input();
+    if let Some(s) = orbit.walk {
+        let Some(smp) = main_sampled(&editor, &built) else {
+            orbit.walk = None;
+            return;
+        };
+        let (fwd, back) = (
+            keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]),
+            keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]),
+        );
+        let speed = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+            80.0
+        } else if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+            5.0
+        } else {
+            25.0
+        };
+        let step = speed * time.delta_secs_f64();
+        let mut s = s;
+        if free && fwd {
+            s += step;
+        }
+        if free && back {
+            s -= step;
+        }
+        let s = if smp.closed {
+            s.rem_euclid(smp.length.max(1e-9))
+        } else {
+            s.clamp(0.0, smp.length)
+        };
+        orbit.walk = Some(s);
+        let f = smp.frame_at(s);
+        let grade = 100.0 * f.tangent.z / f.tangent.truncate().length().max(1e-9);
+        tool.hint = format!(
+            "Walking the track: s {s:.0} m, {grade:+.1} %, {:.1} m wide · W/S or ↑/↓ move · Shift fast · Ctrl slow · Esc leaves",
+            f.width_left + f.width_right
+        );
+        if free && keys.just_pressed(KeyCode::Escape) {
+            orbit.walk = None;
+        }
+        return;
+    }
+    if free {
         view_keys(&editor, &mut orbit, &keys);
     }
 }

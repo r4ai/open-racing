@@ -28,6 +28,7 @@ pub enum Cmd {
     Quit,
     View(ViewDir),
     ToggleOrtho,
+    Walk,
     FrameSelected,
     FrameAll,
     ViewPie,
@@ -90,6 +91,7 @@ impl Cmd {
             BakeDrive,
             Quit,
             ToggleOrtho,
+            Walk,
             FrameSelected,
             FrameAll,
             ViewPie,
@@ -142,6 +144,7 @@ impl Cmd {
             Quit => "Quit".into(),
             View(v) => format!("View {}", v.label()),
             ToggleOrtho => "Perspective/Orthographic".into(),
+            Walk => "Walk the Track".into(),
             FrameSelected => "Frame Selected".into(),
             FrameAll => "Frame All".into(),
             ViewPie => "View Pie…".into(),
@@ -188,7 +191,7 @@ impl Cmd {
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
             | HandleMenu | ToggleClosed | Duplicate | SetMain | Rename | SmoothHeights
             | SmoothShape | Flatten | EvenGrade => "Edit",
-            View(_) | ToggleOrtho | FrameSelected | FrameAll | ViewPie | ToggleToolbar
+            View(_) | ToggleOrtho | Walk | FrameSelected | FrameAll | ViewPie | ToggleToolbar
             | ToggleSidebar | ToggleMaximize | ToggleSnap => "View",
             _ => "",
         };
@@ -262,6 +265,7 @@ impl Cmd {
         use Cmd::*;
         match self {
             ToggleOrtho => Some(c.orbit.ortho),
+            Walk => Some(c.orbit.walk.is_some()),
             ToggleToolbar => Some(c.shell.toolbar),
             ToggleSidebar => Some(c.shell.sidebar),
             ToggleMaximize => Some(c.shell.maximized),
@@ -310,6 +314,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         BakeDrive => c.jobs.bake(&c.editor.project, &c.editor.dir, true),
         Quit => c.shell.quit = true,
         View(v) => look(c.orbit, v),
+        Walk => viewport::toggle_walk(c.editor, c.built, c.orbit),
         ToggleOrtho => {
             c.orbit.ortho = !c.orbit.ortho;
             c.orbit.auto_ortho = false;
