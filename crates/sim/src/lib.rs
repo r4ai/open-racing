@@ -18,6 +18,7 @@ pub mod engine_thermal;
 pub mod evolution;
 pub mod ground;
 pub mod params;
+pub mod suspension;
 pub mod tire;
 pub mod track;
 pub mod weather;

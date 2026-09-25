@@ -14,6 +14,7 @@ use std::f64::consts::PI;
 use std::path::Path;
 
 use open_racing_sim::params::{DAMAGE_ZONES, DifferentialParams};
+use open_racing_sim::suspension::{Link, Linkage, Wishbone};
 use open_racing_sim::tire::TireParams;
 use open_racing_sim::{
     AeroElement, AntiStall, CarParams, Drive, ElectronicsParams, GearboxKind, TurboParams,
@@ -29,6 +30,9 @@ const SYNCHRO_TORQUE: f64 = 25.0;
 /// Hand travel between gates of an H-pattern lever with sequential requests, s.
 const LEVER_TIME: f64 = 0.25;
 const PSI: f64 = 0.0689476;
+/// How far behind the lower arm a toe link is placed on an axle whose steering points
+/// the files leave out, m.
+const TOE_LINK_OFFSET: f64 = 0.12;
 /// Density of fuel, kg/l.
 const FUEL_DENSITY: f64 = 0.745;
 /// All-wheel drive where the files do not say more: the torque split, a moderately
@@ -349,6 +353,7 @@ impl Physics {
             p.front_weight = cg;
         }
         let mut heights = [None, None];
+        let mut unsupported = Vec::new();
         for (k, sec) in ["FRONT", "REAR"].into_iter().enumerate() {
             let front = k == 0;
             let axle = if front { &mut p.front } else { &mut p.rear };
@@ -374,8 +379,16 @@ impl Physics {
             if let Some(v) = get("STATIC_CAMBER") {
                 axle.static_camber = v.to_radians();
             }
-            if let Some(gain) = ini::section(s, sec).and_then(camber_gain) {
-                axle.camber_gain = gain;
+            // A suspension the simulation has no linkage for keeps the base car's.
+            if let Some(section) = ini::section(s, sec) {
+                match linkage(section) {
+                    Some(l) => axle.linkage = l,
+                    None => {
+                        if let Some(kind) = section.get("TYPE") {
+                            unsupported.push(format!("{} ({kind})", sec.to_ascii_lowercase()));
+                        }
+                    }
+                }
             }
             if let Some(v) = get("HUB_MASS").filter(|v| *v > 0.0) {
                 axle.unsprung_mass = v;
@@ -402,6 +415,12 @@ impl Physics {
             if (0.1..1.5).contains(&h) {
                 p.cg_height = h;
             }
+        }
+        if !unsupported.is_empty() {
+            self.note(format!(
+                "suspension: {} not simulated; the base car's linkage is kept",
+                unsupported.join(", ")
+            ));
         }
     }
 
@@ -791,56 +810,62 @@ impl Physics {
     }
 }
 
-/// Camber change per metre of bump travel of a double-wishbone (`DWB`) or strut
-/// (`STRUT`) suspension, from its geometry in front view: the upright turns about the
-/// instant centre, where the arms' lines (or the lower arm's and the line square to the
-/// strut through its top) meet, so a wheel rising by dz turns by dz / the instant
-/// centre's distance inboard of the contact patch. The game's points are relative to
-/// the hub: x across, y up, z along the car.
-fn camber_gain(s: &Section) -> Option<f64> {
-    let point = |key: &str| -> Option<[f64; 2]> {
+/// The linkage of a double-wishbone (`DWB`) or strut (`STRUT`) suspension from its
+/// hardpoints, or none for the other kinds. The game's points are relative to the hub
+/// of a wheel: x across, y up, z forward; they become the left wheel's, x forward, y left
+/// (outboard), z up. An axle without steering points gets a toe link beside the lower
+/// arm, behind the axle.
+fn linkage(s: &Section) -> Option<Linkage> {
+    let raw = |key: &str| -> Option<[f64; 3]> {
         let v = s.get_f64s(key)?;
-        Some([*v.first()?, *v.get(1)?])
-    };
-    let mid = |a: &str, b: &str| -> Option<[f64; 2]> {
-        let (a, b) = (point(a)?, point(b)?);
-        Some([0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])])
+        Some([*v.first()?, *v.get(1)?, *v.get(2)?])
     };
     let kind = s.get("TYPE")?.to_ascii_uppercase();
-    let lower = (
-        mid("WBCAR_BOTTOM_FRONT", "WBCAR_BOTTOM_REAR")?,
-        point("WBTYRE_BOTTOM")?,
-    );
-    // Second line: a point on it and its direction.
-    let (inner, outer, (origin, direction)) = match kind.as_str() {
-        "DWB" => {
-            let top = mid("WBCAR_TOP_FRONT", "WBCAR_TOP_REAR")?;
-            let tyre = point("WBTYRE_TOP")?;
-            (top[0], tyre[0], (top, [tyre[0] - top[0], tyre[1] - top[1]]))
-        }
-        "STRUT" => {
-            let (car, tyre) = (point("STRUT_CAR")?, point("STRUT_TYRE")?);
-            let axis = [car[0] - tyre[0], car[1] - tyre[1]];
-            (car[0], tyre[0], (car, [-axis[1], axis[0]]))
-        }
-        _ => return None,
-    };
+    let (bottom_front, bottom_rear) = (raw("WBCAR_BOTTOM_FRONT")?, raw("WBCAR_BOTTOM_REAR")?);
+    let bottom = raw("WBTYRE_BOTTOM")?;
     // Inboard is the way from the upright's joints to the car's.
-    let inboard = if inner + lower.0[0] > outer + lower.1[0] {
+    let inboard = if bottom_front[0] + bottom_rear[0] > 2.0 * bottom[0] {
         1.0
     } else {
         -1.0
     };
-    let d1 = [lower.1[0] - lower.0[0], lower.1[1] - lower.0[1]];
-    let det = d1[0] * direction[1] - d1[1] * direction[0];
-    if det.abs() < 1e-9 {
-        // Parallel arms: the upright moves without turning.
-        return Some(0.0);
+    let point = |p: [f64; 3]| [p[2], -inboard * p[0], p[1]];
+    let get = |key: &str| raw(key).map(point);
+    let lower = Wishbone {
+        front: point(bottom_front),
+        rear: point(bottom_rear),
+        outer: point(bottom),
+    };
+    let tie_rod = match (get("WBCAR_STEER"), get("WBTYRE_STEER")) {
+        (Some(inner), Some(outer)) => Link { inner, outer },
+        _ => {
+            let behind = |p: [f64; 3], x: f64| [x, p[1], p[2]];
+            let x = lower.rear[0].min(lower.outer[0]) - TOE_LINK_OFFSET;
+            let middle = |a: [f64; 3], b: [f64; 3]| [0.0, 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
+            Link {
+                inner: behind(middle(lower.front, lower.rear), x),
+                outer: behind(lower.outer, x),
+            }
+        }
+    };
+    match kind.as_str() {
+        "DWB" => Some(Linkage::DoubleWishbone {
+            upper: Wishbone {
+                front: get("WBCAR_TOP_FRONT")?,
+                rear: get("WBCAR_TOP_REAR")?,
+                outer: get("WBTYRE_TOP")?,
+            },
+            lower,
+            tie_rod,
+        }),
+        "STRUT" => Some(Linkage::MacPherson {
+            lower,
+            strut_top: get("STRUT_CAR")?,
+            strut_bottom: get("STRUT_TYRE")?,
+            tie_rod,
+        }),
+        _ => None,
     }
-    let w = [origin[0] - lower.0[0], origin[1] - lower.0[1]];
-    let t = (w[0] * direction[1] - w[1] * direction[0]) / det;
-    let centre = inboard * (lower.0[0] + t * d1[0]);
-    Some((-1.0 / centre).clamp(-3.0, 3.0))
 }
 
 /// The first number in a text such as `1,400kg` or `270+km/h`, times the factor of the
@@ -987,14 +1012,19 @@ pub(crate) mod tests {
             p.front.thermal.grip_curve,
             [(0.0, 0.8), (85.0, 1.0), (150.0, 0.9)]
         );
-        // The arms meet 2.13 m inboard: the wheel gains 1 / 2.13 rad of negative camber
-        // per metre it rises. The rear has no geometry and keeps the base car's.
-        assert!(
-            (c.front.camber_gain + 0.3 / 0.64).abs() < 1e-9,
-            "{}",
-            c.front.camber_gain
-        );
-        assert_eq!(c.rear.camber_gain, base().params.rear.camber_gain);
+        // The front's hardpoints become the left wheel's: inboard is −y, forward the
+        // game's z. The rear has no geometry and keeps the base car's.
+        let Linkage::DoubleWishbone { upper, lower, .. } = &c.front.linkage else {
+            panic!("{:?}", c.front.linkage);
+        };
+        assert_eq!(upper.outer, [0.0, -0.05, 0.15]);
+        assert_eq!(lower.front, [0.2, -0.35, -0.1]);
+        assert_eq!(c.rear.linkage, base().params.rear.linkage);
+        // The arms meet 2.13 m inboard: the wheel gains about 1 / 2.13 rad of negative
+        // camber per metre it rises.
+        let model = CarModel::new(c.clone(), p.front.clone(), p.rear.clone()).unwrap();
+        let gain = model.axle_figures(true).kinematics.camber_gain;
+        assert!((gain + 0.3 / 0.64).abs() < 0.05, "{gain}");
         assert!((c.front.pressure - 22.0 * PSI).abs() < 1e-12);
         // The curve stays the engine's without boost; the turbo adds it.
         assert_eq!(c.engine.torque_curve[1], (4000.0, 300.0));

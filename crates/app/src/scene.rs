@@ -56,6 +56,14 @@ pub struct WheelAxles(pub [DVec3; 4]);
 #[derive(Component)]
 struct CarHub(usize);
 
+/// One link, rod or rocker arm of a wheel's suspension: its index among the wheel's
+/// `Car::linkage_segments`.
+#[derive(Component)]
+struct CarLink {
+    wheel: usize,
+    index: usize,
+}
+
 /// The steering wheel of a car model, turning about this axis of the body (Bevy axes).
 #[derive(Component)]
 struct CarSteeringWheel(Vec3);
@@ -273,7 +281,8 @@ fn spawn_car(
         spawn_car_model(&mut commands, visual, &mats, &mut meshes);
         return;
     }
-    let p = &sim.car.model.params;
+    let car = &sim.car;
+    let p = &car.model.params;
     let paint = materials.add(StandardMaterial {
         base_color: Color::srgb(0.95, 0.45, 0.05),
         metallic: 0.3,
@@ -290,23 +299,131 @@ fn spawn_car(
         perceptual_roughness: 0.1,
         ..default()
     });
+    let metal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.56, 0.6),
+        metallic: 0.9,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
 
     // Body dimensions derived from the chassis so other cars look right too.
-    let length = (p.wheelbase + 1.9) as f32;
-    // Narrower than the track so the wheels stand out at the corners.
-    let width = (p.track_front.min(p.track_rear) - 0.25) as f32;
-    let front_x = p.wheelbase * (1.0 - p.front_weight);
-    let rear_x = -p.wheelbase * p.front_weight;
-    let center_x = (0.5 * (front_x + rear_x) + 0.1) as f32;
+    let front_x = car.model.corners[0].origin.x as f32;
+    let rear_x = car.model.corners[2].origin.x as f32;
+    let track = p.track_front.min(p.track_rear) as f32;
     let floor = 0.1 - p.cg_height as f32; // ground clearance relative to CG
 
-    let body_top = floor + 0.55;
-    let (wing_x, wing_y) = (center_x - length * 0.5 + 0.2, floor + 1.12);
-    // Stays run from the body top to the underside of the wing plate.
-    let stay_height = wing_y - 0.02 - body_top;
-    commands.insert_resource(CarNose((center_x + 0.5 * length).into()));
-
     // Mesh axes in the car's local Bevy frame: x forward, y up, z = right.
+    let mut boxes: Vec<(Vec3, Vec3, &Handle<StandardMaterial>)> = Vec::new();
+    let wing = |name: &str| p.aero.elements.iter().find(|e| e.name.contains(name));
+    let nose = if let Some(front_wing) = wing("front wing") {
+        // An open-wheeler: a narrow tub and nose, sidepods, and wings where its aero
+        // elements are.
+        let floor =
+            0.5 * (p.aero.ride_height[0] + p.aero.ride_height[1]) as f32 - p.cg_height as f32;
+        let (wing_x, wing_y) = (front_wing.position[0] as f32, front_wing.position[1] as f32);
+        let tub = (rear_x - 0.35, front_x + 0.15);
+        let at = |x0: f32, x1: f32, y: f32, z: f32| Vec3::new(0.5 * (x0 + x1), y, z);
+        boxes.push((
+            at(tub.0, tub.1, floor + 0.25, 0.0),
+            Vec3::new(tub.1 - tub.0, 0.5, 0.56),
+            &paint,
+        ));
+        boxes.push((
+            at(tub.1, wing_x, floor + 0.2, 0.0),
+            Vec3::new(wing_x - tub.1, 0.24, 0.3),
+            &paint,
+        ));
+        let pods = (rear_x + 0.45, front_x - 1.1);
+        for z in [-0.47, 0.47] {
+            boxes.push((
+                at(pods.0, pods.1, floor + 0.2, z),
+                Vec3::new(pods.1 - pods.0, 0.36, 0.38),
+                &paint,
+            ));
+        }
+        // The driver sits in the middle, the airbox and engine cover behind the head;
+        // then the floor.
+        let eye = Vec3::new(front_x - 1.4, floor + 0.8, 0.0);
+        commands.insert_resource(DriverEye(DVec3::new(eye.x.into(), 0.0, eye.y.into())));
+        let airbox = (rear_x - 0.1, eye.x - 0.3);
+        boxes.push((
+            at(airbox.0, airbox.1, floor + 0.7, 0.0),
+            Vec3::new(airbox.1 - airbox.0, 0.4, 0.3),
+            &paint,
+        ));
+        boxes.push((
+            at(rear_x + 0.2, front_x - 0.5, floor + 0.01, 0.0),
+            Vec3::new(front_x - rear_x - 0.7, 0.02, track - 0.45),
+            &dark,
+        ));
+        boxes.push((
+            Vec3::new(wing_x, wing_y, 0.0),
+            Vec3::new(0.35, 0.03, p.track_front as f32 + 0.1),
+            &dark,
+        ));
+        for z in [-1.0, 1.0] {
+            boxes.push((
+                Vec3::new(
+                    wing_x,
+                    wing_y + 0.08,
+                    z * (0.5 * p.track_front as f32 + 0.05),
+                ),
+                Vec3::new(0.45, 0.2, 0.02),
+                &dark,
+            ));
+        }
+        if let Some(rear_wing) = wing("rear wing") {
+            let (x, y) = (rear_wing.position[0] as f32, rear_wing.position[1] as f32);
+            boxes.push((Vec3::new(x, y, 0.0), Vec3::new(0.3, 0.03, 0.9), &dark));
+            boxes.push((
+                Vec3::new(x, y + 0.1, 0.0),
+                Vec3::new(0.15, 0.02, 0.9),
+                &dark,
+            ));
+            for z in [-0.46, 0.46] {
+                boxes.push((Vec3::new(x, y, z), Vec3::new(0.5, 0.4, 0.02), &dark));
+            }
+            boxes.push((
+                at(x, rear_x - 0.1, 0.5 * (floor + 0.5 + y), 0.0),
+                Vec3::new(0.12, y - floor - 0.5, 0.04),
+                &dark,
+            ));
+        }
+        wing_x + 0.2
+    } else {
+        let length = (p.wheelbase + 1.9) as f32;
+        // Narrower than the track so the wheels stand out at the corners.
+        let width = track - 0.25;
+        let center_x = 0.5 * (front_x + rear_x) + 0.1;
+        let body_top = floor + 0.55;
+        let (wing_x, wing_y) = (center_x - length * 0.5 + 0.2, floor + 1.12);
+        // Stays run from the body top to the underside of the wing plate.
+        let stay_height = wing_y - 0.02 - body_top;
+        boxes.push((
+            Vec3::new(center_x, floor + 0.3, 0.0),
+            Vec3::new(length, 0.5, width),
+            &paint,
+        ));
+        boxes.push((
+            Vec3::new(center_x - 0.3, floor + 0.78, 0.0),
+            Vec3::new(1.8, 0.45, width * 0.72),
+            &glass,
+        ));
+        boxes.push((
+            Vec3::new(wing_x, wing_y, 0.0),
+            Vec3::new(0.35, 0.04, width + 0.3),
+            &dark,
+        ));
+        for z in [-0.45, 0.45] {
+            boxes.push((
+                Vec3::new(wing_x, body_top + 0.5 * stay_height, z),
+                Vec3::new(0.2, stay_height, 0.04),
+                &dark,
+            ));
+        }
+        center_x + 0.5 * length
+    };
+    commands.insert_resource(CarNose(nose.into()));
     commands
         .spawn((
             CarBody,
@@ -314,31 +431,33 @@ fn spawn_car(
             Transform::default(),
             Visibility::default(),
         ))
-        .with_children(|car| {
-            car.spawn((
-                Mesh3d(meshes.add(Cuboid::new(length, 0.5, width))),
-                MeshMaterial3d(paint.clone()),
-                Transform::from_xyz(center_x, floor + 0.3, 0.0),
-            ));
-            car.spawn((
-                Mesh3d(meshes.add(Cuboid::new(1.8, 0.45, width * 0.72))),
-                MeshMaterial3d(glass),
-                Transform::from_xyz(center_x - 0.3, floor + 0.78, 0.0),
-            ));
-            // Rear wing.
-            car.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.35, 0.04, width + 0.3))),
-                MeshMaterial3d(dark.clone()),
-                Transform::from_xyz(wing_x, wing_y, 0.0),
-            ));
-            for z in [-0.45, 0.45] {
-                car.spawn((
-                    Mesh3d(meshes.add(Cuboid::new(0.2, stay_height, 0.04))),
-                    MeshMaterial3d(dark.clone()),
-                    Transform::from_xyz(wing_x, body_top + 0.5 * stay_height, z),
+        .with_children(|body| {
+            for (centre, size, material) in boxes {
+                body.spawn((
+                    Mesh3d(meshes.add(Cuboid::from_size(size))),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(centre),
                 ));
             }
         });
+
+    // The suspension's links, rods and rockers, placed each frame by `update_car`.
+    let rod = meshes.add(Cylinder::new(0.012, 1.0));
+    let mut segments = Vec::new();
+    for i in 0..4 {
+        segments.clear();
+        car.linkage_segments(i, &mut segments);
+        for index in 0..segments.len() {
+            commands.spawn((
+                CarLink { wheel: i, index },
+                CarVisualRoot,
+                Mesh3d(rod.clone()),
+                MeshMaterial3d(metal.clone()),
+                Transform::default(),
+                Visibility::default(),
+            ));
+        }
+    }
 
     for i in 0..4 {
         let tire = &sim.car.model.tire(i).p;
@@ -455,16 +574,26 @@ fn spawn_car_model(
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_car(
     sim: Res<Simulation>,
     axles: Option<Res<WheelAxles>>,
+    mut segments: Local<[Vec<(DVec3, DVec3)>; 4]>,
     mut bodies: Query<&mut Transform, (With<CarBody>, Without<CarWheel>, Without<CarHub>)>,
     mut wheels: Query<(&CarWheel, &mut Transform), (Without<CarBody>, Without<CarHub>)>,
     mut hubs: Query<(&CarHub, &mut Transform), (Without<CarBody>, Without<CarWheel>)>,
     mut steering: Query<
         (&CarSteeringWheel, &mut Transform),
         (Without<CarBody>, Without<CarWheel>, Without<CarHub>),
+    >,
+    mut links: Query<
+        (&CarLink, &mut Transform),
+        (
+            Without<CarBody>,
+            Without<CarWheel>,
+            Without<CarHub>,
+            Without<CarSteeringWheel>,
+        ),
     >,
 ) {
     let (pos, rot) = sim.body_pose();
@@ -473,18 +602,21 @@ fn update_car(
         t.rotation = quat_to_bevy(rot);
     }
     let car = &sim.car;
-    // Wheel centre and orientation in the world: steered about z, then, if it spins,
-    // turned about the axle (about +y; rolling forward is a positive rotation in ISO
-    // coordinates).
-    let axles = axles.map_or([DVec3::Y; 4], |a| a.0);
+    // Wheel centre and orientation in the world: turned as the linkage holds the upright
+    // (steered, cambered), then, if it spins, about the axle (rolling forward is a
+    // positive rotation in ISO coordinates). A model's wheels carry their static camber
+    // and toe; the stand-in's are square to the body and take the upright's axle.
     let wheel = |i: usize, spin: bool| {
-        let corner = &car.model.corners[i];
-        let w = &car.state.wheels[i];
-        let local = corner.hardpoint - DVec3::Z * w.extension;
-        let steer = car.telemetry.wheels[i].steer;
-        let angle = if spin { w.angle } else { 0.0 };
-        let q = rot * DQuat::from_rotation_z(steer) * DQuat::from_axis_angle(axles[i], angle);
-        (to_bevy(pos + rot * local), quat_to_bevy(q))
+        let pose = car.pose(i);
+        let angle = if spin { car.state.wheels[i].angle } else { 0.0 };
+        let upright = match &axles {
+            Some(a) => pose.rotation * DQuat::from_axis_angle(a.0[i], angle),
+            None => DQuat::from_rotation_arc(DVec3::Y, pose.axis) * DQuat::from_rotation_y(angle),
+        };
+        (
+            to_bevy(pos + rot * car.wheel_center_body(i)),
+            quat_to_bevy(rot * upright),
+        )
     };
     for (w, mut t) in &mut wheels {
         (t.translation, t.rotation) = wheel(w.0, true);
@@ -496,5 +628,20 @@ fn update_car(
     let angle = sim.controls.steer_wheel_angle.clamp(-lock, lock) as f32;
     for (s, mut t) in &mut steering {
         t.rotation = Quat::from_axis_angle(s.0, angle);
+    }
+    // Each link a unit rod stretched between its joints.
+    for (i, s) in segments.iter_mut().enumerate() {
+        s.clear();
+        car.linkage_segments(i, s);
+    }
+    for (link, mut t) in &mut links {
+        let Some(&(a, b)) = segments[link.wheel].get(link.index) else {
+            continue;
+        };
+        let (a, b) = (to_bevy(pos + rot * a), to_bevy(pos + rot * b));
+        let d = b - a;
+        t.translation = 0.5 * (a + b);
+        t.rotation = Quat::from_rotation_arc(Vec3::Y, d.normalize_or(Vec3::Y));
+        t.scale = Vec3::new(1.0, d.length(), 1.0);
     }
 }

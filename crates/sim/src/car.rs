@@ -1,15 +1,19 @@
 //! Rigid-body chassis with four suspended wheels.
 //!
 //! Model summary:
-//! - Chassis: 6-DOF rigid body. Translation along body x/y carries the full vehicle
-//!   mass (wheels are rigidly linked in those directions); along body z only the
-//!   sprung mass, because the wheels move vertically on their own DOF.
-//! - Each corner: a vertical strut (body −z) with spring, bump/rebound damping,
-//!   anti-roll bar and bump stops; an unsprung mass on the strut; a tyre with
-//!   vertical stiffness/damping against the road surface.
+//! - Chassis: 6-DOF rigid body. The unsprung masses move with it except along their
+//!   wheels' paths, where each moves on its own DOF, the suspension's travel.
+//! - Each corner: a linkage (double wishbones, a MacPherson strut, five links or a
+//!   trailing arm, see [`crate::suspension`]) guides the upright along its travel and
+//!   steers it with the rack. The tyre's forces reach the body through it: what they do
+//!   along the travel (anti-dive, anti-squat, the roll centre's jacking) and on the rack
+//!   (the steering's feel) follows from how the linkage moves. Springs, two-stage
+//!   dampers, the anti-roll bar and a heave spring work through the actuation (at the
+//!   wheel, a coil-over, or a push- or pullrod and rocker) with its motion ratio; bump
+//!   stops limit the travel. A tyre with vertical stiffness/damping against the road.
 //! - Tyres: transient slips via relaxation length, Magic Formula combined forces,
 //!   grip scaled by load, sliding speed, inflation pressure, tread temperature and wear;
-//!   camber follows the suspension's travel.
+//!   camber and toe follow the linkage.
 //! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly. The
 //!   brakes' friction follows their temperature; their heat reaches the tyres through
 //!   the rims.
@@ -32,7 +36,8 @@ use crate::controls::Controls;
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::engine::{Ambient, STANDARD_PRESSURE};
 use crate::evolution::TrackEvolution;
-use crate::params::{CarModel, DAMAGE_ZONES, SteeringParams, lookup};
+use crate::params::{AxleParams, CarModel, DAMAGE_ZONES, lookup};
+use crate::suspension::Pose;
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
 use crate::weather::{Air, Weather};
@@ -67,9 +72,10 @@ static STANDARD_WEATHER: Weather = Weather::STANDARD;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelState {
-    /// Strut extension below the hardpoint in m (larger = wheel further down).
-    pub extension: f64,
-    pub extension_rate: f64,
+    /// Suspension travel from static ride height in m: the wheel centre's height in the
+    /// body (larger = wheel further up, in bump).
+    pub travel: f64,
+    pub travel_rate: f64,
     /// Spin rate in rad/s, positive = rolling forward.
     pub spin: f64,
     /// Accumulated rotation angle in rad, wrapped to [0, 2π). For rendering.
@@ -100,6 +106,8 @@ pub struct CarState {
     /// Angular velocity in body coordinates.
     pub angular_velocity: DVec3,
     pub wheels: [WheelState; 4],
+    /// Steering rack's travel to the left, m.
+    pub rack: f64,
     pub drivetrain: DrivetrainState,
     /// Impact damage per zone of the body (front, rear, left, right): the speed of the
     /// hits into walls in that direction beyond a light touch, summed, m/s.
@@ -133,8 +141,11 @@ pub struct WheelTelemetry {
     pub surface: Surface,
     /// Contact point in world coordinates.
     pub contact: DVec3,
-    /// Suspension force on the body, N.
+    /// Force of the springs, dampers, bars and bump stops against the wheel's travel,
+    /// N (at the wheel).
     pub suspension_force: f64,
+    /// Camber against the body, rad, negative = top leaning inwards.
+    pub camber: f64,
     /// Force of the road on the tyre in world coordinates, N.
     pub force: DVec3,
     /// Friction multiplier of the tyre's nominal μ: the surface, its rubber and dirt,
@@ -162,6 +173,7 @@ impl Default for WheelTelemetry {
             surface: Surface::Asphalt,
             contact: DVec3::ZERO,
             suspension_force: 0.0,
+            camber: 0.0,
             force: DVec3::ZERO,
             grip: 0.0,
             air_temperature: 0.0,
@@ -253,6 +265,7 @@ impl Car {
                 velocity: DVec3::ZERO,
                 angular_velocity: DVec3::ZERO,
                 wheels: [WheelState::default(); 4],
+                rack: 0.0,
                 drivetrain: DrivetrainState::new(&model.params, gear),
                 damage: [0.0; DAMAGE_ZONES],
                 time: 0.0,
@@ -291,10 +304,9 @@ impl Car {
         let air = weather.air_at(surface + normal * m.params.cg_height);
 
         let mut wheels = [WheelState::default(); 4];
-        for (i, (w, corner)) in wheels.iter_mut().zip(&m.corners).enumerate() {
+        for (i, w) in wheels.iter_mut().enumerate() {
             let tire = m.tire(i);
             *w = WheelState {
-                extension: corner.static_extension,
                 spin: speed / tire.p.radius,
                 hint,
                 tire: tire.fresh(air.temperature),
@@ -319,6 +331,7 @@ impl Car {
             velocity: x * speed,
             angular_velocity: DVec3::ZERO,
             wheels,
+            rack: 0.0,
             drivetrain,
             damage: [0.0; DAMAGE_ZONES],
             time: 0.0,
@@ -342,11 +355,27 @@ impl Car {
         self.state.orientation.inverse() * self.state.velocity
     }
 
+    /// The upright's pose of wheel `i` (relative to its static wheel centre).
+    pub fn pose(&self, i: usize) -> Pose {
+        self.model
+            .pose(i, self.state.wheels[i].travel, self.state.rack)
+    }
+
+    /// Wheel centre of wheel `i` in body coordinates.
+    pub fn wheel_center_body(&self, i: usize) -> DVec3 {
+        self.model.corners[i].origin + self.pose(i).centre
+    }
+
     /// Wheel centre in world coordinates (for rendering).
     pub fn wheel_center(&self, i: usize) -> DVec3 {
-        let c = &self.model.corners[i];
-        let local = c.hardpoint - DVec3::Z * self.state.wheels[i].extension;
-        self.state.position + self.state.orientation * local
+        self.state.position + self.state.orientation * self.wheel_center_body(i)
+    }
+
+    /// Lines between the joints of wheel `i`'s suspension in body coordinates, appended
+    /// to `out` (for rendering).
+    pub fn linkage_segments(&self, i: usize, out: &mut Vec<(DVec3, DVec3)>) {
+        self.model
+            .linkage_segments(i, self.state.wheels[i].travel, self.state.rack, out);
     }
 
     /// Advances the simulation by one fixed step of `DT`, with the same grip over the
@@ -389,7 +418,8 @@ impl Car {
         let rot = DMat3::from_quat(st.orientation);
         let rot_t = rot.transpose();
         let omega = st.angular_velocity;
-        let steer = steer_angles(model, c.steer_wheel_angle);
+        st.rack = c.steer_wheel_angle * model.front_kinematics.rack_gain;
+        let poses: [Pose; 4] = std::array::from_fn(|i| model.pose(i, st.wheels[i].travel, st.rack));
         let air = weather.air_at(st.position);
         let (engine_bay, intake) = {
             let h = &st.drivetrain.engine.heat;
@@ -397,11 +427,17 @@ impl Car {
         };
 
         // ---- Tyres ---------------------------------------------------------------
-        // Per wheel: tyre force in body coordinates, application point, road torque.
+        // Per wheel: the wheel centre, the tyre's force and moment in body coordinates,
+        // the contact patch relative to the wheel centre, and the road torque.
+        let mut center_body = [DVec3::ZERO; 4];
         let mut tire_force_body = [DVec3::ZERO; 4];
-        let mut contact_body = [DVec3::ZERO; 4];
+        let mut tire_moment_body = [DVec3::ZERO; 4];
+        let mut lever = [DVec3::ZERO; 4];
         let mut road_torque = [0.0; 4];
-        let mut steering_torque = 0.0;
+        // Generalised forces of the tyres along each wheel's travel (bump) and on the
+        // rack (to the left), N: the work they do as the linkage moves.
+        let mut travel_force = [0.0; 4];
+        let mut rack_force = 0.0;
         // Tyre deflection, m (negative: the tyre is off the ground by that much).
         let mut deflection = [0.0; 4];
         // Closest any wheel comes to the run-off barrier, m.
@@ -413,11 +449,12 @@ impl Car {
             let tire = model.tire(i);
             let tp = &tire.p;
             let w = &mut st.wheels[i];
+            let pose = &poses[i];
 
-            let center_body = corner.hardpoint - DVec3::Z * w.extension;
-            let center = st.position + rot * center_body;
-            let center_vel =
-                st.velocity + rot * (omega.cross(center_body) - DVec3::Z * w.extension_rate);
+            center_body[i] = corner.origin + pose.centre;
+            let center = st.position + rot * center_body[i];
+            let center_vel = st.velocity
+                + rot * (omega.cross(center_body[i]) + pose.centre_travel * w.travel_rate);
 
             let q = track.query(center, w.hint);
             w.hint = q.index;
@@ -435,15 +472,11 @@ impl Car {
                 0.0
             };
 
-            // Wheel frame projected onto the road.
-            let delta = steer[i];
-            let (sd, cd) = delta.sin_cos();
-            let camber =
-                axle.static_camber + axle.camber_gain * (corner.static_extension - w.extension);
-            let (sc, cc) = camber.sin_cos();
-            let forward = rot * DVec3::new(cd, sd, 0.0);
-            let axis = rot * DVec3::new(-sd * cc, cd * cc, -corner.side * sc);
-            let long = (forward - n * forward.dot(n)).normalize();
+            // Wheel frame projected onto the road: the spin axis (pointing left) as the
+            // linkage holds it, and the direction it rolls in.
+            let delta = pose.steer();
+            let axis = rot * pose.axis;
+            let long = axis.cross(n).normalize();
             let lat = n.cross(long);
             let inclination = axis.dot(n).clamp(-1.0, 1.0).asin();
 
@@ -544,11 +577,18 @@ impl Car {
 
             let force = long * f.fx + lat * f.fy + n * fz;
             let contact = center - n * height;
-            tire_force_body[i] = rot_t * force;
-            contact_body[i] = rot_t * (contact - st.position);
+            let (f_body, m_body) = (rot_t * force, rot_t * (n * f.mz));
+            tire_force_body[i] = f_body;
+            tire_moment_body[i] = m_body;
+            lever[i] = rot_t * (contact - center);
+            // How far the contact patch (fixed to the upright) moves per unit of travel
+            // and of rack, and how far the upright turns under the aligning moment.
+            let work = |centre: DVec3, spin: DVec3| {
+                f_body.dot(centre + spin.cross(lever[i])) + m_body.dot(spin)
+            };
+            travel_force[i] = work(pose.centre_travel, pose.spin_travel);
             if corner.front {
-                steering_torque +=
-                    kingpin_torque(&p.steering, corner.side, delta, tire_force_body[i], f.mz);
+                rack_force += work(pose.centre_rack, pose.spin_rack);
             }
 
             tel.wheels[i] = WheelTelemetry {
@@ -566,13 +606,13 @@ impl Car {
                 surface: q.surface,
                 contact,
                 suspension_force: 0.0,
+                camber: pose.camber(corner.side),
                 force,
                 grip: mu,
                 air_temperature: tyre_air,
                 road_temperature: road,
             };
         }
-        tel.steering_torque = steering_torque / p.steering.ratio;
 
         // ---- Drivetrain and wheel spin --------------------------------------------
         let drive = drivetrain::step(
@@ -612,46 +652,72 @@ impl Car {
                 0.5 * axle.wheel_inertia * (free * free - w.spin * w.spin),
             );
             w.angle = (w.angle + w.spin * dt).rem_euclid(std::f64::consts::TAU);
+            // The driveshaft turns the wheel against the body, so its torque also does
+            // work as the upright turns about the axle (squat) or steers (torque steer).
+            let pose = &poses[i];
+            travel_force[i] += drive_torque * pose.axis.dot(pose.spin_travel);
+            if i < 2 {
+                rack_force += drive_torque * pose.axis.dot(pose.spin_rack);
+            }
         }
 
         // ---- Suspension -------------------------------------------------------------
+        // Force of the coil-over, bar and heave spring on each actuation (compression
+        // positive), and what they and the bump stops hold against the travel.
+        let compression = poses.map(|p| p.actuation);
+        let compression_rate: [f64; 4] =
+            std::array::from_fn(|i| poses[i].motion_ratio * st.wheels[i].travel_rate);
         let mut susp = [0.0; 4];
         for (i, suspension) in susp.iter_mut().enumerate() {
             let corner = &model.corners[i];
             let axle = model.axle(i);
             let w = &st.wheels[i];
-            let other = &st.wheels[i ^ 1];
-            let spring = axle.spring_rate * (corner.spring_free_extension - w.extension);
-            let arb = axle.anti_roll_rate * (other.extension - w.extension);
-            let compression_rate = -w.extension_rate;
-            let damper = compression_rate
-                * if compression_rate > 0.0 {
-                    axle.bump_damping
-                } else {
-                    axle.rebound_damping
-                };
-            let stop = if w.extension < corner.min_extension {
-                axle.bump_stop_rate * (corner.min_extension - w.extension)
-            } else if w.extension > corner.max_extension {
-                -axle.bump_stop_rate * (w.extension - corner.max_extension)
+            let spring = corner.preload + axle.spring_rate * compression[i];
+            let arb = axle.anti_roll_rate * (compression[i] - compression[i ^ 1]);
+            let heave = axle.heave.as_ref().map_or(0.0, |h| {
+                let (a, b) = (i & !1, i | 1);
+                let mean = 0.5 * (compression[a] + compression[b]);
+                let rate = 0.5 * (compression_rate[a] + compression_rate[b]);
+                0.5 * (h.rate * (mean - h.gap).max(0.0) + h.damping * rate)
+            });
+            let element = spring + arb + heave + damper(axle, compression_rate[i]);
+            let stop = if w.travel > corner.bump_stop {
+                axle.bump_stop_rate * (w.travel - corner.bump_stop)
+            } else if w.travel < corner.droop_stop {
+                -axle.bump_stop_rate * (corner.droop_stop - w.travel)
             } else {
                 0.0
             };
-            *suspension = spring + arb + damper + stop;
+            *suspension = element * poses[i].motion_ratio + stop;
+            if i < 2 {
+                rack_force -= element * poses[i].actuation_rack;
+            }
             tel.wheels[i].suspension_force = *suspension;
         }
+        tel.steering_torque = rack_force * model.front_kinematics.rack_gain;
 
         // ---- Body forces --------------------------------------------------------------
+        // The linkage passes the tyre's force and moment to the body, except what the
+        // travel takes up: the unsprung mass moves along its path, on which the
+        // suspension's force acts instead. The body then moves with the unsprung masses
+        // across their paths, and without them along.
         let gravity = rot_t * DVec3::new(0.0, 0.0, -GRAVITY);
         let mut force = DVec3::ZERO;
         let mut torque = DVec3::ZERO;
+        let mut mass = DMat3::from_diagonal(DVec3::splat(p.mass));
         for i in 0..4 {
-            let f_planar = DVec3::new(tire_force_body[i].x, tire_force_body[i].y, 0.0);
-            force += f_planar;
-            torque += contact_body[i].cross(f_planar);
-            let f_susp = DVec3::new(0.0, 0.0, susp[i]);
-            force += f_susp;
-            torque += model.corners[i].hardpoint.cross(f_susp);
+            let path = poses[i].centre_travel;
+            let along = path.length_squared();
+            let f = tire_force_body[i] - path * ((travel_force[i] - susp[i]) / along);
+            force += f;
+            torque +=
+                center_body[i].cross(f) + lever[i].cross(tire_force_body[i]) + tire_moment_body[i];
+            let m_u = model.axle(i).unsprung_mass / along;
+            mass -= DMat3::from_cols(
+                path * (m_u * path.x),
+                path * (m_u * path.y),
+                path * (m_u * path.z),
+            );
         }
 
         // Airspeed: the car's velocity through the moving air.
@@ -663,7 +729,7 @@ impl Car {
         let mut drag = DVec3::ZERO;
         let ride = ride_heights(model, st, &deflection);
         {
-            let (front_x, rear_x) = (model.corners[FL].hardpoint.x, model.corners[RL].hardpoint.x);
+            let (front_x, rear_x) = (model.corners[FL].origin.x, model.corners[RL].origin.x);
             let wheelbase = front_x - rear_x;
             let [front_static, rear_static] = p.aero.ride_height;
             // Nose down positive, from the attitude at rest.
@@ -720,34 +786,33 @@ impl Car {
         tel.drag = drag.length();
         tel.ride_height = ride;
 
-        let accel = DVec3::new(
-            force.x / p.mass,
-            force.y / p.mass,
-            force.z / model.sprung_mass,
-        );
+        // Specific force (what an accelerometer measures).
+        let accel = mass.inverse() * force;
         tel.acceleration = accel;
-        let accel = accel + DVec3::new(gravity.x, gravity.y, gravity.z);
         let inertia = DVec3::from_array(p.inertia);
         let ang_accel = (torque - omega.cross(inertia * omega)) / inertia;
 
         // ---- Unsprung masses ----------------------------------------------------------
+        // Each moves along its path under the tyre's and the suspension's forces, and
+        // with the body's acceleration where it is.
         for i in 0..4 {
-            let corner = &model.corners[i];
             let m_u = model.axle(i).unsprung_mass;
-            let hp = corner.hardpoint;
-            let hp_accel = accel + ang_accel.cross(hp) + omega.cross(omega.cross(hp));
+            let path = poses[i].centre_travel;
+            let c = center_body[i];
+            let body_accel = accel + ang_accel.cross(c) + omega.cross(omega.cross(c));
+            let travel_accel = (travel_force[i] - susp[i] - m_u * path.dot(body_accel))
+                / (m_u * path.length_squared());
             let w = &mut st.wheels[i];
-            let net = susp[i] - tire_force_body[i].z - m_u * gravity.z;
-            let ext_accel = net / m_u + hp_accel.z;
-            w.extension_rate += ext_accel * dt;
-            w.extension += w.extension_rate * dt;
+            w.travel_rate += travel_accel * dt;
+            w.travel += w.travel_rate * dt;
             // Hard mechanical limits beyond the bump stops.
-            let (lo, hi) = (corner.min_extension - 0.03, corner.max_extension + 0.03);
-            if w.extension < lo || w.extension > hi {
-                w.extension = w.extension.clamp(lo, hi);
-                w.extension_rate = 0.0;
+            let (lo, hi) = model.kinematics(i).travel;
+            if w.travel < lo || w.travel > hi {
+                w.travel = w.travel.clamp(lo, hi);
+                w.travel_rate = 0.0;
             }
         }
+        let accel = accel + gravity;
 
         // ---- Integrate chassis (semi-implicit Euler) ----------------------------------
         st.velocity += rot * accel * dt;
@@ -807,9 +872,6 @@ impl Car {
     }
 }
 
-/// Ride height of the floor at the front / rear axle: the static ride height raised by
-/// how far the springs have extended and lowered by how far the tyres are deflected,
-/// from rest.
 /// The air the engine breathes: the weather's `air` at the pressure there, warmed to
 /// `intake` °C in the intake, which thins the charge (SAE J1349's temperature term).
 fn intake_air(air: &Air, intake: f64) -> Ambient {
@@ -822,10 +884,13 @@ fn intake_air(air: &Air, intake: f64) -> Ambient {
     }
 }
 
+/// Ride height of the floor at the front / rear axle: the static ride height lowered by
+/// how far the wheels have risen into the body and by how far the tyres are deflected,
+/// from rest.
 fn ride_heights(model: &CarModel, st: &CarState, deflection: &[f64; 4]) -> [f64; 2] {
     let lift = |i: usize| {
         let c = &model.corners[i];
-        (st.wheels[i].extension - c.static_extension) - (deflection[i] - c.static_deflection)
+        -st.wheels[i].travel - (deflection[i] - c.static_deflection)
     };
     let [front, rear] = model.params.aero.ride_height;
     [
@@ -848,8 +913,8 @@ fn collide(
     let mut push = DVec3::ZERO;
     let mut depth = 0.0;
     for i in 0..4 {
-        let center =
-            st.position + rot * (model.corners[i].hardpoint - DVec3::Z * st.wheels[i].extension);
+        let local = model.corners[i].origin + model.pose(i, st.wheels[i].travel, st.rack).centre;
+        let center = st.position + rot * local;
         let contacts = [
             if barrier_clearance < BARRIER_SKIN {
                 track.barrier_contact(center, st.wheels[i].hint)
@@ -881,34 +946,20 @@ fn collide(
     (outward, push)
 }
 
-/// Torque about a front wheel's steering axis, positive turning it left, from the
-/// force on its contact patch (`force`, body coordinates, including the road's normal
-/// force) and the tyre's aligning torque `mz`. The patch trails the axis by the
-/// mechanical trail and lies outboard of it by the scrub radius, so a lateral force
-/// (cornering, a kerb's slope) acts on the trail, a longitudinal one (braking, the edge
-/// of a bump) on the scrub radius, and the load on the leaning axis.
-fn kingpin_torque(s: &SteeringParams, side: f64, steer: f64, force: DVec3, mz: f64) -> f64 {
-    let (sd, cd) = steer.sin_cos();
-    let along = force.x * cd + force.y * sd;
-    let across = force.y * cd - force.x * sd;
-    let load = force.z;
-    let (caster, kingpin) = (s.caster.sin(), s.kingpin_inclination.sin());
-    mz - s.trail * across - side * s.scrub_radius * along
-        // Opposite on the two sides, so it cancels until a bump or kerb loads one
-        // wheel more than the other.
-        - side * load * (s.scrub_radius * caster + s.trail * kingpin)
-        // Steering lifts the car on the kingpin inclination, which centres the wheel.
-        - load * s.scrub_radius * kingpin * sd
-}
-
-/// Road wheel angles for a steering wheel angle, with partial Ackermann.
-fn steer_angles(model: &CarModel, steering_wheel: f64) -> [f64; 4] {
-    let p = &model.params;
-    let delta = steering_wheel / p.steering.ratio;
-    let t = delta.tan();
-    let half_track = 0.5 * p.track_front * p.steering.ackermann;
-    let l = p.wheelbase;
-    let left = (l * t / (l - half_track * t)).atan();
-    let right = (l * t / (l + half_track * t)).atan();
-    [left, right, 0.0, 0.0]
+/// Force of `axle`'s damper at `rate` of compression (negative in rebound), N: each
+/// direction's low-speed damping up to the knee, its high-speed damping beyond.
+fn damper(axle: &AxleParams, rate: f64) -> f64 {
+    let (slow, fast) = if rate > 0.0 {
+        (axle.bump_damping, axle.fast_bump_damping)
+    } else {
+        (axle.rebound_damping, axle.fast_rebound_damping)
+    };
+    let speed = rate.abs();
+    let knee = axle.damper_knee;
+    let force = if speed <= knee {
+        slow * speed
+    } else {
+        slow * knee + fast.unwrap_or(slow) * (speed - knee)
+    };
+    force.copysign(rate)
 }

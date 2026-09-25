@@ -16,6 +16,12 @@
         pressure: 1.38,              // cold; ~1.85 bar hot (about 26.8 psi)
         unsprung_mass: 45.0,
         wheel_inertia: 1.1,
+        // Double wishbones: short upper, long lower arm, the rack behind the axle.
+        linkage: DoubleWishbone(
+            upper: (front: (0.15, -0.45, 0.106), rear: (-0.15, -0.45, 0.094), outer: (-0.04, -0.11, 0.17)),
+            lower: (front: (0.20, -0.58, -0.171), rear: (-0.20, -0.58, -0.159), outer: (0.0, -0.06, -0.15)),
+            tie_rod: (inner: (-0.13, -0.527, -0.065), outer: (-0.13, -0.095, -0.02)),
+        ),
         spring_rate: 120000.0,
         bump_damping: 5500.0,
         rebound_damping: 8000.0,
@@ -24,7 +30,6 @@
         droop_travel: 0.070,
         bump_stop_rate: 1000000.0,
         static_camber: -0.061,       // -3.5 deg
-        camber_gain: -0.5,           // double wishbones: ~0.3 deg more negative per cm of bump
     ),
 
     rear: (
@@ -32,6 +37,11 @@
         pressure: 1.38,
         unsprung_mass: 50.0,
         wheel_inertia: 1.4,
+        linkage: DoubleWishbone(
+            upper: (front: (0.15, -0.45, 0.1246), rear: (-0.15, -0.45, 0.1254), outer: (0.0, -0.10, 0.16)),
+            lower: (front: (0.20, -0.55, -0.1146), rear: (-0.20, -0.55, -0.1554), outer: (0.0, -0.06, -0.15)),
+            tie_rod: (inner: (-0.14, -0.502, -0.010), outer: (-0.14, -0.08, 0.0)),
+        ),
         spring_rate: 140000.0,
         bump_damping: 6000.0,
         rebound_damping: 9000.0,
@@ -40,13 +50,11 @@
         droop_travel: 0.070,
         bump_stop_rate: 1000000.0,
         static_camber: -0.044,       // -2.5 deg
-        camber_gain: -0.4,
     ),
 
     steering: (
         ratio: 13.0,
         lock: 4.712,                 // 270 deg each way
-        ackermann: 0.3,
     ),
 
     brakes: (

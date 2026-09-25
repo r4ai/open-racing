@@ -525,7 +525,7 @@ fn environment(
 /// Where the engine sits along the body's x axis, m from the CG.
 fn engine_x(sim: &Simulation) -> f64 {
     let m = &sim.car.model;
-    let (front, rear) = (m.corners[FL].hardpoint.x, m.corners[RL].hardpoint.x);
+    let (front, rear) = (m.corners[FL].origin.x, m.corners[RL].origin.x);
     match m.params.engine.position {
         EnginePosition::Front => front - 0.6,
         EnginePosition::Mid => rear + 0.9,
@@ -579,7 +579,7 @@ fn aero(settings: Res<DebugSettings>, sim: Res<Simulation>, mut gizmos: Gizmos<O
     // static values.
     let floor = floor_z(&sim);
     for k in 0..2 {
-        let x = car.model.corners[2 * k].hardpoint.x;
+        let x = car.model.corners[2 * k].origin.x;
         let (ride, rest) = (tel.ride_height[k], p.aero.ride_height[k]);
         let top = DVec3::new(x, 0.0, floor);
         let color = heat(centred(ride, rest - RIDE_SPAN, rest, rest + RIDE_SPAN));
@@ -592,7 +592,7 @@ fn aero(settings: Res<DebugSettings>, sim: Res<Simulation>, mut gizmos: Gizmos<O
     }
 
     // The air coming at the car, ahead of the nose, coloured by its speed.
-    let front = car.model.corners[FL].hardpoint.x + 1.5;
+    let front = car.model.corners[FL].origin.x + 1.5;
     let flow = -tel.airspeed;
     let length = flow.length();
     if length > 0.5 {
@@ -608,7 +608,7 @@ fn aero(settings: Res<DebugSettings>, sim: Res<Simulation>, mut gizmos: Gizmos<O
     // and the engine bay), in the bay and in the intake.
     let ambient = tel.air.temperature;
     for (i, wt) in tel.wheels.iter().enumerate() {
-        let hp = car.model.corners[i].hardpoint;
+        let hp = car.model.corners[i].origin * DVec3::new(1.0, 1.0, 0.0);
         gizmos.sphere(
             Isometry3d::from_translation(world(hp + DVec3::Z * 0.35)),
             0.1,
@@ -659,7 +659,7 @@ fn car(settings: Res<DebugSettings>, sim: Res<Simulation>, mut gizmos: Gizmos<On
     let ambient = tel.air.temperature;
 
     // The body between the axles, and the centre of gravity.
-    let (front, rear) = (m.corners[FL].hardpoint.x, m.corners[RL].hardpoint.x);
+    let (front, rear) = (m.corners[FL].origin.x, m.corners[RL].origin.x);
     let floor = floor_z(&sim);
     let height = (2.0 * p.cg_height).max(0.8);
     let width = p.track_front.min(p.track_rear) - 0.3;
@@ -690,23 +690,29 @@ fn car(settings: Res<DebugSettings>, sim: Res<Simulation>, mut gizmos: Gizmos<On
 
     let peak = pad_peak(&sim);
     let fluid = p.brakes.fluid_boiling_point;
+    let mut links = Vec::new();
     for i in 0..4 {
         let corner = &m.corners[i];
         let w = &st.wheels[i];
         let wt = &tel.wheels[i];
         let tire = m.tire(i);
         let (r, tyre_width) = (tire.p.radius, tire.p.width);
-        let hub = corner.hardpoint - DVec3::Z * w.extension;
-        let steered = rot * DQuat::from_rotation_z(wt.steer);
-        let axle = steered * DVec3::Y;
+        let hub = car.wheel_center_body(i);
+        // The spin axis as the linkage holds it: steered, cambered.
+        let pose = car.pose(i);
+        let axle = rot * pose.axis;
+        let steered = rot * DQuat::from_rotation_arc(DVec3::Y, pose.axis);
         let at = pos + rot * hub;
         let facing = Quat::from_rotation_arc(Vec3::Z, to_bevy(axle).normalize_or(Vec3::Z));
         let circle = |offset: f64| Isometry3d::new(to_bevy(at + axle * offset), facing);
 
-        // The strut, blue extended to red on the bump stops.
-        let travel = (w.extension - corner.min_extension)
-            / (corner.max_extension - corner.min_extension).max(1e-6);
-        gizmos.line(world(corner.hardpoint), world(hub), heat(1.0 - travel));
+        // The linkage and its actuation, blue at full droop to red on the bump stops.
+        let travel = (w.travel - corner.droop_stop) / (corner.bump_stop - corner.droop_stop);
+        links.clear();
+        car.linkage_segments(i, &mut links);
+        for &(a, b) in &links {
+            gizmos.line(world(a), world(b), heat(travel));
+        }
 
         // The tread's inner, middle and outer zones, and the carcass inside them.
         let optimal = tire.optimal_temperature();
@@ -1032,22 +1038,23 @@ fn car_text(out: &mut String, sim: &Simulation) {
     let tel = &car.telemetry;
     let _ = writeln!(
         out,
-        "\nCAR tyre  tread in/mid/out C  core C   bar  wear %  disc C  caliper C  travel mm  grip %"
+        "\nCAR tyre  tread in/mid/out C  core C   bar  wear %  disc C  caliper C  travel mm  camber °  grip %"
     );
     for (i, name) in ["FL", "FR", "RL", "RR"].iter().enumerate() {
         let w = &st.wheels[i];
         let wt = &tel.wheels[i];
         let [a, b, c] = w.tire.tread_temperature;
-        let travel = (m.corners[i].static_extension - w.extension) * 1e3;
+        let travel = w.travel * 1e3;
         let _ = writeln!(
             out,
-            "    {name}    {a:5.0} {b:5.0} {c:5.0}     {:5.0}  {:5.2}  {:5.1}  {:6.0}  {:9.0}  {:+9.1}  {:6.1}",
+            "    {name}    {a:5.0} {b:5.0} {c:5.0}     {:5.0}  {:5.2}  {:5.1}  {:6.0}  {:9.0}  {:+9.1}  {:+8.2}  {:6.1}",
             w.tire.core_temperature,
             wt.pressure,
             w.tire.wear * 100.0,
             w.brake.disc,
             w.brake.caliper,
             travel,
+            wt.camber.to_degrees(),
             wt.grip * 100.0
         );
     }
@@ -1068,7 +1075,7 @@ fn car_text(out: &mut String, sim: &Simulation) {
     );
     let _ = writeln!(
         out,
-        "rings: tread zones and core; spoke: wear; strut: blue extended .. red on the stops;\n\
+        "rings: tread zones and core; spoke: wear; linkage: blue at full droop .. red on the stops;\n\
          arrows: grey load, grip force blue unused .. red at the limit, white velocity,\n\
          magenta acceleration"
     );
