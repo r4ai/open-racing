@@ -89,22 +89,20 @@ fn view_items(ui: &mut egui::Ui, editor: &Editor, orbit: &mut Orbit) {
     }
 }
 
-/// The box being dragged out and the open menu, over the 3D view whose top left corner
-/// is `origin`.
+/// The box being dragged out and the open menu, in window coordinates.
 pub fn overlay(
     ctx: &egui::Context,
     editor: &mut Editor,
     tool: &mut Tool,
     built: &Built,
     orbit: &mut Orbit,
-    origin: egui::Pos2,
 ) {
     if let Some((a, b)) = tool.boxing {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             "box select".into(),
         ));
-        let to = |v: bevy::math::Vec2| origin + egui::vec2(v.x, v.y);
+        let to = |v: bevy::math::Vec2| egui::pos2(v.x, v.y);
         let r = egui::Rect::from_two_pos(to(a), to(b));
         painter.rect_filled(r, 0.0, egui::Color32::from_white_alpha(16));
         painter.rect_stroke(
@@ -171,10 +169,12 @@ fn menu_items(
             }
             if entry(ui, "Automatic handle") {
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line: name.clone(),
                         index: n,
-                        handle: None,
+                        mode: open_racing_track_project::HandleMode::Auto,
+                        incoming: glam::DVec3::ZERO,
+                        outgoing: glam::DVec3::ZERO,
                     }],
                     None,
                 );
@@ -192,10 +192,12 @@ fn menu_items(
             ui.strong(format!("Handle of node {n}"));
             if entry(ui, "Automatic handle") {
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line: name,
                         index: n,
-                        handle: None,
+                        mode: open_racing_track_project::HandleMode::Auto,
+                        incoming: glam::DVec3::ZERO,
+                        outgoing: glam::DVec3::ZERO,
                     }],
                     None,
                 );

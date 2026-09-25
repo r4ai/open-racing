@@ -28,7 +28,7 @@ use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::{Frame, Sampled, handles};
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{Range, Road, Shape, Side};
+use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side};
 use open_racing_track_render::{from_bevy, to_bevy};
 
 use std::path::PathBuf;
@@ -186,6 +186,8 @@ enum Target {
         node: DVec3,
         /// The handle's offset from the node.
         start: DVec3,
+        other: DVec3,
+        handle_mode: HandleMode,
     },
     Marker {
         marker: Marker,
@@ -206,7 +208,7 @@ pub struct Modal {
     pub mode: Mode,
     target: Target,
     /// The pointer where it began, and the pointer motion since (slowed while Shift is
-    /// held), in view coordinates.
+    /// held), in window coordinates.
     start_cursor: Vec2,
     moved: Vec2,
     last_cursor: Vec2,
@@ -254,7 +256,7 @@ pub struct Tool {
     pub pointer: Option<DVec3>,
     pub draw_at: Option<DVec3>,
     pub menu: Option<Menu>,
-    /// Box selection from one corner to the other, view coordinates.
+    /// Box selection from one corner to the other, window coordinates.
     pub boxing: Option<(Vec2, Vec2)>,
     /// Snap to the grid without holding Ctrl (Ctrl then frees).
     pub snap: bool,
@@ -265,7 +267,34 @@ pub struct Tool {
     /// Where the left button went down, on what, and whether it went down with Alt
     /// (orbiting).
     press: Option<(Vec2, Option<Hit>, bool)>,
-    right_press: Option<Vec2>,
+    /// Right press position and total pointer travel, for distinguishing a menu click
+    /// from a camera drag even if the pointer returns to where it began.
+    right_press: Option<(Vec2, f32)>,
+    middle_press: bool,
+}
+
+enum LeftRelease {
+    Click(Option<Hit>),
+    Box(Rect),
+}
+
+fn finish_left(tool: &mut Tool, anywhere: Option<Vec2>, over_view: bool) -> Option<LeftRelease> {
+    let press = tool.press.take();
+    let boxing = tool.boxing.take();
+    match (press, boxing) {
+        (Some(_), Some((from, last))) => Some(LeftRelease::Box(Rect::from_corners(
+            from,
+            anywhere.unwrap_or(last),
+        ))),
+        (Some((_, hit, false)), None) if over_view => Some(LeftRelease::Click(hit)),
+        _ => None,
+    }
+}
+
+fn finish_right(tool: &mut Tool, over: Option<Vec2>) -> Option<Vec2> {
+    let (from, travel) = tool.right_press.take()?;
+    let at = over?;
+    (travel <= DRAG_THRESHOLD && from.distance(at) <= DRAG_THRESHOLD).then_some(at)
 }
 
 pub fn setup(mut commands: Commands, mut egui: ResMut<EguiGlobalSettings>) {
@@ -432,16 +461,14 @@ impl View<'_> {
     }
 }
 
-/// The cursor in the 3D view, relative to it, if it is over it.
+/// The cursor in the 3D view, in window coordinates, if it is over it.
 fn cursor(window: &Window, rect: &ViewRect) -> Option<Vec2> {
     let p = window.cursor_position()?;
-    let r = rect.0?;
-    r.contains(p).then(|| p - r.min)
+    cursor_in_view(p, rect.0)
 }
 
-/// The cursor relative to the 3D view, wherever it is.
-fn cursor_anywhere(window: &Window, rect: &ViewRect) -> Option<Vec2> {
-    Some(window.cursor_position()? - rect.0.map_or(Vec2::ZERO, |r| r.min))
+fn cursor_in_view(p: Vec2, rect: Option<Rect>) -> Option<Vec2> {
+    rect.filter(|r| r.contains(p)).map(|_| p)
 }
 
 /// Where a node is drawn: a draped spline's node on the ground under it.
@@ -468,8 +495,8 @@ fn items(editor: &Editor) -> impl Iterator<Item = Item> {
         .chain((0..p.roads.len()).map(Item::Road))
 }
 
-/// What is under the pointer: the active node's handles first, then nodes, markers,
-/// and the roads and splines themselves.
+/// What is under the pointer: range ends, the nearest node or active handle,
+/// then markers and the roads and splines themselves.
 fn pick(
     editor: &Editor,
     built: &Built,
@@ -479,18 +506,6 @@ fn pick(
 ) -> Option<Hit> {
     let near = |p: DVec3, r: f32| view.screen(p).map(|s| s.distance(at)).filter(|&d| d < r);
     let sel = &editor.selection;
-    if let (Some(item), Some(n)) = (sel.item, sel.node())
-        && let Some((_, nodes, closed)) = item_line(&editor.project, item)
-        && n < nodes.len()
-    {
-        let base = shown_pos(editor, built, item, nodes[n].pos);
-        let (inc, out) = handles(nodes, closed, n);
-        for (h, o) in [(out, true), (inc, false)] {
-            if near(base + h + DVec3::Z * LIFT, PICK_RADIUS).is_some() {
-                return Some(Hit::Handle(item, n, o));
-            }
-        }
-    }
     // Stretch ends of the selected road's strips and barriers.
     if let Some(r) = sel.road()
         && let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r))
@@ -518,11 +533,21 @@ fn pick(
         };
         for (i, node) in nodes.iter().enumerate() {
             let p = shown_pos(editor, built, item, node.pos) + DVec3::Z * LIFT;
-            if let Some(d) = near(p, PICK_RADIUS)
-                && best.is_none_or(|b| d < b.1)
-            {
-                best = Some((Hit::Node(item, i), d));
-            }
+            consider_pick(&mut best, Hit::Node(item, i), view.screen(p), at);
+        }
+    }
+    if let (Some(item), Some(n)) = (sel.item, sel.node())
+        && let Some((_, nodes, closed)) = item_line(&editor.project, item)
+        && n < nodes.len()
+    {
+        let base = shown_pos(editor, built, item, nodes[n].pos);
+        for (h, out) in visible_handles(nodes, closed, n) {
+            consider_pick(
+                &mut best,
+                Hit::Handle(item, n, out),
+                view.screen(base + h + DVec3::Z * LIFT),
+                at,
+            );
         }
     }
     if let Some((hit, _)) = best {
@@ -558,6 +583,59 @@ fn pick(
     }
     let g = ground_at?;
     body_at(editor, built, g).map(Hit::Body)
+}
+
+fn consider_pick(best: &mut Option<(Hit, f32)>, hit: Hit, screen: Option<Vec2>, at: Vec2) {
+    if let Some(distance) = screen.map(|p| p.distance(at))
+        && distance < PICK_RADIUS
+        && best.is_none_or(|(_, current)| distance < current)
+    {
+        *best = Some((hit, distance));
+    }
+}
+
+/// Only handles with a visible length can be picked or drawn.
+fn visible_handles(
+    nodes: &[open_racing_track_project::Node],
+    closed: bool,
+    index: usize,
+) -> impl Iterator<Item = (DVec3, bool)> {
+    let (inc, out) = handles(nodes, closed, index);
+    [(inc, false), (out, true)]
+        .into_iter()
+        .filter(move |(offset, outgoing)| {
+            offset.length_squared() > 1e-12
+                && (closed
+                    || if *outgoing {
+                        index + 1 < nodes.len()
+                    } else {
+                        index > 0
+                    })
+        })
+}
+
+/// Move one handle while keeping the other independent or aligned as requested.
+fn dragged_handles(mode: HandleMode, out: bool, moved: DVec3, other: DVec3) -> (DVec3, DVec3) {
+    if out {
+        let incoming = if mode == HandleMode::Free {
+            other
+        } else {
+            -moved.normalize_or_zero() * other.length()
+        };
+        (incoming, moved)
+    } else {
+        let outgoing = if mode == HandleMode::Free {
+            other
+        } else {
+            -moved.normalize_or_zero()
+                * if other.length_squared() > 1e-12 {
+                    other.length()
+                } else {
+                    moved.length()
+                }
+        };
+        (moved, outgoing)
+    }
 }
 
 /// The spline or road whose body covers `p`, splines first.
@@ -662,6 +740,7 @@ pub fn input(
     let editor = &mut *editor;
     let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none();
     let keys_free = !wants.wants_any_keyboard_input();
+    let anywhere = window.cursor_position();
     let over = cursor(&window, &rect).filter(|_| pointer_free);
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
@@ -673,13 +752,31 @@ pub fn input(
     tool.draw_at = None;
     tool.hint.clear();
 
+    if buttons.just_pressed(MouseButton::Middle) {
+        tool.middle_press = over.is_some();
+    } else if !buttons.pressed(MouseButton::Middle) {
+        tool.middle_press = false;
+    }
+    if tool.modal.is_some() || tool.draw.is_some() || tool.place.is_some() {
+        tool.right_press = None;
+        tool.press = None;
+        tool.boxing = None;
+    } else if buttons.just_pressed(MouseButton::Right) {
+        tool.right_press = over.map(|at| (at, 0.0));
+    }
+    if let Some((from, travel)) = &mut tool.right_press {
+        *travel += motion.delta.length();
+        if let Some(at) = anywhere {
+            *travel = (*travel).max(from.distance(at));
+        }
+    }
     camera_input(
         &mut orbit, tool, &buttons, &motion, &scroll, over, t, alt, shift, ctrl,
     );
 
     // A transform in progress takes every input.
     if tool.modal.is_some() {
-        let at = cursor_anywhere(&window, &rect).unwrap_or(Vec2::ZERO);
+        let at = anywhere.unwrap_or_else(|| tool.modal.as_ref().expect("a transform").last_cursor);
         modal(editor, tool, &built, view, &buttons, &keys, at, shift, ctrl);
         return;
     }
@@ -708,72 +805,62 @@ pub fn input(
         return;
     }
 
-    let Some(at) = over else {
-        tool.press = None;
-        return;
-    };
-    let hover = pick(editor, &built, view, at, tool.pointer);
+    let hover = over.and_then(|at| pick(editor, &built, view, at, tool.pointer));
     tool.hover = hover;
 
     // Left button: a click selects, a drag grabs what it began on or draws a box.
     if buttons.just_pressed(MouseButton::Left) {
-        tool.press = Some((at, hover, alt));
+        tool.press = over.map(|at| (at, hover, alt));
     }
     if let Some((from, hit, orbiting)) = tool.press {
-        if orbiting {
-            if !buttons.pressed(MouseButton::Left) {
-                tool.press = None;
-            }
-        } else if buttons.pressed(MouseButton::Left) {
-            if from.distance(at) > DRAG_THRESHOLD {
-                match hit {
-                    Some(Hit::Body(item @ Item::Prop(_))) => {
-                        tool.press = None;
-                        editor.selection.select(item);
-                        start_modal(editor, tool, &built, Mode::Grab, None, from, true);
-                    }
-                    Some(
-                        h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_)),
-                    ) => {
-                        tool.press = None;
-                        if let Hit::Node(item, n) = h
-                            && !(editor.selection.item == Some(item)
-                                && editor.selection.nodes.contains(&n))
-                        {
-                            editor.selection.select_node(item, n);
-                        }
-                        start_modal(editor, tool, &built, Mode::Grab, Some(h), from, true);
-                    }
-                    _ => tool.boxing = Some((from, at)),
+        if !buttons.pressed(MouseButton::Left) {
+            match finish_left(tool, anywhere, over.is_some()) {
+                Some(LeftRelease::Box(rect)) => box_select(editor, &built, view, rect, shift),
+                Some(LeftRelease::Click(hit)) => {
+                    click(editor, &built, hit, tool.pointer, shift, ctrl, alt);
                 }
+                None => {}
             }
-        } else {
-            tool.press = None;
-            match tool.boxing.take() {
-                Some((a, b)) => box_select(editor, &built, view, Rect::from_corners(a, b), shift),
-                None => click(editor, &built, hit, tool.pointer, shift, ctrl, alt),
+        } else if !orbiting
+            && let Some(at) = anywhere
+            && from.distance(at) > DRAG_THRESHOLD
+        {
+            match hit {
+                Some(Hit::Body(item @ Item::Prop(_))) => {
+                    tool.press = None;
+                    editor.selection.select(item);
+                    start_modal(editor, tool, &built, Mode::Grab, None, from, true);
+                }
+                Some(h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_))) => {
+                    tool.press = None;
+                    if let Hit::Node(item, n) = h
+                        && !(editor.selection.item == Some(item)
+                            && editor.selection.nodes.contains(&n))
+                    {
+                        editor.selection.select_node(item, n);
+                    }
+                    start_modal(editor, tool, &built, Mode::Grab, Some(h), from, true);
+                }
+                _ => tool.boxing = Some((from, at)),
             }
         }
-        if let Some(b) = &mut tool.boxing {
-            b.1 = at;
-        }
+    }
+    if let (Some((_, end)), Some(at)) = (&mut tool.boxing, anywhere) {
+        *end = at;
     }
 
     // Right button: a click opens the menu (with Ctrl, adds a node there).
-    if buttons.just_pressed(MouseButton::Right) {
-        tool.right_press = Some(at);
-    }
-    if buttons.just_released(MouseButton::Right)
-        && let Some(from) = tool.right_press.take()
-        && from.distance(at) <= DRAG_THRESHOLD
+    if !buttons.pressed(MouseButton::Right)
+        && let Some(at) = finish_right(tool, over)
     {
         if ctrl {
             add_node_at(editor, &built, tool.pointer);
         } else {
-            open_menu(tool, &rect, at, hover, false);
+            open_menu(tool, at, hover, false);
         }
     }
 
+    let Some(at) = over else { return };
     if !keys_free {
         return;
     }
@@ -789,7 +876,7 @@ pub fn input(
     } else if pressed(KeyCode::KeyD) && shift {
         duplicate(editor, tool, &built, at);
     } else if pressed(KeyCode::KeyA) && shift {
-        open_menu(tool, &rect, at, hover, true);
+        open_menu(tool, at, hover, true);
     } else if pressed(KeyCode::KeyA) && alt {
         editor.selection.nodes.clear();
     } else if pressed(KeyCode::KeyA) && !ctrl {
@@ -815,7 +902,7 @@ fn camera_input(
     ctrl: bool,
 ) {
     let d = motion.delta;
-    let middle = buttons.pressed(MouseButton::Middle);
+    let middle = buttons.pressed(MouseButton::Middle) && tool.middle_press;
     let right =
         buttons.pressed(MouseButton::Right) && tool.right_press.is_some() && tool.modal.is_none();
     let alt_left = alt && tool.press.is_some_and(|p| p.2) && buttons.pressed(MouseButton::Left);
@@ -884,9 +971,9 @@ pub fn view_input(
     }
 }
 
-fn open_menu(tool: &mut Tool, rect: &ViewRect, at: Vec2, hit: Option<Hit>, add_only: bool) {
+fn open_menu(tool: &mut Tool, at: Vec2, hit: Option<Hit>, add_only: bool) {
     tool.menu = Some(Menu {
-        at: at + rect.0.map_or(Vec2::ZERO, |r| r.min),
+        at,
         world: tool.pointer,
         hit,
         add_only,
@@ -914,10 +1001,12 @@ fn click(
             if let Some((name, ..)) = item_line(&editor.project, item) {
                 let line = name.to_string();
                 editor.apply(
-                    vec![Op::SetHandle {
+                    vec![Op::SetNodeHandles {
                         line,
                         index: n,
-                        handle: None,
+                        mode: HandleMode::Auto,
+                        incoming: DVec3::ZERO,
+                        outgoing: DVec3::ZERO,
                     }],
                     None,
                 );
@@ -1172,6 +1261,8 @@ fn start_modal(
                 out,
                 node: nodes[index].pos,
                 start: if out { o } else { inc },
+                other: if out { inc } else { o },
+                handle_mode: nodes[index].handles.mode(),
             }
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
@@ -1442,18 +1533,26 @@ fn transform_ops(
             index,
             out,
             start,
+            other,
+            handle_mode,
             ..
         } => {
             let Some((name, ..)) = item_line(&editor.project, *item) else {
                 return (vec![], String::new());
             };
             let h = *start + slide();
-            let handle = if *out { h } else { -h };
+            let (incoming, outgoing) = dragged_handles(*handle_mode, *out, h, *other);
             (
-                vec![Op::SetHandle {
+                vec![Op::SetNodeHandles {
                     line: name.to_string(),
                     index: *index,
-                    handle: Some(handle),
+                    mode: if *handle_mode == HandleMode::Free {
+                        HandleMode::Free
+                    } else {
+                        HandleMode::Aligned
+                    },
+                    incoming,
+                    outgoing,
                 }],
                 format!("handle {:.1} m", h.length()),
             )
@@ -1840,8 +1939,7 @@ pub fn gizmos(
             let radius = size * node_size(eye, pos);
             gizmos.sphere(Isometry3d::from_translation(lift(pos)), radius, color);
             if active {
-                let (inc, out) = handles(nodes, closed, i);
-                for (h, o) in [(inc, false), (out, true)] {
+                for (h, o) in visible_handles(nodes, closed, i) {
                     let hovered = hover == Some(Hit::Handle(item, i, o));
                     let c = if hovered {
                         Color::srgb(1.0, 0.95, 0.6)
@@ -2021,4 +2119,177 @@ pub fn gizmos(
 /// any distance.
 fn node_size(eye: Vec3, pos: DVec3) -> f32 {
     (eye.distance(to_bevy(pos)) * 0.008).clamp(0.3, 40.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::camera::RenderTargetInfo;
+    use open_racing_track_project::Node;
+
+    #[test]
+    fn cursor_keeps_window_coordinates_inside_offset_view() {
+        let rect = Rect::from_corners(Vec2::new(200.0, 80.0), Vec2::new(900.0, 600.0));
+        assert_eq!(
+            cursor_in_view(Vec2::new(250.0, 120.0), Some(rect)),
+            Some(Vec2::new(250.0, 120.0))
+        );
+        assert_eq!(cursor_in_view(Vec2::new(100.0, 120.0), Some(rect)), None);
+        let mut tool = Tool::default();
+        open_menu(&mut tool, Vec2::new(250.0, 120.0), None, false);
+        assert_eq!(
+            tool.menu.as_ref().map(|menu| menu.at),
+            Some(Vec2::new(250.0, 120.0))
+        );
+    }
+
+    #[test]
+    fn projection_round_trips_with_offset_view_and_dpi_scale() {
+        for mut projection in [
+            perspective(),
+            Projection::Orthographic(OrthographicProjection::default_3d()),
+        ] {
+            let viewport = Viewport {
+                physical_position: UVec2::new(400, 160),
+                physical_size: UVec2::new(1400, 1040),
+                ..default()
+            };
+            let mut camera = Camera {
+                viewport: Some(viewport),
+                ..default()
+            };
+            camera.computed.target_info = Some(RenderTargetInfo {
+                physical_size: UVec2::new(2400, 1600),
+                scale_factor: 2.0,
+            });
+            projection.update(1400.0, 1040.0);
+            camera.computed.clip_from_view = projection.get_clip_from_view();
+            let transform = GlobalTransform::from(
+                Transform::from_xyz(0.0, 100.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+            );
+            let view = View {
+                cam: &camera,
+                t: &transform,
+            };
+            let screen = view.screen(DVec3::ZERO).expect("origin is visible");
+            assert!((screen - Vec2::new(550.0, 340.0)).length() < 0.01);
+            let (ray_origin, ray_direction) = view.ray(screen).expect("screen ray");
+            let to_origin = -ray_origin;
+            let miss = to_origin - ray_direction * to_origin.dot(ray_direction);
+            assert!(miss.length() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn end_node_has_only_its_nonzero_handle() {
+        let nodes = [Node::new(DVec3::ZERO), Node::new(DVec3::X * 30.0)];
+        let first: Vec<_> = visible_handles(&nodes, false, 0).collect();
+        let last: Vec<_> = visible_handles(&nodes, false, 1).collect();
+        assert_eq!(first, vec![(DVec3::X * 10.0, true)]);
+        assert_eq!(last, vec![(-DVec3::X * 10.0, false)]);
+    }
+
+    #[test]
+    fn dragging_handle_respects_aligned_and_free_modes() {
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Aligned, true, DVec3::Y * 5.0, -DVec3::X * 2.0);
+        assert_eq!(incoming, -DVec3::Y * 2.0);
+        assert_eq!(outgoing, DVec3::Y * 5.0);
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Free, false, -DVec3::Y * 3.0, DVec3::X * 4.0);
+        assert_eq!(incoming, -DVec3::Y * 3.0);
+        assert_eq!(outgoing, DVec3::X * 4.0);
+        let (incoming, outgoing) =
+            dragged_handles(HandleMode::Auto, false, -DVec3::Y * 3.0, DVec3::ZERO);
+        assert_eq!(incoming, -DVec3::Y * 3.0);
+        assert_eq!(outgoing, DVec3::Y * 3.0);
+    }
+
+    #[test]
+    fn nearest_node_or_handle_wins_and_node_wins_a_tie() {
+        let node = Hit::Node(Item::Road(0), 0);
+        let handle = Hit::Handle(Item::Road(0), 0, true);
+        let mut best = None;
+        consider_pick(
+            &mut best,
+            node,
+            Some(Vec2::new(250.0, 120.0)),
+            Vec2::new(250.0, 120.0),
+        );
+        consider_pick(
+            &mut best,
+            handle,
+            Some(Vec2::new(254.0, 120.0)),
+            Vec2::new(250.0, 120.0),
+        );
+        assert_eq!(best.map(|(hit, _)| hit), Some(node));
+        let mut best = None;
+        consider_pick(
+            &mut best,
+            node,
+            Some(Vec2::new(250.0, 120.0)),
+            Vec2::new(254.0, 120.0),
+        );
+        consider_pick(
+            &mut best,
+            handle,
+            Some(Vec2::new(254.0, 120.0)),
+            Vec2::new(254.0, 120.0),
+        );
+        assert_eq!(best.map(|(hit, _)| hit), Some(handle));
+        let mut best = None;
+        consider_pick(
+            &mut best,
+            node,
+            Some(Vec2::new(250.0, 120.0)),
+            Vec2::new(252.0, 120.0),
+        );
+        consider_pick(
+            &mut best,
+            handle,
+            Some(Vec2::new(254.0, 120.0)),
+            Vec2::new(252.0, 120.0),
+        );
+        assert_eq!(best.map(|(hit, _)| hit), Some(node));
+    }
+
+    #[test]
+    fn release_outside_finishes_box_and_clears_press_state() {
+        let mut tool = Tool {
+            press: Some((Vec2::new(250.0, 120.0), None, false)),
+            boxing: Some((Vec2::new(250.0, 120.0), Vec2::new(890.0, 580.0))),
+            ..default()
+        };
+        let Some(LeftRelease::Box(rect)) =
+            finish_left(&mut tool, Some(Vec2::new(950.0, 650.0)), false)
+        else {
+            panic!("box selection should finish outside the view");
+        };
+        assert_eq!(rect.min, Vec2::new(250.0, 120.0));
+        assert_eq!(rect.max, Vec2::new(950.0, 650.0));
+        assert!(tool.press.is_none());
+        assert!(tool.boxing.is_none());
+
+        tool.press = Some((Vec2::new(250.0, 120.0), None, false));
+        assert!(finish_left(&mut tool, None, false).is_none());
+        assert!(tool.press.is_none());
+    }
+
+    #[test]
+    fn right_drag_or_release_outside_does_not_open_menu() {
+        let mut tool = Tool {
+            right_press: Some((Vec2::new(250.0, 120.0), 8.0)),
+            ..default()
+        };
+        assert_eq!(finish_right(&mut tool, Some(Vec2::new(250.0, 120.0))), None);
+        assert!(tool.right_press.is_none());
+        tool.right_press = Some((Vec2::new(250.0, 120.0), 0.0));
+        assert_eq!(finish_right(&mut tool, None), None);
+        assert!(tool.right_press.is_none());
+        tool.right_press = Some((Vec2::new(250.0, 120.0), 0.0));
+        assert_eq!(
+            finish_right(&mut tool, Some(Vec2::new(250.0, 120.0))),
+            Some(Vec2::new(250.0, 120.0))
+        );
+    }
 }

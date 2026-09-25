@@ -87,6 +87,42 @@ mod tests {
     }
 
     #[test]
+    fn curve_controls_round_trip() {
+        let mut p = Project::new("curve-round-trip");
+        p.roads[0].nodes[1].handles = NodeHandles::Free {
+            incoming: DVec3::new(-1.0, 2.0, 0.0),
+            outgoing: DVec3::new(4.0, 0.0, 0.0),
+        };
+        p.roads[0].width_left.keys.push(Key {
+            u: 1.0,
+            value: 6.0,
+            slope_in: 0.2,
+            slope_out: 0.0,
+        });
+        let dir = temp_dir("curve-round-trip");
+        p.save(&dir).unwrap();
+        assert_eq!(Project::load(&dir).unwrap(), p);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn edited_curves_bake_and_drive() {
+        let mut p = Project::new("edited-curves");
+        p.roads[0].nodes[0].handles = NodeHandles::Aligned {
+            outgoing: DVec3::new(30.0, 0.0, 0.0),
+            incoming_length: 25.0,
+        };
+        p.roads[0].width_left.set(1.0, 6.5);
+        p.roads[0].width_left.keys[0].slope_out = 0.2;
+        p.roads[0].width_left.keys[1].slope_in = 0.1;
+        p.roads[0].bank.set(1.0, 0.03);
+        p.roads[0].bank.keys[1].slope_out = -0.01;
+        let package = bake(&p, Path::new("."), &mut Cache::default()).unwrap();
+        let report = validate::check(&package, true);
+        assert!(report.ok(), "{report}");
+    }
+
+    #[test]
     fn baked_package_drives() {
         let project = Project::new("oval");
         let dir = temp_dir("bake");

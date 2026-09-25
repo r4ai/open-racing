@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 /// Version of `project.ron`.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const PROJECT_FILE: &str = "project.ron";
 
 /// Name of an entry of `Project::surfaces`.
@@ -128,22 +128,91 @@ impl BuiltinTexture {
     ];
 }
 
-/// A control point of a road. The spline passes through `pos`; `handle` is the offset
-/// of its outgoing Bézier handle (the incoming one mirrors it), or `None` to smooth the
-/// road through its neighbours automatically.
+/// How the two Bézier handles at a node relate to one another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandleMode {
+    #[default]
+    Auto,
+    /// Opposite directions, with independently adjustable lengths.
+    Aligned,
+    /// Independently adjustable directions and lengths.
+    Free,
+}
+
+/// The two handles of a road or spline node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum NodeHandles {
+    #[default]
+    Auto,
+    Aligned {
+        outgoing: DVec3,
+        incoming_length: f64,
+    },
+    Free {
+        incoming: DVec3,
+        outgoing: DVec3,
+    },
+}
+
+impl NodeHandles {
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    pub fn mode(self) -> HandleMode {
+        match self {
+            Self::Auto => HandleMode::Auto,
+            Self::Aligned { .. } => HandleMode::Aligned,
+            Self::Free { .. } => HandleMode::Free,
+        }
+    }
+
+    pub fn from_offsets(mode: HandleMode, incoming: DVec3, outgoing: DVec3) -> Self {
+        match mode {
+            HandleMode::Auto => Self::Auto,
+            HandleMode::Aligned => Self::Aligned {
+                outgoing,
+                incoming_length: incoming.length(),
+            },
+            HandleMode::Free => Self::Free { incoming, outgoing },
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Aligned {
+                outgoing,
+                incoming_length,
+            } => {
+                outgoing.is_finite()
+                    && incoming_length.is_finite()
+                    && incoming_length >= 0.0
+                    && (outgoing.length_squared() > 1e-12 || incoming_length == 0.0)
+            }
+            Self::Free { incoming, outgoing } => incoming.is_finite() && outgoing.is_finite(),
+        }
+    }
+}
+
+/// A control point of a road or spline.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub pos: DVec3,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<DVec3>,
+    #[serde(default, skip_serializing_if = "NodeHandles::is_auto")]
+    pub handles: NodeHandles,
 }
 
 impl Node {
-    pub fn at(x: f64, y: f64, z: f64) -> Self {
+    pub fn new(pos: DVec3) -> Self {
         Self {
-            pos: DVec3::new(x, y, z),
-            handle: None,
+            pos,
+            handles: NodeHandles::Auto,
         }
+    }
+
+    pub fn at(x: f64, y: f64, z: f64) -> Self {
+        Self::new(DVec3::new(x, y, z))
     }
 }
 
@@ -158,12 +227,28 @@ pub struct StationCurve {
 pub struct Key {
     pub u: f64,
     pub value: f64,
+    /// Value change per unit of spline parameter on either side of this key.
+    #[serde(default)]
+    pub slope_in: f64,
+    #[serde(default)]
+    pub slope_out: f64,
+}
+
+impl Key {
+    pub fn new(u: f64, value: f64) -> Self {
+        Self {
+            u,
+            value,
+            slope_in: 0.0,
+            slope_out: 0.0,
+        }
+    }
 }
 
 impl StationCurve {
     pub fn constant(value: f64) -> Self {
         Self {
-            keys: vec![Key { u: 0.0, value }],
+            keys: vec![Key::new(0.0, value)],
         }
     }
 
@@ -185,7 +270,16 @@ impl StationCurve {
             } else {
                 0.0
             };
-            a.value + (b.value - a.value) * t * t * (3.0 - 2.0 * t)
+            let (m0, m1) = (a.slope_out, b.slope_in);
+            if m0 == 0.0 && m1 == 0.0 {
+                return a.value + (b.value - a.value) * t * t * (3.0 - 2.0 * t);
+            }
+            let t2 = t * t;
+            let t3 = t2 * t;
+            (2.0 * t3 - 3.0 * t2 + 1.0) * a.value
+                + (t3 - 2.0 * t2 + t) * span * m0
+                + (-2.0 * t3 + 3.0 * t2) * b.value
+                + (t3 - t2) * span * m1
         };
         if u < first.u || u >= last.u {
             if !closed {
@@ -209,7 +303,7 @@ impl StationCurve {
         match self.keys.iter_mut().find(|k| (k.u - u).abs() < 1e-6) {
             Some(k) => k.value = value,
             None => {
-                self.keys.push(Key { u, value });
+                self.keys.push(Key::new(u, value));
                 self.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
             }
         }
@@ -703,6 +797,28 @@ impl Project {
             if r.nodes.len() < 2 {
                 return invalid(format!("road \"{}\" needs at least 2 nodes", r.name));
             }
+            if r.nodes
+                .iter()
+                .any(|n| !n.pos.is_finite() || !n.handles.is_valid())
+            {
+                return invalid(format!("road \"{}\": invalid node or handle", r.name));
+            }
+            for (name, curve) in [
+                ("left width", &r.width_left),
+                ("right width", &r.width_right),
+                ("bank", &r.bank),
+            ] {
+                if curve.keys.is_empty()
+                    || curve.keys.iter().any(|k| {
+                        !k.u.is_finite()
+                            || !k.value.is_finite()
+                            || !k.slope_in.is_finite()
+                            || !k.slope_out.is_finite()
+                    })
+                {
+                    return invalid(format!("road \"{}\": {name} has an invalid key", r.name));
+                }
+            }
             if r.resolution < 0.25 {
                 return invalid(format!("road \"{}\": resolution under 0.25 m", r.name));
             }
@@ -725,6 +841,13 @@ impl Project {
             }
             if sp.nodes.len() < 2 {
                 return invalid("needs at least 2 nodes");
+            }
+            if sp
+                .nodes
+                .iter()
+                .any(|n| !n.pos.is_finite() || !n.handles.is_valid())
+            {
+                return invalid("invalid node or handle");
             }
             if sp.resolution < 0.1 {
                 return invalid("resolution under 0.1 m");

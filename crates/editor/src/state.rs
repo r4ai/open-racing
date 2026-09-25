@@ -330,3 +330,57 @@ pub fn item_line(project: &Project, item: Item) -> Option<(&str, &[Node], bool)>
 pub fn watch_file(mut editor: ResMut<Editor>) {
     editor.watch();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::DVec3;
+    use open_racing_track_project::NodeHandles;
+    use open_racing_track_project::project::HandleMode;
+
+    #[test]
+    fn handle_drag_is_one_undo_step_and_redoes() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "open-racing-editor-handles-{}-{stamp}",
+            std::process::id()
+        ));
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let before = editor.project.roads[0].nodes[0];
+        editor.begin_drag();
+        for length in [3.0, 4.0] {
+            assert!(editor.apply(
+                vec![Op::SetNodeHandles {
+                    line: "circuit".into(),
+                    index: 0,
+                    mode: HandleMode::Free,
+                    incoming: DVec3::new(-2.0, 1.0, 0.0),
+                    outgoing: DVec3::X * length,
+                }],
+                None
+            ));
+        }
+        editor.end_drag();
+        assert_eq!(
+            editor.project.roads[0].nodes[0].handles,
+            NodeHandles::Free {
+                incoming: DVec3::new(-2.0, 1.0, 0.0),
+                outgoing: DVec3::X * 4.0
+            }
+        );
+        editor.undo();
+        assert_eq!(editor.project.roads[0].nodes[0], before);
+        editor.redo();
+        assert_eq!(
+            editor.project.roads[0].nodes[0].handles,
+            NodeHandles::Free {
+                incoming: DVec3::new(-2.0, 1.0, 0.0),
+                outgoing: DVec3::X * 4.0
+            }
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

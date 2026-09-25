@@ -7,6 +7,7 @@
 //! an agent using `open-racing-trackctl`) are loaded as they happen.
 
 mod assets;
+mod curve_graph;
 mod jobs;
 mod menus;
 mod presets;

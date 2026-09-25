@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::bake::Scene;
 use crate::curve::Sampled;
-use crate::project::{Project, Range, Side};
+use crate::project::{NodeHandles, Project, Range, Side};
 
 #[derive(Serialize)]
 pub struct Summary {
@@ -30,6 +30,9 @@ pub struct RoadSummary {
     pub closed: bool,
     pub length: f64,
     pub nodes: Vec<NodeSummary>,
+    pub width_left_keys: Vec<crate::project::Key>,
+    pub width_right_keys: Vec<crate::project::Key>,
+    pub bank_keys: Vec<crate::project::Key>,
     /// [min, max] of each side's width, m.
     pub width_left: [f64; 2],
     pub width_right: [f64; 2],
@@ -55,6 +58,8 @@ pub struct SplineSummary {
     pub length: f64,
     /// Node positions.
     pub nodes: Vec<[f64; 3]>,
+    /// Control nodes with their handle modes and offsets.
+    pub control_nodes: Vec<NodeSummary>,
 }
 
 #[derive(Serialize)]
@@ -63,8 +68,7 @@ pub struct NodeSummary {
     pub pos: [f64; 3],
     /// Distance along the road, m.
     pub s: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle: Option<[f64; 3]>,
+    pub handles: NodeHandles,
 }
 
 /// A value at a place on a road.
@@ -208,9 +212,12 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
                         index: i,
                         pos: nd.pos.to_array(),
                         s: smp.s_at(i as f64),
-                        handle: nd.handle.map(|h| h.to_array()),
+                        handles: nd.handles,
                     })
                     .collect(),
+                width_left_keys: road.width_left.keys.clone(),
+                width_right_keys: road.width_right.keys.clone(),
+                bank_keys: road.bank.keys.clone(),
                 width_left: range(&|k| frames[k].width_left),
                 width_right: range(&|k| frames[k].width_right),
                 elevation: range(&|k| frames[k].pos.z),
@@ -284,6 +291,17 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
             material: sp.material().to_string(),
             length: b.sampled.length,
             nodes: sp.nodes.iter().map(|n| n.pos.to_array()).collect(),
+            control_nodes: sp
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, nd)| NodeSummary {
+                    index: i,
+                    pos: nd.pos.to_array(),
+                    s: b.sampled.s_at(i as f64),
+                    handles: nd.handles,
+                })
+                .collect(),
         })
         .collect();
     Summary {
@@ -357,6 +375,7 @@ fn intersect(p0: DVec3, p1: DVec3, q0: DVec3, q1: DVec3) -> Option<(f64, f64)> {
 mod tests {
     use super::*;
     use crate::ops::{Op, apply_all};
+    use crate::project::NodeHandles;
 
     #[test]
     fn summarizes_and_warns_about_crossings() {
@@ -366,6 +385,9 @@ mod tests {
         let r = &s.roads[0];
         assert!(r.length > 1000.0 && r.min_radius.value > 30.0);
         assert_eq!(s.markers.sectors.len(), 2);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["roads"][0]["nodes"][0]["handles"], "Auto");
+        assert!(json["roads"][0]["width_left_keys"].is_array());
 
         // A figure of eight on the level.
         apply_all(
@@ -389,5 +411,21 @@ mod tests {
             "{:?}",
             s.warnings
         );
+    }
+
+    #[test]
+    fn json_summary_contains_editable_curve_controls() {
+        let mut p = Project::new("controls");
+        p.roads[0].nodes[0].handles = NodeHandles::Free {
+            incoming: DVec3::new(-2.0, 1.0, 0.0),
+            outgoing: DVec3::new(3.0, 0.0, 0.0),
+        };
+        p.roads[0].width_left.keys[0].slope_out = 0.2;
+        let json = serde_json::to_value(summarize(&p, &crate::bake::build(&p))).unwrap();
+        assert_eq!(
+            json["roads"][0]["nodes"][0]["handles"]["Free"]["outgoing"][0],
+            3.0
+        );
+        assert_eq!(json["roads"][0]["width_left_keys"][0]["slope_out"], 0.2);
     }
 }

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::project::{
-    Barrier, Grid, Key, MaterialDef, NamedSurface, Node, PaintLine, Pit, Project, Prop, Road, Side,
-    Spline, StationCurve, Strip, Terrain,
+    Barrier, Grid, HandleMode, Key, MaterialDef, NamedSurface, Node, NodeHandles, PaintLine, Pit,
+    Project, Prop, Road, Side, Spline, StationCurve, Strip, Terrain,
 };
 
 /// Which profile along a road.
@@ -83,11 +83,13 @@ pub enum Op {
         index: usize,
         pos: DVec3,
     },
-    /// Sets a node's outgoing handle offset, or `None` for an automatic one.
-    SetHandle {
+    /// Sets both handle offsets and their relation. Auto ignores the offsets.
+    SetNodeHandles {
         line: String,
         index: usize,
-        handle: Option<DVec3>,
+        mode: HandleMode,
+        incoming: DVec3,
+        outgoing: DVec3,
     },
     RemoveNode {
         line: String,
@@ -112,6 +114,14 @@ pub enum Op {
         curve: Curve,
         u: f64,
         value: f64,
+    },
+    /// Sets the value change per unit `u` before and after a profile key.
+    SetKeyTangents {
+        road: String,
+        curve: Curve,
+        u: f64,
+        slope_in: f64,
+        slope_out: f64,
     },
 
     /// Adds a strip to a side, or replaces the one of the same name. New strips go at
@@ -335,10 +345,7 @@ impl Op {
                 if p.road(&name).is_some() {
                     return Err(Error::Invalid(format!("a road named \"{name}\" exists")));
                 }
-                let nodes: Vec<Node> = nodes
-                    .into_iter()
-                    .map(|pos| Node { pos, handle: None })
-                    .collect();
+                let nodes: Vec<Node> = nodes.into_iter().map(Node::new).collect();
                 let road = match like {
                     Some(like) => {
                         let mut r = p.road(&like).ok_or_else(|| missing("road", &like))?.clone();
@@ -420,7 +427,7 @@ impl Op {
             }
             Op::AddNode { line, pos, before } => {
                 let mut l = line_mut(p, &line)?;
-                let node = Node { pos, handle: None };
+                let node = Node::new(pos);
                 match before {
                     Some(i) => {
                         if i > l.nodes().len() {
@@ -436,14 +443,17 @@ impl Op {
                 let i = l.node_index(&line, index)?;
                 l.nodes()[i].pos = pos;
             }
-            Op::SetHandle {
+            Op::SetNodeHandles {
                 line,
                 index,
-                handle,
+                mode,
+                incoming,
+                outgoing,
             } => {
                 let mut l = line_mut(p, &line)?;
                 let i = l.node_index(&line, index)?;
-                l.nodes()[i].handle = handle;
+                let node = &mut l.nodes()[i];
+                node.handles = NodeHandles::from_offsets(mode, incoming, outgoing);
             }
             Op::RemoveNode { line, index } => {
                 let mut l = line_mut(p, &line)?;
@@ -451,10 +461,7 @@ impl Op {
                 l.remove(i);
             }
             Op::SetNodes { line, nodes } => {
-                *line_mut(p, &line)?.nodes() = nodes
-                    .into_iter()
-                    .map(|pos| Node { pos, handle: None })
-                    .collect();
+                *line_mut(p, &line)?.nodes() = nodes.into_iter().map(Node::new).collect();
             }
             Op::PutSpline { spline } => put(&mut p.splines, spline, |s| &s.name, None),
             Op::RemoveSpline { name } => remove(&mut p.splines, "spline", &name, |s| &s.name)?,
@@ -501,6 +508,24 @@ impl Op {
                 let r = road_mut(p, &road)?;
                 for c in curves(r, curve) {
                     c.set(u, value);
+                }
+            }
+            Op::SetKeyTangents {
+                road,
+                curve,
+                u,
+                slope_in,
+                slope_out,
+            } => {
+                let r = road_mut(p, &road)?;
+                for c in curves(r, curve) {
+                    let key = c
+                        .keys
+                        .iter_mut()
+                        .find(|k| (k.u - u).abs() < 1e-6)
+                        .ok_or_else(|| Error::Invalid(format!("no profile key at u = {u}")))?;
+                    key.slope_in = slope_in;
+                    key.slope_out = slope_out;
                 }
             }
             Op::PutStrip {
@@ -605,11 +630,12 @@ impl Op {
             Op::SetMainRoad { .. } => "SetMainRoad",
             Op::AddNode { .. } => "AddNode",
             Op::MoveNode { .. } => "MoveNode",
-            Op::SetHandle { .. } => "SetHandle",
+            Op::SetNodeHandles { .. } => "SetNodeHandles",
             Op::RemoveNode { .. } => "RemoveNode",
             Op::SetNodes { .. } => "SetNodes",
             Op::SetProfile { .. } => "SetProfile",
             Op::SetKey { .. } => "SetKey",
+            Op::SetKeyTangents { .. } => "SetKeyTangents",
             Op::PutStrip { .. } => "PutStrip",
             Op::RemoveStrip { .. } => "RemoveStrip",
             Op::PutLine { .. } => "PutLine",
@@ -718,5 +744,44 @@ mod tests {
         .unwrap();
         let r1 = &p.roads[0].left[0].ranges;
         assert_eq!(r1[0].from, r0[0].from + 1.0);
+    }
+
+    #[test]
+    fn handle_modes_and_profile_tangents_apply_from_operations() {
+        let mut p = Project::new("t");
+        let ops = parse(
+            r#"[
+            SetNodeHandles(line: "circuit", index: 0, mode: Free,
+                incoming: (-2.0, 1.0, 0.0), outgoing: (4.0, 0.0, 0.0)),
+            SetKey(road: "circuit", curve: Bank, u: 2.0, value: 0.1),
+            SetKeyTangents(road: "circuit", curve: Bank, u: 2.0,
+                slope_in: 0.02, slope_out: -0.03),
+        ]"#,
+        )
+        .unwrap();
+        apply_all(&mut p, &ops).unwrap();
+        let node = p.roads[0].nodes[0];
+        assert_eq!(node.handles.mode(), HandleMode::Free);
+        assert_eq!(
+            node.handles,
+            NodeHandles::Free {
+                incoming: DVec3::new(-2.0, 1.0, 0.0),
+                outgoing: DVec3::new(4.0, 0.0, 0.0)
+            }
+        );
+        let key = p.roads[0].bank.keys.iter().find(|k| k.u == 2.0).unwrap();
+        assert_eq!((key.slope_in, key.slope_out), (0.02, -0.03));
+        apply_all(
+            &mut p,
+            &[Op::SetNodeHandles {
+                line: "circuit".into(),
+                index: 0,
+                mode: HandleMode::Auto,
+                incoming: DVec3::ZERO,
+                outgoing: DVec3::ZERO,
+            }],
+        )
+        .unwrap();
+        assert_eq!(p.roads[0].nodes[0].handles, NodeHandles::Auto);
     }
 }

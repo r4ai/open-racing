@@ -3,7 +3,7 @@
 
 use glam::DVec3;
 
-use crate::project::{Node, Range, Road};
+use crate::project::{Node, NodeHandles, Range, Road};
 
 /// Subdivisions per segment for measuring arc length.
 const SUBDIVISIONS: usize = 64;
@@ -20,8 +20,15 @@ pub fn segment(nodes: &[Node], closed: bool, i: usize) -> [DVec3; 4] {
 
 /// Offsets of node `i`'s incoming and outgoing handles.
 pub fn handles(nodes: &[Node], closed: bool, i: usize) -> (DVec3, DVec3) {
-    if let Some(h) = nodes[i].handle {
-        return (-h, h);
+    match nodes[i].handles {
+        NodeHandles::Aligned {
+            outgoing,
+            incoming_length,
+        } => {
+            return (-outgoing.normalize_or_zero() * incoming_length, outgoing);
+        }
+        NodeHandles::Free { incoming, outgoing } => return (incoming, outgoing),
+        NodeHandles::Auto => {}
     }
     let n = nodes.len();
     let p = nodes[i].pos;
@@ -401,6 +408,60 @@ mod tests {
         assert!((c.eval(3.0, 4.0, true) - 2.0).abs() < 1e-9);
         assert_eq!(c.eval(3.0, 4.0, false), 3.0);
         assert!((c.eval(1.0, 4.0, true) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn independent_handles_shape_open_and_closed_segments() {
+        let mut nodes = [
+            Node::at(0.0, 0.0, 0.0),
+            Node::at(10.0, 0.0, 0.0),
+            Node::at(10.0, 10.0, 0.0),
+        ];
+        nodes[1].handles = NodeHandles::Free {
+            incoming: DVec3::new(-2.0, 0.0, 0.0),
+            outgoing: DVec3::new(0.0, 4.0, 0.0),
+        };
+        assert_eq!(segment(&nodes, false, 0)[2], DVec3::new(8.0, 0.0, 0.0));
+        assert_eq!(segment(&nodes, false, 1)[1], DVec3::new(10.0, 4.0, 0.0));
+
+        nodes[0].handles = NodeHandles::Free {
+            incoming: DVec3::new(0.0, -5.0, 0.0),
+            outgoing: DVec3::new(3.0, 0.0, 0.0),
+        };
+        assert_eq!(segment(&nodes, true, 2)[2], DVec3::new(0.0, -5.0, 0.0));
+        assert_eq!(segment(&nodes, true, 0)[1], DVec3::new(3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn aligned_handles_keep_their_direction() {
+        let mut nodes = [Node::at(0.0, 0.0, 0.0), Node::at(10.0, 0.0, 0.0)];
+        nodes[0].handles = NodeHandles::Aligned {
+            outgoing: DVec3::new(3.0, 4.0, 0.0),
+            incoming_length: 10.0,
+        };
+        let (incoming, outgoing) = handles(&nodes, false, 0);
+        assert!((incoming.length() - 10.0).abs() < 1e-12);
+        assert!((incoming.normalize().dot(outgoing.normalize()) + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn profile_tangents_change_both_sides_of_the_seam() {
+        let mut c = StationCurve {
+            keys: vec![
+                crate::project::Key::new(0.0, 1.0),
+                crate::project::Key::new(2.0, 3.0),
+            ],
+        };
+        assert!((c.eval(0.5, 4.0, false) - 1.3125).abs() < 1e-12);
+        c.keys[0].slope_out = 2.0;
+        c.keys[0].slope_in = -1.0;
+        c.keys[1].slope_out = -2.0;
+        assert!(c.eval(0.5, 4.0, false) > 1.3125);
+        let eps = 1e-4;
+        let left = (c.eval(4.0, 4.0, true) - c.eval(4.0 - eps, 4.0, true)) / eps;
+        let right = (c.eval(eps, 4.0, true) - c.eval(0.0, 4.0, true)) / eps;
+        assert!((left + 1.0).abs() < 1e-3, "{left}");
+        assert!((right - 2.0).abs() < 1e-3, "{right}");
     }
 
     #[test]
