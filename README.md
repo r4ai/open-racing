@@ -62,11 +62,16 @@ cargo trackctl guide                      # the format and the operations
 cargo trackctl info my-track --json       # facts: lengths, node distances, radii, grades, warnings
 cargo trackctl apply my-track ops.json    # edits as operations, all or nothing
 cargo trackctl preview my-track           # plan view as PNG
+cargo trackctl centreline my-track lap.gpx --road gp --main   # a real circuit from GPX/KML/GeoJSON/CSV
+cargo trackctl kerbs my-track             # kerbs round every corner (entry, apex, exit)
+cargo trackctl pitlane my-track           # a pit lane beside the start straight, with boxes and a pit wall
 cargo trackctl bake my-track              # package in content/tracks/my-track/, checked with a test lap
 cargo run --release -p open-racing-app -- --track my-track
 ```
 
-Every edit in the editor is one of the operations `trackctl apply` takes, and the editor saves each one to `project.ron` straight away. When the file changes on disk, the editor reloads it, so a person and an agent can work on the same track at once. `open-racing-editor <project> --screenshot view.png` saves the 3D view and quits.
+The editor works as Blender does: Tab switches between object mode (pick roads, kerbs, walls and props) and edit mode (their nodes), G/R/S transform, and what is selected is orange. To build a real circuit, import its centreline (File › Import Centreline) or trace it over a satellite image (the Reference image tab, scaled with the Measure tool), then work corner by corner: the Corners tab numbers the turns, lays each one's kerbs, and Page Up/Page Down step through them; in the view, drag the road's edges at selected nodes, a kerb's or wall's outer edge, and the ends of their stretches, which catch on nodes and on corners' apexes. The Checks tab lists what will not drive well as you edit, View › Walk the Track looks along the road from a driver's eye, and a backup of `project.ron` is kept every few minutes (File › Restore Backup).
+
+Every edit in the editor is one of the operations `trackctl apply` takes, and the editor saves each one to `project.ron` straight away. When the file changes on disk, the editor reloads it, so a person and an agent can work on the same track at once. `open-racing-editor <project> --screenshot view.png` saves the 3D view and quits (with `--focus <name>`, `--corner <n>`, `--edit <nodes>` or `--top` to choose what it shows).
 
 ### Track evolution
 
