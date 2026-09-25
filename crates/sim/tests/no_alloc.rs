@@ -51,9 +51,8 @@ fn step_does_not_allocate() {
         TrackEvolution::DEFAULT_GAIN_PER_LAP,
     );
     let weather = Weather::new(&track, None, WeatherSettings::default());
-    car.step_in(&track, &mut evolution, &weather, &Controls::default());
     let before = ALLOCS.load(Ordering::Relaxed);
-    for _ in 0..1000 {
+    for _ in 0..1001 {
         car.step_in(&track, &mut evolution, &weather, &Controls::default());
     }
     assert_eq!(ALLOCS.load(Ordering::Relaxed) - before, 0);

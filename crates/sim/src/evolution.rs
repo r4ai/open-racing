@@ -446,10 +446,10 @@ impl TrackEvolution {
             _ => 0,
         };
         self.laid.resize(cells, 0.0);
-        if !self.heat.is_empty() {
-            self.heat
-                .resize(self.map.as_ref().map_or(0, |map| map.band.len()), 0.0);
-        }
+        // Contact heat must be ready before the first physics step. Depending on
+        // suspension settling, the first asphalt contact can occur several steps in.
+        self.heat
+            .resize(self.map.as_ref().map_or(0, |map| map.band.len()), 0.0);
         let dusty_cells = if line_grip < OFF_LINE_GRIP {
             self.map.as_ref().map_or(0, |map| map.band.len())
         } else {
@@ -606,9 +606,7 @@ impl TrackEvolution {
         if !energy.is_finite() || energy == 0.0 {
             return;
         }
-        if self.heat.is_empty() {
-            self.heat.resize(map.band.len(), 0.0);
-        }
+        debug_assert_eq!(self.heat.len(), map.band.len());
         let (r0, r1, u) = map.heat_rows(s);
         let (c0, c1, v) = map.columns(d);
         let rise = energy / CELL_HEAT_CAPACITY;
