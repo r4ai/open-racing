@@ -215,7 +215,7 @@ pub fn ui(
     let free = root.available_rect_before_wrap();
     let _ = window;
     rect.0 = Some(Rect::new(free.min.x, free.min.y, free.max.x, free.max.y));
-    menus::overlay(&ctx, editor, &mut tool, &built, &mut orbit, free.min);
+    menus::overlay(&ctx, editor, &mut tool, &built, &mut orbit);
     Ok(())
 }
 
