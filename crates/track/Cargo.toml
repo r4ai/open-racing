@@ -12,8 +12,9 @@ serde.workspace = true
 ron.workspace = true
 texpresso = { version = "2.0", optional = true }
 png = { version = "0.18", optional = true }
+zune-jpeg = { version = "0.5", optional = true }
 
 [features]
 # Texture preparation (decoding, mipmaps, block compression) for converters. The
 # runtime only reads prepared textures and does not need it.
-encode = ["dep:texpresso", "dep:png"]
+encode = ["dep:texpresso", "dep:png", "dep:zune-jpeg"]

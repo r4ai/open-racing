@@ -142,6 +142,12 @@ pub fn ops(project: &Project, name: &str, plan: &Plan) -> Result<Vec<Op>, Error>
                 from: u(a + merge),
                 to: u(b - merge),
             }],
+            model: None,
+            style: project
+                .wall_style("concrete wall")
+                .map(|w| w.name.clone())
+                .filter(|_| wall_material(project) == "concrete"),
+            corner: None,
         },
     });
     Ok(vec![

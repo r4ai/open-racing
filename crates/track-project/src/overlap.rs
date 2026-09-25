@@ -121,16 +121,21 @@ impl<'a> Footprints<'a> {
 /// Lowers strips under other roads' surfaces and cuts barriers across them.
 pub fn resolve(roads: &mut [RoadBuild]) {
     // Work out the changes against the roads as built, then apply them.
+    use rayon::prelude::*;
     let edits: Vec<Vec<Edit>> = {
         let fp = Footprints::new(roads);
         roads
             .iter()
             .enumerate()
             .map(|(r, b)| {
-                b.visual
+                let parts: Vec<(Layer, &MeshData)> = b
+                    .visual
                     .iter()
                     .map(|part| (part.layer, &part.mesh))
                     .chain(b.solid.iter().map(|part| (part.layer, &part.mesh)))
+                    .collect();
+                parts
+                    .into_par_iter()
                     .map(|(layer, mesh)| edit(&fp, r, layer, mesh))
                     .collect()
             })

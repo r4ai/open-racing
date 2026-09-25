@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 use crate::project::{
     Barrier, Grid, HandleMode, Key, MaterialDef, NamedSurface, Node, NodeHandles, PaintLine, Pit,
-    Project, Prop, Reference, Road, Side, Spline, StationCurve, Strip, Terrain,
+    Project, Prop, Reference, Road, Shape, Side, Spline, StationCurve, Strip, StripStyle, Terrain,
+    WallStyle,
 };
 
 /// Which profile along a road.
@@ -224,6 +225,29 @@ pub enum Op {
     },
     RemoveMaterial {
         name: String,
+    },
+    /// Adds a strip type, or replaces the one of the same name; the strips and splines
+    /// made from it take its shape, surface and material (keeping their widths).
+    PutStripStyle {
+        style: StripStyle,
+    },
+    /// Removes a strip type; what was made from it keeps its look.
+    RemoveStripStyle {
+        name: String,
+    },
+    /// Adds a wall type, or replaces the one of the same name; the barriers and walls
+    /// made from it take its shape, material and model (keeping their places).
+    PutWallStyle {
+        style: WallStyle,
+    },
+    /// Removes a wall type; what was made from it keeps its look.
+    RemoveWallStyle {
+        name: String,
+    },
+    /// Puts a road's strips and barriers laid round corners back round them, as the
+    /// road runs now. Every change to a road does this anyway.
+    FitCorners {
+        road: String,
     },
 }
 
@@ -644,6 +668,88 @@ impl Op {
             Op::RemoveMaterial { name } => {
                 remove(&mut p.materials, "material", &name, |m| &m.name)?
             }
+            Op::PutStripStyle { style } => {
+                for r in &mut p.roads {
+                    for s in r.left.iter_mut().chain(&mut r.right) {
+                        if s.style.as_deref() == Some(&style.name) {
+                            style.restyle(s);
+                        }
+                    }
+                }
+                for sp in &mut p.splines {
+                    if sp.style.as_deref() != Some(&style.name) {
+                        continue;
+                    }
+                    if let Shape::Band {
+                        profile,
+                        surface,
+                        material,
+                        ..
+                    } = &mut sp.shape
+                    {
+                        *profile = style.profile.clone();
+                        *surface = style.surface.clone();
+                        *material = style.material.clone();
+                    }
+                }
+                put(&mut p.strip_styles, style, |s| &s.name, None);
+            }
+            Op::RemoveStripStyle { name } => {
+                remove(&mut p.strip_styles, "strip type", &name, |s| &s.name)?;
+                let styles = p
+                    .roads
+                    .iter_mut()
+                    .flat_map(|r| r.left.iter_mut().chain(&mut r.right).map(|s| &mut s.style));
+                for s in styles.chain(p.splines.iter_mut().map(|s| &mut s.style)) {
+                    if s.as_deref() == Some(&name) {
+                        *s = None;
+                    }
+                }
+            }
+            Op::PutWallStyle { style } => {
+                for r in &mut p.roads {
+                    for b in &mut r.barriers {
+                        if b.style.as_deref() == Some(&style.name) {
+                            style.restyle(b);
+                        }
+                    }
+                }
+                for sp in &mut p.splines {
+                    if sp.style.as_deref() != Some(&style.name) {
+                        continue;
+                    }
+                    if let Shape::Wall {
+                        height,
+                        thickness,
+                        material,
+                        model,
+                        ..
+                    } = &mut sp.shape
+                    {
+                        *height = style.height;
+                        *thickness = style.thickness;
+                        *material = style.material.clone();
+                        *model = style.model.clone();
+                    }
+                }
+                put(&mut p.wall_styles, style, |s| &s.name, None);
+            }
+            Op::RemoveWallStyle { name } => {
+                remove(&mut p.wall_styles, "wall type", &name, |s| &s.name)?;
+                let styles = p
+                    .roads
+                    .iter_mut()
+                    .flat_map(|r| r.barriers.iter_mut().map(|b| &mut b.style));
+                for s in styles.chain(p.splines.iter_mut().map(|s| &mut s.style)) {
+                    if s.as_deref() == Some(&name) {
+                        *s = None;
+                    }
+                }
+            }
+            Op::FitCorners { road } => {
+                let i = p.road_index(&road).ok_or_else(|| missing("road", &road))?;
+                crate::corners::fit(p, i);
+            }
         }
         Ok(())
     }
@@ -667,6 +773,17 @@ pub fn apply_all(project: &mut Project, ops: &[Op]) -> Result<(), Error> {
             .map_err(|e| Error::Invalid(format!("operation {} ({}): {e}", i + 1, op.kind())))?;
     }
     next.validate()?;
+    // What was laid round corners follows the roads' changes, and the main road's
+    // corners are numbered from the start line.
+    for i in 0..next.roads.len() {
+        let r = &next.roads[i];
+        let before = project.road(&r.name);
+        let numbered_again = r.name == next.main_road
+            && (project.main_road != next.main_road || project.markers.start != next.markers.start);
+        if r.has_corner_parts() && (before != Some(r) || numbered_again) {
+            crate::corners::fit(&mut next, i);
+        }
+    }
     *project = next;
     Ok(())
 }
@@ -710,6 +827,11 @@ impl Op {
             Op::RemoveSurface { .. } => "RemoveSurface",
             Op::PutMaterial { .. } => "PutMaterial",
             Op::RemoveMaterial { .. } => "RemoveMaterial",
+            Op::PutStripStyle { .. } => "PutStripStyle",
+            Op::RemoveStripStyle { .. } => "RemoveStripStyle",
+            Op::PutWallStyle { .. } => "PutWallStyle",
+            Op::RemoveWallStyle { .. } => "RemoveWallStyle",
+            Op::FitCorners { .. } => "FitCorners",
         }
     }
 }
@@ -734,14 +856,14 @@ pub fn parse(src: &str) -> Result<Vec<Op>, Error> {
 #[serde(untagged)]
 enum OneOrMany {
     Many(Vec<Op>),
-    One(Op),
+    One(Box<Op>),
 }
 
 impl OneOrMany {
     fn into_vec(self) -> Vec<Op> {
         match self {
             Self::Many(v) => v,
-            Self::One(op) => vec![op],
+            Self::One(op) => vec![*op],
         }
     }
 }

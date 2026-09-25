@@ -226,6 +226,36 @@ pub fn issues(project: &Project, scene: &Scene) -> Vec<Issue> {
             ));
         }
     }
+    for (i, (a, ba)) in project.roads.iter().zip(&scene.roads).enumerate() {
+        for (b, bb) in project.roads.iter().zip(&scene.roads).skip(i + 1) {
+            let (sa, sb) = (&ba.sampled, &bb.sampled);
+            let crossed = crossings(sa, sb);
+            for &(s, other) in &crossed {
+                // Where an open road starts or ends on another is a junction.
+                if near_end(sa, s) || near_end(sb, other) {
+                    continue;
+                }
+                out.push(Issue::at(
+                    &a.name,
+                    s,
+                    format!(
+                        "road \"{}\" crosses \"{}\" at the same level at s = {s:.0} m ({other:.0} m along it); raise one over the other, or join them at a node",
+                        a.name, b.name
+                    ),
+                ));
+            }
+            for (from, to) in overlaps(sa, sb, &crossed) {
+                out.push(Issue::at(
+                    &a.name,
+                    from,
+                    format!(
+                        "road \"{}\" runs into \"{}\" from s = {from:.0} m to {to:.0} m: their surfaces overlap",
+                        a.name, b.name
+                    ),
+                ));
+            }
+        }
+    }
     let m = &project.markers;
     if let Some(main) = project.road(&project.main_road) {
         let period = main.period();
@@ -493,6 +523,57 @@ fn crossings(a: &Sampled, b: &Sampled) -> Vec<(f64, f64)> {
     out
 }
 
+/// How near an open road's end, m, it may meet another road: a junction.
+const JOIN: f64 = 15.0;
+
+/// Whether `s` is near an end of an open road.
+fn near_end(smp: &Sampled, s: f64) -> bool {
+    !smp.closed && (s < JOIN || s > smp.length - JOIN)
+}
+
+/// Stretches of `a` (from, to, m along it) whose surface overlaps `b`'s at about the
+/// same level, apart from where they cross and where one road starts or ends on the
+/// other (a junction, a pit lane leaving the track).
+fn overlaps(a: &Sampled, b: &Sampled, crossed: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if a.frames.is_empty() || b.frames.is_empty() {
+        return vec![];
+    }
+    let step = 2;
+    // Runs of overlapping frames, and whether each touches a road's end.
+    let mut runs: Vec<(f64, f64, bool)> = Vec::new();
+    let mut open: Option<(f64, f64, bool)> = None;
+    for k in (0..a.frames.len()).step_by(step) {
+        let f = &a.frames[k];
+        let g = &b.frames[b.nearest(f.pos)];
+        let d = (f.pos - g.pos).truncate().dot(g.lateral.truncate());
+        // The facing halves of both roads.
+        let (wa, wb) = if d >= 0.0 {
+            (f.width_right.min(f.width_left), g.width_left)
+        } else {
+            (f.width_left.min(f.width_right), g.width_right)
+        };
+        let beside = (f.pos - g.pos).truncate().length();
+        let over = d.abs() < wa + wb - 0.5
+            && beside < wa + wb + 2.0
+            && (f.pos.z - g.pos.z).abs() < 3.0
+            && !crossed.iter().any(|&(s, _)| (s - f.s).abs() < 40.0);
+        if over {
+            let end = near_end(a, f.s) || near_end(b, g.s);
+            open = Some(match open {
+                Some((from, _, e)) => (from, f.s, e || end),
+                None => (f.s, f.s, end),
+            });
+        } else if let Some(r) = open.take() {
+            runs.push(r);
+        }
+    }
+    runs.extend(open);
+    runs.into_iter()
+        .filter(|&(from, to, end)| !end && to - from >= 2.0)
+        .map(|(from, to, _)| (from, to))
+        .collect()
+}
+
 /// Parameters where two segments cross in the plane.
 fn intersect(p0: DVec3, p1: DVec3, q0: DVec3, q1: DVec3) -> Option<(f64, f64)> {
     let (r, s) = ((p1 - p0).truncate(), (q1 - q0).truncate());
@@ -544,6 +625,63 @@ mod tests {
             s.warnings.iter().any(|w| w.contains("crosses itself")),
             "{:?}",
             s.warnings
+        );
+    }
+
+    #[test]
+    fn roads_crossing_or_overlapping_each_other_are_found_but_junctions_are_not() {
+        let warnings = |p: &Project| summarize(p, &crate::bake::build(p)).warnings;
+        // A pit lane leaves and rejoins the track: no warning.
+        let mut p = Project::new("t");
+        let plan = crate::pitlane::Plan::around_start(&p);
+        let ops = crate::pitlane::ops(&p, "pit", &plan).unwrap();
+        apply_all(&mut p, &ops).unwrap();
+        assert!(warnings(&p).is_empty(), "{:?}", warnings(&p));
+        // A road straight across the oval's bottom straight, at its level.
+        let add = |p: &mut Project, name: &str, nodes: Vec<DVec3>| {
+            apply_all(
+                p,
+                &[Op::AddRoad {
+                    name: name.into(),
+                    closed: false,
+                    nodes,
+                    like: None,
+                }],
+            )
+            .unwrap();
+        };
+        let mut q = p.clone();
+        add(
+            &mut q,
+            "across",
+            vec![DVec3::new(150.0, -80.0, 0.0), DVec3::new(150.0, 80.0, 0.0)],
+        );
+        let w = warnings(&q);
+        assert!(w.iter().any(|w| w.contains("crosses \"across\"")), "{w:?}");
+        // Over it on a bridge: fine.
+        q.roads
+            .last_mut()
+            .unwrap()
+            .nodes
+            .iter_mut()
+            .for_each(|n| n.pos.z = 8.0);
+        let w = warnings(&q);
+        assert!(!w.iter().any(|w| w.contains("across")), "{w:?}");
+        // A road along the top straight, half on it.
+        let mut q = p.clone();
+        add(
+            &mut q,
+            "beside",
+            vec![
+                DVec3::new(-60.0, 265.0, 0.0),
+                DVec3::new(20.0, 264.0, 0.0),
+                DVec3::new(100.0, 266.0, 0.0),
+            ],
+        );
+        let w = warnings(&q);
+        assert!(
+            w.iter().any(|w| w.contains("runs into \"beside\"")),
+            "{w:?}"
         );
     }
 

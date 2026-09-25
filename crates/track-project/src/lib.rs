@@ -20,7 +20,7 @@ pub mod curve;
 pub mod inspect;
 pub mod model;
 pub mod ops;
-mod overlap;
+pub mod overlap;
 pub mod pitlane;
 pub mod preview;
 pub mod project;

@@ -5,7 +5,7 @@
 use glam::DVec3;
 
 use crate::curve::{Frame, Sampled};
-use crate::project::{Profile, Project, Road, Side};
+use crate::project::{ModelRun, Profile, Project, Road, Side};
 
 /// Rows of cross-sections per visual mesh, so that the renderer can cull a road's far
 /// parts.
@@ -68,12 +68,71 @@ pub struct SolidPart {
 /// road's plane) at the road's edge and at each strip column outwards.
 type Outline = Vec<(f64, f64)>;
 
+/// A point of a wall's line: where it stands, and which way (level) is the road's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinePoint {
+    pub pos: DVec3,
+    pub toward: DVec3,
+}
+
+/// A wall shown by a model repeated along its line: the model, and each stretch of the
+/// line it stands along.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelLine {
+    pub run: ModelRun,
+    pub stretches: Vec<Vec<LinePoint>>,
+}
+
+impl ModelLine {
+    /// The line through the rows (one per frame) where `present(k)` keeps the stretch
+    /// from row `k` to `k + 1`.
+    pub(crate) fn new(
+        run: &ModelRun,
+        points: &[LinePoint],
+        closed: bool,
+        present: impl Fn(usize) -> bool,
+    ) -> Self {
+        let n = points.len();
+        let quads = if closed { n } else { n.saturating_sub(1) };
+        let flip = if run.flip { -1.0 } else { 1.0 };
+        let point = |k: usize| {
+            let p = points[k % n];
+            LinePoint {
+                toward: p.toward * flip,
+                ..p
+            }
+        };
+        let mut stretches: Vec<Vec<LinePoint>> = Vec::new();
+        let mut open = false;
+        for k in 0..quads {
+            if !present(k) {
+                open = false;
+                continue;
+            }
+            if !open {
+                stretches.push(vec![point(k)]);
+                open = true;
+            }
+            stretches
+                .last_mut()
+                .expect("just opened")
+                .push(point(k + 1));
+        }
+        Self {
+            run: run.clone(),
+            stretches,
+        }
+    }
+}
+
 /// The built road.
 #[derive(Clone, Debug)]
 pub struct RoadBuild {
     pub sampled: Sampled,
     pub visual: Vec<VisualPart>,
     pub solid: Vec<SolidPart>,
+    /// Barriers shown by models.
+    pub models: Vec<ModelLine>,
     /// Per frame, the outline of each side (left, right).
     outlines: Vec<[Outline; 2]>,
     crown: f64,
@@ -138,13 +197,10 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                     let presence = sampled.presence(&strip.ranges, strip.fade, f.s);
                     let width = strip.width * presence;
                     let (d0, h0) = *outline.last().unwrap();
-                    let cols = columns(strip.profile, strip.width);
+                    let cols = columns(&strip.profile, strip.width);
                     for c in 1..=cols {
                         let x = c as f64 / cols as f64;
-                        outline.push((
-                            d0 + width * x,
-                            h0 + presence * profile_height(strip.profile, x),
-                        ));
+                        outline.push((d0 + width * x, h0 + presence * strip.profile.height(x)));
                     }
                 }
                 outline
@@ -193,11 +249,23 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         let si = side as usize;
         let mut col0 = 0;
         for strip in road.strips(side) {
-            let cols = columns(strip.profile, strip.width);
+            let cols = columns(&strip.profile, strip.width);
+            // Only where the strip is: nothing is built where it has narrowed to none,
+            // and only the rows of chunks with something in them are worked out.
+            let n = frames.len();
+            let here: Vec<bool> = frames
+                .iter()
+                .map(|f| sampled.presence(&strip.ranges, strip.fade, f.s) > 0.0)
+                .collect();
+            let needed = rows_needed(n, sampled.closed, |k| here[k] || here[(k + 1) % n]);
             let rows: Vec<Vec<(DVec3, f64)>> = frames
                 .iter()
                 .zip(&outlines)
-                .map(|(f, o)| {
+                .zip(&needed)
+                .map(|((f, o), &needed)| {
+                    if !needed {
+                        return vec![];
+                    }
                     let mut row: Vec<(DVec3, f64)> = o[si][col0..=col0 + cols]
                         .iter()
                         .map(|&(d, h)| {
@@ -221,7 +289,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                 material(&strip.material),
                 tile(material(&strip.material)),
                 false,
-                |_| true,
+                |k| here[k] || here[(k + 1) % n],
             );
             col0 += cols;
         }
@@ -261,6 +329,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
     }
 
     // Barriers: faces towards the road, over the top and away from it.
+    let mut models = Vec::new();
     for barrier in &road.barriers {
         let si = barrier.side as usize;
         let sign = barrier.side.sign();
@@ -286,6 +355,18 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
             })
             .collect();
         let present = |k: usize| sampled.presence(&barrier.ranges, 0.0, frames[k].s) > 0.5;
+        if let Some(run) = &barrier.model {
+            // On the ground in the wall's middle, facing the road.
+            let points: Vec<LinePoint> = corners
+                .iter()
+                .zip(frames)
+                .map(|(c, f)| LinePoint {
+                    pos: (c[0] + c[3]) * 0.5 + DVec3::Z * BARRIER_SINK,
+                    toward: -sign * f.lateral.with_z(0.0).normalize_or(DVec3::Y),
+                })
+                .collect();
+            models.push(ModelLine::new(run, &points, sampled.closed, present));
+        }
         // A left barrier's corners run away from the road, a right one's towards it.
         let corners: Vec<[DVec3; 4]> = match barrier.side {
             Side::Left => corners,
@@ -294,8 +375,14 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                 .map(|[a, b, c, d]| [d, c, b, a])
                 .collect(),
         };
+        // A wall shown by a model is only there for the cars to hit.
+        let mut hidden = Vec::new();
         add_wall(
-            &mut visual,
+            if barrier.model.is_some() {
+                &mut hidden
+            } else {
+                &mut visual
+            },
             &mut solid,
             &sampled,
             &corners,
@@ -311,6 +398,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         sampled,
         visual,
         solid,
+        models,
         outlines,
         crown: road.crown,
     }
@@ -369,20 +457,13 @@ pub(crate) fn add_wall(
 const STRIP_COLUMN: f64 = 2.0;
 
 /// Columns a strip of this profile and full width is built with.
-pub(crate) fn columns(profile: Profile, width: f64) -> usize {
+pub(crate) fn columns(profile: &Profile, width: f64) -> usize {
     let across = (width / STRIP_COLUMN).ceil().max(1.0) as usize;
     match profile {
         Profile::Crown(_) => across.max(4),
+        // Fine enough for its steps.
+        Profile::Shape(points) => across.max(4 * points.len()).min(64),
         Profile::Flat | Profile::Slope(_) => across,
-    }
-}
-
-/// Height of a profile above its inner edge at `x` of the way across.
-pub(crate) fn profile_height(profile: Profile, x: f64) -> f64 {
-    match profile {
-        Profile::Flat => 0.0,
-        Profile::Crown(h) => h * (std::f64::consts::PI * x).sin(),
-        Profile::Slope(drop) => -drop * x,
     }
 }
 
@@ -418,6 +499,28 @@ fn surface_height(road: &Road, f: &Frame, outlines: &[Outline; 2], d: f64) -> f6
     }
 }
 
+/// Which rows `add_band` reads when `present(k)` keeps the quads it does: those of each
+/// chunk with a quad kept, and one either side.
+fn rows_needed(n: usize, closed: bool, present: impl Fn(usize) -> bool) -> Vec<bool> {
+    let quads = if closed { n } else { n.saturating_sub(1) };
+    let mut needed = vec![false; n];
+    let mut start = 0;
+    while start < quads {
+        let end = (start + CHUNK_ROWS).min(quads);
+        if (start..end).any(&present) {
+            for k in start as isize - 1..=end as isize + 1 {
+                if closed {
+                    needed[k.rem_euclid(n as isize) as usize] = true;
+                } else if (0..n as isize).contains(&k) {
+                    needed[k as usize] = true;
+                }
+            }
+        }
+        start = end;
+    }
+    needed
+}
+
 /// Triangulates a band of rows (one per frame) of points across the road, each with its
 /// coordinate across for the UVs, into chunked visual meshes and a physics mesh.
 /// `present(k)` keeps the quads between rows `k` and `k + 1`. Across each row the
@@ -442,10 +545,15 @@ pub(crate) fn add_band(
     let mut start = 0;
     while start < quads {
         let end = (start + CHUNK_ROWS).min(quads);
+        // Nothing to build here: no vertices either.
+        if !(start..end).any(&present) {
+            start = end;
+            continue;
+        }
         let mut mesh = MeshData::default();
         // Rows start..=end; the last may wrap to row 0.
         let row = |k: usize| k % n;
-        let cols = rows[0].len();
+        let cols = rows[start % n].len();
         for k in start..=end {
             let r = row(k);
             // Along distance continues past the end of a closed road.

@@ -36,10 +36,16 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Every rendered mesh but the terrain's.
+    /// Every rendered mesh but the terrain's and the walls models show.
     pub fn visual_parts(&self) -> impl Iterator<Item = &road::VisualPart> {
         let roads = self.roads.iter().flat_map(|b| &b.visual);
         roads.chain(self.splines.iter().flat_map(|b| &b.visual))
+    }
+
+    /// The walls models show.
+    pub fn model_lines(&self) -> impl Iterator<Item = &road::ModelLine> {
+        let roads = self.roads.iter().flat_map(|b| &b.models);
+        roads.chain(self.splines.iter().flat_map(|b| &b.models))
     }
 }
 
@@ -56,7 +62,9 @@ fn add_solids<'a>(ground: &mut Ground, parts: impl IntoIterator<Item = &'a Solid
 
 /// Builds the roads, then the terrain under them, then the splines over both.
 pub fn build(project: &Project) -> Scene {
+    use rayon::prelude::*;
     let mut roads: Vec<RoadBuild> = (0..project.roads.len())
+        .into_par_iter()
         .map(|i| road::build(project, i))
         .collect();
     crate::overlap::resolve(&mut roads);
@@ -267,6 +275,33 @@ pub fn add_props(
     Ok(())
 }
 
+/// Adds the walls models show: each model's look once, and its copies along the walls.
+pub fn add_model_walls(
+    scene: &Scene,
+    dir: &Path,
+    cache: &mut Cache,
+    visual: &mut VisualBuilder,
+) -> Result<(), Error> {
+    let mut looks: HashMap<PathBuf, Vec<u32>> = HashMap::new();
+    for line in scene.model_lines() {
+        let model = cache.model(dir, &line.run.model)?;
+        let materials = looks
+            .entry(line.run.model.clone())
+            .or_insert_with(|| add_look(&model, visual));
+        for m in model::along(&model, line) {
+            visual.add_mesh(
+                materials[m.material as usize],
+                m.cast_shadows,
+                &m.positions,
+                &m.normals,
+                &m.uvs,
+                &m.indices,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Bakes the project into a package. Textures and models are read from the project's directory
 /// `dir`.
 pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPackage, Error> {
@@ -288,6 +323,7 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
         &mut visual,
         &mut scene.ground,
     )?;
+    add_model_walls(&scene, dir, cache, &mut visual)?;
     for part in scene.visual_parts() {
         let m = &part.mesh;
         visual.add_mesh(

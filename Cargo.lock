@@ -7199,6 +7199,7 @@ dependencies = [
  "ron",
  "serde",
  "texpresso",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -7211,6 +7212,7 @@ dependencies = [
  "open-racing-sim",
  "open-racing-track",
  "png",
+ "rayon",
  "ron",
  "serde",
  "serde_json",

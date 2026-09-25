@@ -117,7 +117,8 @@ enum Command {
         boxes: usize,
     },
     /// Lays kerbs round a road's corners (as `info` numbers them): outside at entry and
-    /// exit, inside at the apex. Replaces the kerbs these corners had.
+    /// exit, inside at the apex, and optionally gravel or run-off and a wall outside.
+    /// What these corners had is replaced; it stays with its corner as the road changes.
     Kerbs {
         project: String,
         /// Defaults to the main road.
@@ -126,6 +127,9 @@ enum Command {
         /// Only these corners (by number); all by default.
         #[arg(long, value_delimiter = ',')]
         corners: Vec<usize>,
+        /// The strip type of the kerbs ("kerb" by default).
+        #[arg(long)]
+        style: Option<String>,
         #[arg(long, default_value_t = 1.5)]
         width: f64,
         /// Leave out the entry, apex or exit kerbs.
@@ -135,6 +139,17 @@ enum Command {
         no_apex: bool,
         #[arg(long)]
         no_exit: bool,
+        /// A strip type to lay outside each corner, beyond its kerbs ("gravel").
+        #[arg(long)]
+        outside: Option<String>,
+        #[arg(long, default_value_t = 12.0)]
+        outside_width: f64,
+        /// A wall type to put up outside each corner ("tyre wall").
+        #[arg(long)]
+        wall: Option<String>,
+        /// Its distance from the road's edge, m.
+        #[arg(long, default_value_t = 20.0)]
+        wall_offset: f64,
     },
     /// Bakes the project and checks the package, without saving it.
     Check {
@@ -335,10 +350,15 @@ fn run(cli: Cli) -> Result<(), Error> {
             project,
             road,
             corners: only,
+            style,
             width,
             no_entry,
             no_apex,
             no_exit,
+            outside,
+            outside_width,
+            wall,
+            wall_offset,
         } => {
             let dir = resolve(&project);
             let mut p = Project::load(&dir)?;
@@ -352,20 +372,32 @@ fn run(cli: Cli) -> Result<(), Error> {
             } else {
                 0.0
             };
-            let kerbs = corners::Kerbs {
-                entry: !no_entry,
-                apex: !no_apex,
-                exit: !no_exit,
-                width,
-                ..Default::default()
+            let kerbs = corners::Kit::kerbs(&p, style.as_deref(), width);
+            let kit = corners::Kit {
+                entry: kerbs.entry.filter(|_| !no_entry),
+                apex: kerbs.apex.filter(|_| !no_apex),
+                exit: kerbs.exit.filter(|_| !no_exit),
+                outside: outside.map(|s| (s, outside_width)),
+                wall: wall.map(|s| (s, wall_offset)),
             };
+            for (what, style) in [
+                ("strip", kit.outside.as_ref().map(|s| &s.0)),
+                ("wall", kit.wall.as_ref().map(|s| &s.0)),
+            ] {
+                if let Some(s) = style
+                    && p.strip_style(s).is_none()
+                    && p.wall_style(s).is_none()
+                {
+                    return Err(Error::Invalid(format!("no {what} type named \"{s}\"")));
+                }
+            }
             let found = corners::find(&smp, start);
             let mut list = Vec::new();
             for c in found
                 .iter()
                 .filter(|c| only.is_empty() || only.contains(&c.number))
             {
-                list.extend(corners::kerb_ops(&p, &name, &smp, c, &kerbs));
+                list.extend(corners::kit_ops(&p, &name, &smp, &found, c, &kit));
             }
             ops::apply_all(&mut p, &list)?;
             p.save(&dir)?;

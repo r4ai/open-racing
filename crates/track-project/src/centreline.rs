@@ -317,82 +317,132 @@ const SHORTEST: f64 = 8.0;
 
 /// Longest gap between nodes laid along a centreline, m.
 pub const LONGEST: f64 = 40.0;
-/// Lengths of line the plan position and the height are averaged over, m: survey
-/// points jitter by a fraction of a metre, and GPS heights by far more.
-const PLAN_WINDOW: f64 = 10.0;
-const HEIGHT_WINDOW: f64 = 40.0;
+/// Shortest waves of the line kept by smoothing, m: survey points jitter by a fraction
+/// of a metre and GPS by a metre or two, which bends a road laid through them by more
+/// than its corners do over a few metres; GPS heights jitter by far more.
+pub const PLAN_SMOOTHING: f64 = 60.0;
+pub const HEIGHT_SMOOTHING: f64 = 200.0;
+/// Spacing the line is resampled at before smoothing, m.
+const RESAMPLE: f64 = 2.0;
 
-/// Each point averaged with its neighbours within half a window along the line either
-/// way, with weights falling off towards the window's ends: the plan position over
-/// `plan` metres, the height over `height` metres.
+/// The line resampled every `RESAMPLE` metres in plan and smoothed as a smoothing
+/// spline would (Whittaker's smoother): waves shorter than about `plan` metres in plan,
+/// and `height` metres in height, are taken out, while longer ones (the corners) keep
+/// their shape. An open line keeps its ends.
 pub fn smooth(points: &[DVec3], closed: bool, plan: f64, height: f64) -> Vec<DVec3> {
+    let points = resample(points, closed, RESAMPLE);
     let n = points.len();
-    if n < 3 {
-        return points.to_vec();
+    if n < 5 {
+        return points;
     }
-    // Distance along the line to each point, and the whole length round a loop.
-    let mut s = vec![0.0; n];
-    for i in 1..n {
-        s[i] = s[i - 1] + points[i].truncate().distance(points[i - 1].truncate());
-    }
-    let length = s[n - 1]
-        + if closed {
-            points[0].truncate().distance(points[n - 1].truncate())
-        } else {
-            0.0
-        };
-    let average = |i: usize, window: f64, get: &dyn Fn(DVec3) -> DVec3| -> DVec3 {
-        let half = 0.5 * window;
-        let (mut sum, mut total) = (DVec3::ZERO, 0.0);
-        // Walk out both ways until beyond half the window.
-        for dir in [1i64, -1] {
-            let mut k = 0i64;
-            loop {
-                let j = i as i64 + dir * k;
-                let j = if closed {
-                    j.rem_euclid(n as i64) as usize
-                } else if (0..n as i64).contains(&j) {
-                    j as usize
-                } else {
-                    break;
-                };
-                let mut d = (s[j] - s[i]).abs();
-                if closed {
-                    d = d.min(length - d);
-                }
-                if d > half || k as usize >= n {
-                    break;
-                }
-                if !(dir == -1 && k == 0) {
-                    let w = 1.0 - d / (half + 1e-9);
-                    sum += get(points[j]) * w;
-                    total += w;
-                }
-                k += 1;
-            }
-        }
-        sum / total
-    };
+    // The smoother's weight for a cut-off wavelength, in points.
+    let lambda = |wave: f64| (wave / (std::f64::consts::TAU * RESAMPLE)).powi(4);
+    let x = whittaker(
+        &points.iter().map(|p| p.x).collect::<Vec<_>>(),
+        closed,
+        lambda(plan),
+    );
+    let y = whittaker(
+        &points.iter().map(|p| p.y).collect::<Vec<_>>(),
+        closed,
+        lambda(plan),
+    );
+    let z = whittaker(
+        &points.iter().map(|p| p.z).collect::<Vec<_>>(),
+        closed,
+        lambda(height),
+    );
     (0..n)
         .map(|i| {
-            let xy = average(i, plan, &|p| p.with_z(0.0));
-            let z = average(i, height, &|p| DVec3::Z * p.z);
-            // The ends of an open line stay where they are.
-            let xy = if !closed && (i == 0 || i == n - 1) {
-                points[i].with_z(0.0)
+            if !closed && (i == 0 || i == n - 1) {
+                points[i].with_z(z[i])
             } else {
-                xy
-            };
-            xy.with_z(z.z)
+                DVec3::new(x[i], y[i], z[i])
+            }
         })
         .collect()
+}
+
+/// Points every `spacing` metres (in plan) along the line through `points`.
+fn resample(points: &[DVec3], closed: bool, spacing: f64) -> Vec<DVec3> {
+    let n = points.len();
+    if n < 2 {
+        return points.to_vec();
+    }
+    let segments = if closed { n } else { n - 1 };
+    let mut s = vec![0.0; segments + 1];
+    for i in 0..segments {
+        s[i + 1] = s[i]
+            + points[i]
+                .truncate()
+                .distance(points[(i + 1) % n].truncate());
+    }
+    let length = s[segments];
+    let count = (length / spacing).round().max(2.0) as usize;
+    let steps = if closed { count } else { count + 1 };
+    let mut j = 0;
+    (0..steps)
+        .map(|k| {
+            let at = length * k as f64 / count as f64;
+            while j + 1 < segments && s[j + 1] < at {
+                j += 1;
+            }
+            let t = ((at - s[j]) / (s[j + 1] - s[j]).max(1e-9)).clamp(0.0, 1.0);
+            points[j].lerp(points[(j + 1) % n], t)
+        })
+        .collect()
+}
+
+/// Whittaker's smoother: the values `z` minimising the misfit to `y` plus `lambda`
+/// times their squared second differences (round a loop when `closed`), solved by
+/// conjugate gradients.
+fn whittaker(y: &[f64], closed: bool, lambda: f64) -> Vec<f64> {
+    let n = y.len();
+    // (I + lambda DᵀD) v, with D the second differences.
+    let apply = |v: &[f64]| -> Vec<f64> {
+        let rows = if closed { n } else { n - 2 };
+        let at = |i: usize| v[i % n];
+        let mut out = v.to_vec();
+        for r in 0..rows {
+            let d = lambda * (at(r) - 2.0 * at(r + 1) + at(r + 2));
+            out[r % n] += d;
+            out[(r + 1) % n] -= 2.0 * d;
+            out[(r + 2) % n] += d;
+        }
+        out
+    };
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let mut z = y.to_vec();
+    let az = apply(&z);
+    let mut r: Vec<f64> = y.iter().zip(&az).map(|(a, b)| a - b).collect();
+    let mut p = r.clone();
+    let mut rr = dot(&r, &r);
+    let goal = 1e-12 * dot(y, y).max(1e-12);
+    for _ in 0..4 * n + 100 {
+        if rr <= goal {
+            break;
+        }
+        let ap = apply(&p);
+        let alpha = rr / dot(&p, &ap);
+        for i in 0..n {
+            z[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        let next = dot(&r, &r);
+        let beta = next / rr;
+        rr = next;
+        for i in 0..n {
+            p[i] = r[i] + beta * p[i];
+        }
+    }
+    z
 }
 
 /// The operations that lay road `name` along a centreline within `tolerance` metres:
 /// its nodes replaced if it exists, or else a new road with the main road's
 /// cross-section.
 pub fn road_ops(project: &Project, line: &Centreline, name: &str, tolerance: f64) -> Vec<Op> {
-    let smooth = smooth(&line.points, line.closed, PLAN_WINDOW, HEIGHT_WINDOW);
+    let smooth = smooth(&line.points, line.closed, PLAN_SMOOTHING, HEIGHT_SMOOTHING);
     let nodes = simplify(&smooth, line.closed, tolerance, LONGEST);
     if project.road(name).is_some() {
         vec![

@@ -4,7 +4,9 @@
 use open_racing_sim::{Surface, SurfaceProps};
 use open_racing_track::texture::Image;
 
-use crate::project::{Alpha, BuiltinTexture, MaterialDef, NamedSurface, TextureSource};
+use crate::project::{
+    Alpha, BuiltinTexture, MaterialDef, NamedSurface, Profile, StripStyle, TextureSource, WallStyle,
+};
 
 /// Edge of the generated textures, texels.
 const SIZE: usize = 256;
@@ -24,6 +26,72 @@ pub fn surfaces() -> Vec<NamedSurface> {
         props: SurfaceProps::of(kind),
     })
     .to_vec()
+}
+
+/// Kerbs, gravel, run-off and grass to lay, from the built-in surfaces and materials.
+pub fn strip_styles() -> Vec<StripStyle> {
+    let s = |name: &str, width, profile, surface: &str, material: &str, fade| StripStyle {
+        name: name.into(),
+        width,
+        profile,
+        surface: surface.into(),
+        material: material.into(),
+        fade,
+    };
+    vec![
+        s("kerb", 1.2, Profile::Crown(0.03), "kerb", "kerb", 3.0),
+        s("flat kerb", 1.5, Profile::Flat, "kerb", "kerb", 2.0),
+        s(
+            "raised kerb",
+            1.2,
+            Profile::Crown(0.08),
+            "kerb",
+            "kerb",
+            2.0,
+        ),
+        s(
+            "sausage kerb",
+            0.5,
+            Profile::Crown(0.15),
+            "kerb",
+            "kerb",
+            0.5,
+        ),
+        s(
+            "stepped kerb",
+            1.5,
+            Profile::Shape(vec![
+                [0.0, 0.0],
+                [0.05, 0.05],
+                [0.5, 0.05],
+                [0.55, 0.1],
+                [1.0, 0.1],
+            ]),
+            "kerb",
+            "kerb",
+            2.0,
+        ),
+        s("gravel", 15.0, Profile::Slope(0.3), "gravel", "gravel", 8.0),
+        s("run-off", 10.0, Profile::Flat, "runoff", "asphalt", 8.0),
+        s("grass", 12.0, Profile::Slope(0.2), "grass", "grass", 0.0),
+    ]
+}
+
+/// Walls, rails, fences and tyre stacks to put up, from the built-in materials.
+pub fn wall_styles() -> Vec<WallStyle> {
+    let w = |name: &str, height, thickness, material: &str| WallStyle {
+        name: name.into(),
+        height,
+        thickness,
+        material: material.into(),
+        model: None,
+    };
+    vec![
+        w("concrete wall", 1.0, 0.5, "concrete"),
+        w("guard rail", 0.75, 0.0, "armco"),
+        w("tyre wall", 1.0, 1.2, "tyres"),
+        w("catch fence", 4.0, 0.0, "fence"),
+    ]
 }
 
 pub fn materials() -> Vec<MaterialDef> {

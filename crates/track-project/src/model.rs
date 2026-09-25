@@ -221,3 +221,85 @@ impl Placement {
             .to_array()
     }
 }
+
+/// Copies of a model repeated along a wall's line, as meshes in the world with the
+/// model's own materials. Each stretch holds a whole number of copies, each stretched a
+/// little along the line to fit; a bent copy follows the line, a straight one stands on
+/// the chord between its ends. Copies are merged into meshes of a few dozen each, so
+/// that far ones can be culled.
+pub fn along(model: &Model, line: &crate::road::ModelLine) -> Vec<Mesh> {
+    const COPIES_PER_MESH: usize = 32;
+    let [lo, hi] = model.bounds;
+    let own = (hi.x - lo.x).max(0.05) as f64;
+    let piece = if line.run.length > 0.0 {
+        line.run.length
+    } else {
+        own
+    };
+    let mut out = Vec::new();
+    for stretch in line.stretches.iter().filter(|s| s.len() > 1) {
+        // Distance along the stretch at each point.
+        let mut at = vec![0.0];
+        for w in stretch.windows(2) {
+            at.push(at.last().unwrap() + w[0].pos.distance(w[1].pos));
+        }
+        let length = *at.last().unwrap();
+        if length < 0.1 {
+            continue;
+        }
+        let point = |s: f64| {
+            let i = at.partition_point(|&a| a <= s).clamp(1, at.len() - 1);
+            let (a, b) = (stretch[i - 1], stretch[i]);
+            let t = ((s - at[i - 1]) / (at[i] - at[i - 1]).max(1e-9)).clamp(0.0, 1.0);
+            let along = (b.pos - a.pos).normalize_or(DVec3::X);
+            let toward = a.toward.lerp(b.toward, t).normalize_or(DVec3::Y);
+            (a.pos.lerp(b.pos, t), along, toward)
+        };
+        let copies = (length / piece).round().max(1.0) as usize;
+        let each = length / copies as f64;
+        let stretch_x = each / own;
+        for first in (0..copies).step_by(COPIES_PER_MESH) {
+            let last = (first + COPIES_PER_MESH).min(copies);
+            for m in &model.meshes {
+                let mut mesh = Mesh {
+                    material: m.material,
+                    cast_shadows: m.cast_shadows,
+                    positions: vec![],
+                    normals: vec![],
+                    uvs: vec![],
+                    indices: vec![],
+                };
+                for k in first..last {
+                    let base = mesh.positions.len() as u32;
+                    let s0 = k as f64 * each;
+                    let (start, _, _) = point(s0);
+                    let (end, _, _) = point(s0 + each);
+                    let (_, _, facing) = point(s0 + 0.5 * each);
+                    let chord = (end - start).normalize_or(DVec3::X);
+                    for (p, n) in m.positions.iter().zip(&m.normals) {
+                        let x = (p[0] - lo.x) as f64 * stretch_x;
+                        let (origin, along, toward) = if line.run.bend {
+                            let (o, a, t) = point(s0 + x);
+                            (o - a * x, a, t)
+                        } else {
+                            (start, chord, facing)
+                        };
+                        // The model's +Y faces the road, level; +Z stays up.
+                        let side = (toward - along * toward.dot(along)).normalize_or(toward);
+                        let q = origin + along * x + side * p[1] as f64 + DVec3::Z * p[2] as f64;
+                        let n = along * n[0] as f64 + side * n[1] as f64 + DVec3::Z * n[2] as f64;
+                        mesh.positions.push(q.as_vec3().to_array());
+                        mesh.normals
+                            .push(n.normalize_or(DVec3::Z).as_vec3().to_array());
+                    }
+                    mesh.uvs.extend(&m.uvs);
+                    mesh.indices.extend(m.indices.iter().map(|i| i + base));
+                }
+                if !mesh.indices.is_empty() {
+                    out.push(mesh);
+                }
+            }
+        }
+    }
+    out
+}

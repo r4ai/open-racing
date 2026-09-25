@@ -2,6 +2,7 @@
 //! and continues from their outer edges, smoothed between them.
 
 use glam::{DVec2, DVec3};
+use rayon::prelude::*;
 
 use crate::project::Project;
 use crate::road::{Layer, MeshData, RoadBuild};
@@ -121,46 +122,55 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
     let ny = ((hi.y - lo.y) / t.cell).ceil() as usize + 1;
     let lookup = Lookup::new(roads, lo, hi);
 
-    // Heights, and whether smoothing may move them.
-    let mut z = vec![0.0; nx * ny];
-    let mut free = vec![false; nx * ny];
-    for j in 0..ny {
-        for i in 0..nx {
-            let p = lo + DVec2::new(i as f64, j as f64) * t.cell;
-            let Some((r, k)) = lookup.nearest(roads, p) else {
-                continue;
-            };
-            let b = &roads[r];
-            let f = &b.sampled.frames[k];
-            let flat_left = DVec3::Z.cross(f.tangent).truncate().normalize_or(DVec2::Y);
-            let d = (p - f.pos.truncate()).dot(flat_left);
-            let [(left, left_edge), (right, right_edge)] = b.edges(k);
-            let v = j * nx + i;
-            z[v] = if d <= left && d >= right {
-                let road = &project.roads[r];
-                let point = f.pos + f.lateral * d + f.normal * b.height_at(road, k, d);
-                point.z - UNDER_ROADS
-            } else {
-                let (beyond, edge) = if d > left {
-                    (d - left, left_edge)
-                } else {
-                    (right - d, right_edge)
+    // Heights, and whether smoothing may move them, a row at a time in parallel.
+    let rows: Vec<(Vec<f64>, Vec<bool>)> = (0..ny)
+        .into_par_iter()
+        .map(|j| {
+            let mut z = vec![0.0; nx];
+            let mut free = vec![false; nx];
+            for i in 0..nx {
+                let p = lo + DVec2::new(i as f64, j as f64) * t.cell;
+                let Some((r, k)) = lookup.nearest(roads, p) else {
+                    continue;
                 };
-                free[v] = beyond > HELD;
-                edge.z - AT_EDGES
-            };
-        }
-    }
-    for _ in 0..SMOOTHING {
-        let prev = z.clone();
-        for j in 1..ny - 1 {
-            for i in 1..nx - 1 {
-                let v = j * nx + i;
-                if free[v] {
-                    z[v] = 0.25 * (prev[v - 1] + prev[v + 1] + prev[v - nx] + prev[v + nx]);
-                }
+                let b = &roads[r];
+                let f = &b.sampled.frames[k];
+                let flat_left = DVec3::Z.cross(f.tangent).truncate().normalize_or(DVec2::Y);
+                let d = (p - f.pos.truncate()).dot(flat_left);
+                let [(left, left_edge), (right, right_edge)] = b.edges(k);
+                z[i] = if d <= left && d >= right {
+                    let road = &project.roads[r];
+                    let point = f.pos + f.lateral * d + f.normal * b.height_at(road, k, d);
+                    point.z - UNDER_ROADS
+                } else {
+                    let (beyond, edge) = if d > left {
+                        (d - left, left_edge)
+                    } else {
+                        (right - d, right_edge)
+                    };
+                    free[i] = beyond > HELD;
+                    edge.z - AT_EDGES
+                };
             }
-        }
+            (z, free)
+        })
+        .collect();
+    let mut z: Vec<f64> = rows.iter().flat_map(|r| r.0.iter().copied()).collect();
+    let free: Vec<bool> = rows.iter().flat_map(|r| r.1.iter().copied()).collect();
+    let mut next = z.clone();
+    for _ in 0..SMOOTHING {
+        next.par_chunks_mut(nx)
+            .enumerate()
+            .filter(|(j, _)| *j > 0 && *j < ny - 1)
+            .for_each(|(j, row)| {
+                for (i, h) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
+                    let v = j * nx + i;
+                    if free[v] {
+                        *h = 0.25 * (z[v - 1] + z[v + 1] + z[v - nx] + z[v + nx]);
+                    }
+                }
+            });
+        std::mem::swap(&mut z, &mut next);
     }
 
     clamp_under(&mut z, roads, lo, t.cell, (nx, ny));
@@ -203,18 +213,22 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
         }
         m
     };
-    let mut chunks = Vec::new();
-    for j0 in (0..ny - 1).step_by(CHUNK) {
-        for i0 in (0..nx - 1).step_by(CHUNK) {
-            chunks.push(grid(
+    let corners: Vec<(usize, usize)> = (0..ny - 1)
+        .step_by(CHUNK)
+        .flat_map(|j0| (0..nx - 1).step_by(CHUNK).map(move |i0| (i0, j0)))
+        .collect();
+    let chunks = corners
+        .into_par_iter()
+        .map(|(i0, j0)| {
+            grid(
                 i0,
                 j0,
                 (i0 + CHUNK).min(nx - 1),
                 (j0 + CHUNK).min(ny - 1),
                 true,
-            ));
-        }
-    }
+            )
+        })
+        .collect();
     Some(TerrainBuild {
         chunks,
         solid: grid(0, 0, nx - 1, ny - 1, false),

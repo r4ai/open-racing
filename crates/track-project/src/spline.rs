@@ -7,7 +7,8 @@ use open_racing_sim::GroundMesh;
 use crate::curve::Sampled;
 use crate::project::{Align, Project, Shape};
 use crate::road::{
-    BARRIER_SINK, Layer, Solid, SolidPart, VisualPart, add_band, add_wall, columns, profile_height,
+    BARRIER_SINK, Layer, LinePoint, ModelLine, Solid, SolidPart, VisualPart, add_band, add_wall,
+    columns,
 };
 
 /// How far above a point draping looks for the ground first, m: enough for ground a
@@ -20,6 +21,8 @@ pub struct SplineBuild {
     pub sampled: Sampled,
     pub visual: Vec<VisualPart>,
     pub solid: Vec<SolidPart>,
+    /// The wall, if a model shows it.
+    pub models: Vec<ModelLine>,
 }
 
 /// Builds spline `index` of the project. Draped splines follow `ground`, the roads and
@@ -42,7 +45,7 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
         .materials
         .get(material)
         .map_or([1.0; 2], |m| m.tile.map(|t| t.max(1e-3) as f64));
-    let (mut visual, mut solid) = (Vec::new(), Vec::new());
+    let (mut visual, mut solid, mut models) = (Vec::new(), Vec::new(), Vec::new());
 
     match &sp.shape {
         Shape::Band {
@@ -58,7 +61,7 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
                 Align::Left => (0.0, *width),
                 Align::Right => (-width, 0.0),
             };
-            let cols = columns(*profile, *width);
+            let cols = columns(profile, *width);
             // From the right edge to the left, so that the band faces up.
             let rows: Vec<Vec<(DVec3, f64)>> = frames
                 .iter()
@@ -67,7 +70,7 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
                         .map(|c| {
                             let x = c as f64 / cols as f64;
                             let d = d0 + (d1 - d0) * x;
-                            let h = lift + profile_height(*profile, x);
+                            let h = lift + profile.height(x);
                             (drape(f.pos + f.lateral * d) + DVec3::Z * h, d - d0)
                         })
                         .collect()
@@ -90,6 +93,7 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
             height,
             thickness,
             collide,
+            model,
             ..
         } => {
             let corners: Vec<[DVec3; 4]> = frames
@@ -106,8 +110,25 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
                     ]
                 })
                 .collect();
+            let mut hidden = Vec::new();
+            if let Some(run) = model {
+                // Standing on the ground, facing the line's left.
+                let points: Vec<LinePoint> = corners
+                    .iter()
+                    .zip(frames)
+                    .map(|(c, f)| LinePoint {
+                        pos: (c[0] + c[3]) * 0.5 + DVec3::Z * BARRIER_SINK,
+                        toward: f.lateral.with_z(0.0).normalize_or(DVec3::Y),
+                    })
+                    .collect();
+                models.push(ModelLine::new(run, &points, sampled.closed, |_| true));
+            }
             add_wall(
-                &mut visual,
+                if model.is_some() {
+                    &mut hidden
+                } else {
+                    &mut visual
+                },
                 &mut solid,
                 &sampled,
                 &corners,
@@ -123,5 +144,6 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
         sampled,
         visual,
         solid,
+        models,
     }
 }

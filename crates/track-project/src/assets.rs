@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::Error;
 use crate::ops::Op;
-use crate::project::{MaterialDef, Project, TextureSource};
+use crate::project::{MaterialDef, ModelRun, Project, Shape, TextureSource};
 
 pub const TEXTURES: &str = "assets/textures";
 pub const MODELS: &str = "assets/models";
@@ -25,7 +25,7 @@ impl Kind {
     pub fn of(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         match ext.as_str() {
-            "png" | "dds" => Some(Self::Texture),
+            "png" | "dds" | "jpg" | "jpeg" => Some(Self::Texture),
             "glb" | "gltf" => Some(Self::Model),
             _ => None,
         }
@@ -76,10 +76,36 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for p in &project.props {
         refs.push((portable(&p.model), format!("prop {}", p.name)));
     }
+    for (m, user) in wall_models(project) {
+        refs.push((portable(&m.model), user));
+    }
     if let Some(r) = &project.reference {
         refs.push((portable(&r.image), "reference image".into()));
     }
     refs
+}
+
+/// The models walls show, with what uses each: wall types, and barriers and splines not
+/// made from one.
+pub fn wall_models(project: &Project) -> Vec<(&ModelRun, String)> {
+    let mut out: Vec<(&ModelRun, String)> = project
+        .wall_styles
+        .iter()
+        .filter_map(|w| Some((w.model.as_ref()?, format!("wall type {}", w.name))))
+        .collect();
+    for r in &project.roads {
+        for b in r.barriers.iter().filter(|b| b.style.is_none()) {
+            if let Some(m) = &b.model {
+                out.push((m, format!("barrier {} of {}", b.name, r.name)));
+            }
+        }
+    }
+    for sp in project.splines.iter().filter(|s| s.style.is_none()) {
+        if let Shape::Wall { model: Some(m), .. } = &sp.shape {
+            out.push((m, format!("wall {}", sp.name)));
+        }
+    }
+    out
 }
 
 /// The asset files under `assets/`, and the files the project refers to anywhere,
@@ -177,7 +203,7 @@ fn copy(from: &Path, to: &Path) -> Result<(), Error> {
 pub fn import(dir: &Path, file: &Path) -> Result<PathBuf, Error> {
     let kind = Kind::of(file).ok_or_else(|| {
         Error::Invalid(format!(
-            "{}: not a texture (.png, .dds) or model (.glb, .gltf)",
+            "{}: not a texture (.png, .jpg, .dds) or model (.glb, .gltf)",
             file.display()
         ))
     })?;
@@ -247,6 +273,41 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
             let mut p = p.clone();
             p.model = to.clone();
             ops.push(Op::PutProp { prop: p });
+        }
+    }
+    let moved = |m: &Option<ModelRun>| match m {
+        Some(m) if portable(&m.model) == from => Some(Some(ModelRun {
+            model: to.clone(),
+            ..m.clone()
+        })),
+        _ => None,
+    };
+    for w in &project.wall_styles {
+        if let Some(model) = moved(&w.model) {
+            ops.push(Op::PutWallStyle {
+                style: crate::project::WallStyle { model, ..w.clone() },
+            });
+        }
+    }
+    for r in &project.roads {
+        for b in r.barriers.iter().filter(|b| b.style.is_none()) {
+            if let Some(model) = moved(&b.model) {
+                let mut b = b.clone();
+                b.model = model;
+                ops.push(Op::PutBarrier {
+                    road: r.name.clone(),
+                    barrier: b,
+                });
+            }
+        }
+    }
+    for sp in project.splines.iter().filter(|s| s.style.is_none()) {
+        let mut sp = sp.clone();
+        if let Shape::Wall { model, .. } = &mut sp.shape
+            && let Some(m) = moved(model)
+        {
+            *model = m;
+            ops.push(Op::PutSpline { spline: sp });
         }
     }
     if let Some(r) = &project.reference
