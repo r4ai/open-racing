@@ -1,44 +1,24 @@
-//! Volumetric clouds (see `clouds.wgsl`): a material on a sphere around the scene, drawn
-//! where the sky shows, fed with the simulation's cloud map and tileable 3D noise made at
-//! start-up.
+//! Cloud data, noise volumes and the low-resolution volumetric renderer.
+mod render;
 
 use bevy::asset::{RenderAssetUsages, embedded_asset};
-use bevy::camera::visibility::NoFrustumCulling;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::light::{NotShadowCaster, NotShadowReceiver};
-use bevy::mesh::MeshVertexBufferLayoutRef;
-use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-    TextureDimension, TextureFormat,
-};
-use bevy::shader::ShaderRef;
-use open_racing_sim::weather::{CLOUD_MAP_SIZE, CloudMap};
+use bevy::render::render_resource::{Extent3d, ShaderType, TextureDimension, TextureFormat};
+use open_racing_sim::weather::{CLOUD_MAP_SIZE, CloudMap, CloudSnapshot, VOLUME_X, VOLUME_Z};
 
-/// Radius of the sphere the clouds are drawn on, m; it only needs to enclose the views.
-const DOME_RADIUS: f32 = 50_000.0;
-/// Texels along each edge of the shape and detail noise.
 const SHAPE_SIZE: usize = 64;
 const DETAIL_SIZE: usize = 32;
 
-/// One cloud layer, see `Layer` in `clouds.wgsl`.
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
-pub struct GpuLayer {
-    pub base: f32,
-    pub top: f32,
+pub struct GpuCirrus {
+    pub altitude: f32,
     pub threshold: f32,
     pub cover: f32,
+    pub scale: f32,
     pub offset: Vec2,
     pub weights: Vec2,
-    pub scale: f32,
-    pub extinction: f32,
-    pub cell_threshold: f32,
-    /// Uniform arrays step in 16 bytes.
-    pub _pad: Vec3,
 }
 
-/// See `CloudParams` in `clouds.wgsl`.
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct CloudParams {
     pub sun_direction: Vec3,
@@ -48,102 +28,46 @@ pub struct CloudParams {
     pub sky_radiance: Vec3,
     pub detail: f32,
     pub ground_radiance: Vec3,
-    pub planet_centre: f32,
+    pub base_height: f32,
     pub horizon_radiance: Vec3,
-    pub temporal: f32,
+    pub blend: f32,
+    pub shape_offset: Vec2,
+    pub detail_offset: Vec2,
+    pub frame_ages: Vec2,
     pub streaks: Vec2,
-    pub density_scale: f32,
-    pub _pad: f32,
-    pub shear: Vec2,
-    pub _pad2: Vec2,
-    pub layers: [GpuLayer; 4],
+    pub cirrus_phase: Vec2,
+    pub noise_mean: Vec2,
+    pub upper_wind: Vec2,
+    pub occupied_bands: u32,
+    pub march_base: f32,
+    pub winds: [Vec4; 32],
+    pub cirrus: GpuCirrus,
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
-pub struct CloudMaterial {
-    #[uniform(0)]
-    pub params: CloudParams,
-    #[texture(1)]
-    #[sampler(2)]
-    pub cloud_map: Handle<Image>,
-    #[texture(3, dimension = "3d")]
-    #[sampler(4)]
-    pub shape: Handle<Image>,
-    #[texture(5, dimension = "3d")]
-    #[sampler(6)]
-    pub detail: Handle<Image>,
-}
-
-impl Material for CloudMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "embedded://open_racing_app/clouds.wgsl".into()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        "embedded://open_racing_app/clouds.wgsl".into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Premultiplied
-    }
-
-    /// Behind every other transparent object.
-    fn depth_bias(&self) -> f32 {
-        -1.0e9
-    }
-
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
-
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // Seen from inside.
-        descriptor.primitive.cull_mode = None;
-        Ok(())
-    }
-}
-
-/// The cloud material, updated each frame by the weather.
-#[derive(Resource)]
+#[derive(Resource, Clone, Debug)]
 pub struct Clouds {
-    pub material: Handle<CloudMaterial>,
-    pub entity: Entity,
+    pub params: CloudParams,
+    pub cloud_map: Handle<Image>,
+    pub shape: Handle<Image>,
+    pub detail: Handle<Image>,
+    pub field: Handle<Image>,
+    pub time: f64,
+    pub generation: u64,
+    pub divisor: u32,
+    pub uploaded: Option<(u64, f64)>,
 }
 
 pub struct CloudsPlugin;
-
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "clouds.wgsl");
-        app.add_plugins(MaterialPlugin::<CloudMaterial>::default());
+        app.add_plugins(render::CloudRenderPlugin);
     }
 }
 
-fn repeating(image: &mut Image) {
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        address_mode_w: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        ..default()
-    });
-}
-
-/// The simulation's cloud map as a texture.
 pub fn cloud_map_image(map: &CloudMap) -> Image {
     let data: Vec<u8> = map.texels().iter().flatten().copied().collect();
-    let mut image = Image::new(
+    Image::new(
         Extent3d {
             width: CLOUD_MAP_SIZE as u32,
             height: CLOUD_MAP_SIZE as u32,
@@ -153,119 +77,171 @@ pub fn cloud_map_image(map: &CloudMap) -> Image {
         data,
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
-    );
-    repeating(&mut image);
-    image
+    )
 }
 
 fn volume(size: usize, data: Vec<u8>) -> Image {
-    let s = size as u32;
+    let (data, levels) = mip_chain(size, data);
     let mut image = Image::new(
         Extent3d {
-            width: s,
-            height: s,
-            depth_or_array_layers: s,
+            width: size as u32,
+            height: size as u32,
+            depth_or_array_layers: size as u32,
         },
         TextureDimension::D3,
         data,
-        TextureFormat::Rgba8Unorm,
+        TextureFormat::R8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
-    repeating(&mut image);
+    image.texture_descriptor.mip_level_count = levels;
     image
 }
 
-/// Spawns the cloud dome, drawing the clouds of `map`.
-pub fn spawn(
-    commands: &mut Commands,
-    map: &CloudMap,
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-    materials: &mut Assets<CloudMaterial>,
-) -> Clouds {
+fn mip_chain(mut size: usize, mut level: Vec<u8>) -> (Vec<u8>, u32) {
+    let mut data = level.clone();
+    let mut levels = 1;
+    while size > 1 {
+        let next = size / 2;
+        let mut out = vec![0u8; next * next * next];
+        for z in 0..next {
+            for y in 0..next {
+                for x in 0..next {
+                    let mut sum = 0u32;
+                    for dz in 0..2 {
+                        for dy in 0..2 {
+                            for dx in 0..2 {
+                                sum += level[((z * 2 + dz) * size + y * 2 + dy) * size + x * 2 + dx]
+                                    as u32;
+                            }
+                        }
+                    }
+                    out[(z * next + y) * next + x] = ((sum + 4) / 8) as u8;
+                }
+            }
+        }
+        data.extend_from_slice(&out);
+        level = out;
+        size = next;
+        levels += 1;
+    }
+    (data, levels)
+}
+
+pub fn field_image(snapshot: Option<CloudSnapshot<'_>>) -> Image {
+    // Texture coordinates are X, height, north, matching shader X, Y, -Z.
+    let mut data = Vec::with_capacity(VOLUME_X * VOLUME_Z * VOLUME_X * 4);
+    for y in 0..VOLUME_X {
+        for z in 0..VOLUME_Z {
+            for x in 0..VOLUME_X {
+                let i = (z * VOLUME_X + y) * VOLUME_X + x;
+                for previous in [true, false] {
+                    let v = snapshot.map_or(0.0, |s| {
+                        if previous {
+                            s.previous.extinction[i]
+                        } else {
+                            s.current.extinction[i]
+                        }
+                    });
+                    data.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                }
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: VOLUME_X as u32,
+            height: VOLUME_Z as u32,
+            depth_or_array_layers: VOLUME_X as u32,
+        },
+        TextureDimension::D3,
+        data,
+        TextureFormat::Rg16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// A conservative vertical occupancy mask. The extra neighbours cover linear
+/// filtering between cell centres; horizontal wind cannot invalidate this mask.
+pub fn occupied_bands(snapshot: CloudSnapshot<'_>) -> u32 {
+    let mut mask = 0u32;
+    for z in 0..VOLUME_Z {
+        let start = z * VOLUME_X * VOLUME_X;
+        if snapshot.previous.extinction[start..start + VOLUME_X * VOLUME_X]
+            .iter()
+            .chain(&snapshot.current.extinction[start..start + VOLUME_X * VOLUME_X])
+            .any(|&v| v > 0.0)
+        {
+            mask |= 1 << z;
+        }
+    }
+    mask | (mask << 1) | (mask >> 1)
+}
+
+pub fn spawn(map: &CloudMap, images: &mut Assets<Image>) -> Clouds {
     let (shape, detail) = noise_volumes();
-    let material = materials.add(CloudMaterial {
-        params: CloudParams::default(),
+    let mean = |data: &[u8]| {
+        data.iter().map(|&v| v as f64 / 255.0).sum::<f64>() as f32 / data.len() as f32
+    };
+    let noise_mean = Vec2::new(mean(&shape), mean(&detail));
+    Clouds {
+        params: CloudParams {
+            noise_mean,
+            ..default()
+        },
         cloud_map: images.add(cloud_map_image(map)),
         shape: images.add(volume(SHAPE_SIZE, shape)),
         detail: images.add(volume(DETAIL_SIZE, detail)),
-    });
-    let entity = commands
-        .spawn((
-            Mesh3d(meshes.add(Sphere::new(DOME_RADIUS).mesh().ico(3).unwrap())),
-            MeshMaterial3d(material.clone()),
-            NoFrustumCulling,
-            NotShadowCaster,
-            NotShadowReceiver,
-            Transform::default(),
-        ))
-        .id();
-    Clouds { material, entity }
+        field: images.add(field_image(None)),
+        time: 0.0,
+        generation: 0,
+        divisor: 2,
+        uploaded: None,
+    }
 }
 
-/// The shape noise (Perlin–Worley, then Worley at three frequencies) and the detail
-/// noise (Worley at three frequencies), tileable, made on all cores.
+/// Tileable scalar shape and detail signals. Only the sampled channel is built.
 fn noise_volumes() -> (Vec<u8>, Vec<u8>) {
     std::thread::scope(|scope| {
         let shape = scope.spawn(|| {
-            volume_data(SHAPE_SIZE, 11, |p, w| {
+            volume_data(SHAPE_SIZE, 11, [4, 8, 16], |p, w| {
                 let perlin = fbm_perlin(p, 4, 7);
-                let worley = w(4) * 0.625 + w(8) * 0.25 + w(16) * 0.125;
-                // Perlin billows on a floor of Worley cells (Schneider).
+                let worley = w[0] * 0.625 + w[1] * 0.25 + w[2] * 0.125;
                 let pw = worley + perlin * (1.0 - worley);
-                [
-                    pw,
-                    w(4) * 0.625 + w(8) * 0.25 + w(16) * 0.125,
-                    w(8) * 0.625 + w(16) * 0.25 + w(32) * 0.125,
-                    w(16) * 0.625 + w(32) * 0.25 + w(32) * 0.125,
-                ]
+                // Erode before mip filtering, preserving the original red signal.
+                ((pw - 0.6) / 0.4).max(0.0)
             })
         });
-        let detail = volume_data(DETAIL_SIZE, 23, |_, w| {
-            [
-                w(2) * 0.625 + w(4) * 0.25 + w(8) * 0.125,
-                w(4) * 0.625 + w(8) * 0.25 + w(16) * 0.125,
-                w(8) * 0.625 + w(16) * 0.25 + w(16) * 0.125,
-                1.0,
-            ]
+        let detail = volume_data(DETAIL_SIZE, 23, [2, 4, 8], |_, w| {
+            w[0] * 0.625 + w[1] * 0.25 + w[2] * 0.125
         });
         (shape.join().unwrap(), detail)
     })
 }
 
-/// RGBA8 data of a `size`³ volume, each texel from `texel(position in 0..1, worley)`,
-/// where `worley(f)` is inverted Worley noise with f cells per edge.
+/// R8 data; each texel receives its position and three inverted Worley octaves.
 fn volume_data(
     size: usize,
     seed: u64,
-    texel: impl Fn(Vec3, &dyn Fn(u32) -> f32) -> [f32; 4] + Sync,
+    frequencies: [u32; 3],
+    texel: impl Fn(Vec3, [f32; 3]) -> f32 + Sync,
 ) -> Vec<u8> {
-    let frequencies = [2, 4, 8, 16, 32];
-    let points: Vec<Vec<Vec3>> = frequencies
-        .iter()
-        .map(|&f| feature_points(f, seed ^ f as u64))
-        .collect();
+    let points = frequencies.map(|f| feature_points(f, seed ^ f as u64));
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(16);
     let slices = size.div_ceil(threads);
-    let mut data = vec![0u8; size * size * size * 4];
+    let mut data = vec![0u8; size * size * size];
     std::thread::scope(|scope| {
-        for (chunk_index, chunk) in data.chunks_mut(slices * size * size * 4).enumerate() {
+        for (chunk_index, chunk) in data.chunks_mut(slices * size * size).enumerate() {
             let (points, texel) = (&points, &texel);
             scope.spawn(move || {
-                for (k, out) in chunk.chunks_mut(4).enumerate() {
+                for (k, out) in chunk.iter_mut().enumerate() {
                     let i = chunk_index * slices * size * size + k;
                     let (x, y, z) = (i % size, (i / size) % size, i / (size * size));
                     let p = (Vec3::new(x as f32, y as f32, z as f32) + 0.5) / size as f32;
-                    let worley = |f: u32| {
-                        let slot = frequencies.iter().position(|&g| g == f).unwrap();
-                        1.0 - worley(p, f, &points[slot])
-                    };
-                    let v = texel(p, &worley);
-                    for c in 0..4 {
-                        out[c] = (v[c].clamp(0.0, 1.0) * 255.0).round() as u8;
-                    }
+                    let octaves =
+                        std::array::from_fn(|j| 1.0 - worley(p, frequencies[j], &points[j]));
+                    *out = (texel(p, octaves).clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
             });
         }
@@ -360,4 +336,44 @@ fn perlin3(p: Vec3, period: u32, seed: u64) -> f32 {
     let x01 = lerp(grad(0, 0, 1), grad(1, 0, 1), u.x);
     let x11 = lerp(grad(0, 1, 1), grad(1, 1, 1), u.x);
     lerp(lerp(x00, x10, u.y), lerp(x01, x11, u.y), u.z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mips_preserve_constant_density_and_include_all_levels() {
+        let (data, levels) = mip_chain(8, vec![117; 8 * 8 * 8]);
+        assert_eq!(levels, 4);
+        assert_eq!(data.len(), 512 + 64 + 8 + 1);
+        assert!(data.iter().all(|&v| v == 117));
+    }
+
+    #[test]
+    fn eroded_noise_mips_preserve_calibrated_mean_extinction() {
+        let (shape, _) = noise_volumes();
+        let mean = |data: &[u8]| data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+        let reference = mean(&shape);
+        assert!(reference > 1.0);
+        let (mips, _) = mip_chain(SHAPE_SIZE, shape);
+        let mut start = 0;
+        let mut size = SHAPE_SIZE;
+        loop {
+            let end = start + size * size * size;
+            // R8 rounding accumulates by at most half a quantisation step/level.
+            assert!((mean(&mips[start..end]) / reference - 1.0).abs() < 0.06);
+            if size == 1 {
+                break;
+            }
+            start = end;
+            size /= 2;
+        }
+    }
+
+    #[test]
+    fn perlin_tiles_without_a_position_jump() {
+        let p = Vec3::new(0.37, 0.22, 0.81);
+        assert!((fbm_perlin(p, 4, 7) - fbm_perlin(p + Vec3::X, 4, 7)).abs() < 1e-5);
+    }
 }

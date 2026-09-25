@@ -6,7 +6,7 @@
 //! Set on the settings screen (Esc, Tab to "weather") and saved between runs.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::Exposure;
@@ -22,15 +22,14 @@ use bevy::render::render_resource::{
     Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureViewDescriptor,
     TextureViewDimension,
 };
-use bevy::render::{Render, RenderApp};
-use glam::{DVec2, DVec3};
-use open_racing_sim::weather::CloudLayer;
+use bevy::render::{Render, RenderApp, RenderSystems};
+use glam::DVec3;
 use open_racing_sim::{Sky, WeatherSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::Args;
 use crate::bindings;
-use crate::clouds::{self, CloudMaterial, Clouds};
+use crate::clouds::{self, Clouds};
 use crate::driving::Simulation;
 use crate::graphics::GraphicsSettings;
 use crate::scene::to_bevy;
@@ -56,25 +55,19 @@ const MIDDAY_LUX: f32 = 104_000.0;
 const ADAPTATION: f32 = 0.8;
 const EV_RANGE: (f32, f32) = (5.0, 15.0);
 /// Cloud shadow texture: texels per edge, and the ground it covers, m.
-const SHADOW_SIZE: usize = 256;
+// The moisture field has 256 m horizontal cells; supersampling its ground shadow
+// at 47 m added CPU stalls without adding physical information.
+const SHADOW_SIZE: usize = 64;
 const SHADOW_TILE: f32 = 12_000.0;
 /// Distance of the sun's entity up its rays, m (see `update_cloud_shadow`).
 const DECAL_CLEARANCE: f32 = 200_000.0;
 /// Changes after which the cloud shadows or the sky light are made again.
 const SHADOW_MOVE: f32 = 1500.0;
-const SHADOW_DRIFT: f64 = 300.0;
 const SUN_MOVE: f32 = 0.004;
 const COVER_CHANGE: f64 = 0.004;
-const MORPH_CHANGE: f64 = 0.004;
 /// Shortest time between remakes of the sky light, s.
 const SKY_REFRESH: f32 = 1.0;
 const EARTH_RADIUS: f32 = 6_360_000.0;
-/// Drawn clouds are denser than the simulation's shading clouds by this much: the
-/// simulation averages over the holes between billows that the drawing shows.
-const CLOUD_DENSITY_SCALE: f32 = 6.0;
-/// How far cumulus tops lean downwind, per m of their depth.
-const CUMULUS_SHEAR: f32 = 0.25;
-
 /// Weather settings kept between runs (the seed is new each run).
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -93,6 +86,20 @@ impl WeatherConfig {
         config.0.seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
+        // Reproducible captures do not overwrite the user's saved weather.
+        if let Ok(seed) = std::env::var("OPEN_RACING_WEATHER_SEED")
+            && let Ok(seed) = seed.parse()
+        {
+            config.0.seed = seed;
+            config.0.dynamic = false;
+        }
+        if let Ok(scale) = std::env::var("OPEN_RACING_WEATHER_SPEED")
+            && let Ok(scale) = scale.parse::<f64>()
+            && scale.is_finite()
+            && (0.0..=120.0).contains(&scale)
+        {
+            config.0.time_scale = scale;
+        }
         config
     }
 
@@ -152,6 +159,38 @@ impl SkyLight {
 #[derive(Resource, Clone, Default)]
 struct SkyFiltered(Arc<AtomicU32>);
 
+#[derive(Resource, Clone, Default)]
+struct AtmosphereReady(Arc<AtomicBool>);
+
+#[derive(Component)]
+struct PendingAtmosphere;
+
+fn note_atmosphere_ready(
+    views: Query<&bevy::pbr::resources::GpuAtmosphere, With<Camera3d>>,
+    ready: Res<AtmosphereReady>,
+) {
+    // Bevy 0.19's shared atmosphere buffer writer uses Query::single(). Give it
+    // one bootstrap frame before enabling additional views of the same planet.
+    if views.single().is_ok() {
+        ready.0.store(true, Ordering::Relaxed);
+    }
+}
+
+fn activate_additional_atmospheres(
+    mut commands: Commands,
+    ready: Res<AtmosphereReady>,
+    cameras: Query<Entity, With<PendingAtmosphere>>,
+) {
+    if ready.0.load(Ordering::Relaxed) {
+        for camera in &cameras {
+            commands
+                .entity(camera)
+                .remove::<PendingAtmosphere>()
+                .insert(AtmosphereSettings::default());
+        }
+    }
+}
+
 /// What the sky light and the cloud shadows were last made for.
 #[derive(Resource, Default)]
 struct Made {
@@ -162,10 +201,12 @@ struct Made {
     sky_pending: Option<u32>,
     shadow_centre: Vec3,
     shadow_sun: Vec3,
-    shadow_covers: [f64; 4],
-    shadow_weights: [f64; 2],
-    shadow_offsets: [DVec2; 4],
+    shadow_previous: Vec<u8>,
+    shadow_current: Vec<u8>,
+    shadow_rotation: Quat,
     shadow_valid: bool,
+    shadow_time: f64,
+    shadow_generation: u64,
     /// Current exposure, EV100, eased towards its target.
     ev: Option<f32>,
 }
@@ -200,17 +241,20 @@ impl Plugin for WeatherPlugin {
             .resource_mut::<Assets<Image>>()
             .add(sky_image(&[0u16; 0]));
         let filtered = SkyFiltered::default();
+        let atmosphere_ready = AtmosphereReady::default();
         app.insert_resource(SkyLight {
             image,
             intensity: 1.0,
         })
         .insert_resource(filtered.clone())
+        .insert_resource(atmosphere_ready.clone())
         .init_resource::<Made>()
         .add_plugins(clouds::CloudsPlugin)
         .add_systems(Startup, spawn)
         .add_systems(
             PostUpdate,
             (
+                activate_additional_atmospheres,
                 update_sun,
                 update_sky_light,
                 update_exposure_and_haze,
@@ -224,6 +268,8 @@ impl Plugin for WeatherPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .insert_resource(filtered)
+                .insert_resource(atmosphere_ready)
+                .add_systems(Render, note_atmosphere_ready.in_set(RenderSystems::Cleanup))
                 .add_systems(Render, note_sky_filtered.after(filtering_system));
         }
     }
@@ -233,9 +279,7 @@ fn spawn(
     mut commands: Commands,
     sim: Res<Simulation>,
     mut media: ResMut<Assets<ScatteringMedium>>,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<CloudMaterial>>,
 ) {
     // The planet under the track's lowest point.
     let base = sim.weather.road().map_or(0.0, |r| r.base_height()) as f32;
@@ -260,7 +304,7 @@ fn spawn(
         Transform::from_xyz(0.0, 0.0, 0.0).looking_to(-Vec3::Y, Vec3::X),
     ));
     if let Some(map) = sim.weather.cloud_map() {
-        let clouds = clouds::spawn(&mut commands, map, &mut meshes, &mut images, &mut materials);
+        let clouds = clouds::spawn(map, &mut images);
         commands.insert_resource(clouds);
     }
 }
@@ -269,6 +313,16 @@ fn spawn(
 pub fn camera_components(sky: &SkyLight) -> impl Bundle {
     (
         AtmosphereSettings::default(),
+        Exposure { ev100: MIDDAY_EV },
+        sky.component(),
+    )
+}
+
+/// Additional views share the main camera's planet, after its GPU buffer exists.
+pub fn additional_camera_components(sky: &SkyLight) -> impl Bundle {
+    (
+        PendingAtmosphere,
+        bevy::camera::Hdr,
         Exposure { ev100: MIDDAY_EV },
         sky.component(),
     )
@@ -582,19 +636,73 @@ fn update_cloud_shadow(
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
     mut suns: Query<&mut Transform, With<Sun>>,
+    mut timings: Option<ResMut<crate::capture::CloudCpuTimings>>,
 ) {
+    if let Some(t) = &mut timings {
+        t.shadow_ms = 0.0;
+    }
+    let started = timings.as_ref().map(|_| std::time::Instant::now());
     let (Some(shadow), Ok(camera), Ok(mut sun_t)) = (shadow, cameras.single(), suns.single_mut())
     else {
         return;
     };
     let w = &sim.weather;
     let Some(road) = w.road() else { return };
-    let layers = w.cloud_layers();
+    let Some(snapshot) = w.cloud_snapshot() else {
+        return;
+    };
     let sun = to_bevy(w.sun_direction()).normalize_or(Vec3::Y);
     let base = road.base_height() as f32;
     let here = camera.translation().with_y(base);
-    // The texture moves with the layer that casts most of the shadow; it is remade once
-    // the others have drifted apart from it.
+    let rotation = sun_t.rotation;
+    let reframe = !made.shadow_valid
+        || made.shadow_generation != snapshot.generation
+        || snapshot.current.time < made.shadow_time
+        || made.shadow_centre.distance(here) > SHADOW_MOVE
+        || made.shadow_sun.distance(sun) > SUN_MOVE * 0.25;
+    let new_tick = snapshot.current.time != made.shadow_time;
+    if reframe || new_tick {
+        if reframe {
+            made.shadow_centre = (here / 50.0).round() * 50.0;
+            made.shadow_sun = sun;
+            made.shadow_rotation = rotation;
+        }
+        let sampler = w.cloud_shadow_sampler();
+        // Both maps use the same projection. Reuse the previous tick's current
+        // map only when there was no skip, rewind, or projection change.
+        made.shadow_previous = if !reframe && made.shadow_time == snapshot.previous.time {
+            std::mem::take(&mut made.shadow_current)
+        } else {
+            shadow_texels(
+                sampler.with_snapshot(open_racing_sim::weather::CloudSnapshot {
+                    previous: snapshot.previous,
+                    current: snapshot.previous,
+                    time: snapshot.previous.time,
+                    generation: snapshot.generation,
+                }),
+                made.shadow_centre,
+                made.shadow_rotation,
+                base,
+            )
+        };
+        made.shadow_current = shadow_texels(
+            sampler.with_snapshot(open_racing_sim::weather::CloudSnapshot {
+                previous: snapshot.current,
+                current: snapshot.current,
+                time: snapshot.current.time,
+                generation: snapshot.generation,
+            }),
+            made.shadow_centre,
+            made.shadow_rotation,
+            base,
+        );
+        made.shadow_time = snapshot.current.time;
+        made.shadow_generation = snapshot.generation;
+        made.shadow_valid = true;
+    }
+    // Match the cloud interpolation clock. Backtrace each shadow map with the
+    // dominant layer wind; secondary layers can drift by at most one grid tick.
+    let layers = w.cloud_layers();
     let reference = (0..4)
         .max_by(|&a, &b| {
             let weight = |i: usize| {
@@ -603,52 +711,57 @@ fn update_cloud_shadow(
             weight(a).total_cmp(&weight(b))
         })
         .unwrap_or(0);
-    let offsets = layers.map(|l| l.offset);
-    let period = open_racing_sim::weather::CLOUD_MAP_PERIOD;
-    let shortest = |d: DVec2, scale: f64| {
-        let p = period * scale;
-        d - (d / p).round() * p
-    };
-    let drifts: [DVec2; 4] =
-        std::array::from_fn(|i| shortest(offsets[i] - made.shadow_offsets[i], layers[i].scale));
-    let drift = drifts[reference];
-    let apart = drifts.iter().any(|d| (*d - drift).length() > SHADOW_DRIFT);
-    let covers = layers.map(|l| l.cover);
-    let remake = !made.shadow_valid
-        || apart
-        || made.shadow_centre.distance(here) > SHADOW_MOVE
-        || made.shadow_sun.distance(sun) > SUN_MOVE * 0.25
-        || (0..4).any(|i| (made.shadow_covers[i] - covers[i]).abs() > COVER_CHANGE)
-        || (made.shadow_weights[0] - layers[0].weights[0]).abs() > MORPH_CHANGE
-        || (made.shadow_weights[1] - layers[0].weights[1]).abs() > MORPH_CHANGE;
-    let rotation = sun_t.rotation;
-    let drift = if remake && sun.y > 0.0 {
-        made.shadow_centre = (here / 50.0).round() * 50.0;
-        made.shadow_sun = sun;
-        made.shadow_covers = covers;
-        made.shadow_weights = layers[0].weights;
-        made.shadow_offsets = offsets;
-        made.shadow_valid = true;
-        let data = shadow_texels(&sim, made.shadow_centre, rotation, base);
-        if let Some(mut image) = images.get_mut(&shadow.0) {
-            *image = shadow_image(data);
-        }
-        DVec2::ZERO
-    } else {
-        drift
-    };
-    let drift = DVec3::new(drift.x, drift.y, 0.0);
-    // Bevy also treats the light's texture as a decal over a box of the light's size; keep
-    // that box far up the sun's rays, clear of the scene. Only the position across the
-    // rays places the texture.
-    sun_t.translation = made.shadow_centre + to_bevy(drift) + rotation * Vec3::Z * DECAL_CLEARANCE;
+    let velocity = to_bevy(w.cloud_winds()[reference].extend(0.0));
+    let flow = Vec2::new(
+        -(made.shadow_rotation * Vec3::X).dot(velocity),
+        (made.shadow_rotation * Vec3::Y).dot(velocity),
+    ) / SHADOW_TILE;
+    let ages = Vec2::new(
+        (snapshot.time - snapshot.previous.time) as f32,
+        (snapshot.time - snapshot.current.time) as f32,
+    );
+    let data: Vec<u8> = (0..SHADOW_SIZE * SHADOW_SIZE)
+        .map(|i| {
+            let uv = (Vec2::new((i % SHADOW_SIZE) as f32, (i / SHADOW_SIZE) as f32) + 0.5)
+                / SHADOW_SIZE as f32;
+            let a = shadow_sample(&made.shadow_previous, uv - flow * ages.x);
+            let b = shadow_sample(&made.shadow_current, uv - flow * ages.y);
+            (a + (b - a) * snapshot.blend()).round() as u8
+        })
+        .collect();
+    if let Some(mut image) = images.get_mut(&shadow.0) {
+        image.data = Some(data);
+    }
+    // Keep the light decal box clear of geometry, centred on this projection.
+    sun_t.translation = made.shadow_centre + rotation * Vec3::Z * DECAL_CLEARANCE;
     sun_t.scale = Vec3::splat(SHADOW_TILE * 0.5);
+    if let (Some(t), Some(started)) = (&mut timings, started) {
+        t.shadow_ms = started.elapsed().as_secs_f64() * 1000.0;
+    }
+}
+
+fn shadow_sample(data: &[u8], uv: Vec2) -> f32 {
+    let p =
+        (uv * SHADOW_SIZE as f32 - 0.5).clamp(Vec2::ZERO, Vec2::splat((SHADOW_SIZE - 1) as f32));
+    let at = p.as_uvec2();
+    let f = p - p.floor();
+    let row = |y: usize| {
+        let a = data[y * SHADOW_SIZE + at.x as usize] as f32;
+        let b = data[y * SHADOW_SIZE + (at.x as usize + 1).min(SHADOW_SIZE - 1)] as f32;
+        a + (b - a) * f.x
+    };
+    let a = row(at.y as usize);
+    a + (row((at.y as usize + 1).min(SHADOW_SIZE - 1)) - a) * f.y
 }
 
 /// Sunlight let through by the clouds over a tile centred on `centre`, in the frame of
 /// the sun at `rotation`: each texel is a sun ray, found where it meets the ground.
-fn shadow_texels(sim: &Simulation, centre: Vec3, rotation: Quat, base: f32) -> Vec<u8> {
-    let w = &sim.weather;
+fn shadow_texels(
+    sampler: open_racing_sim::weather::CloudShadowSampler<'_>,
+    centre: Vec3,
+    rotation: Quat,
+    base: f32,
+) -> Vec<u8> {
     let n = SHADOW_SIZE;
     let back = rotation * Vec3::Z;
     let (right, up) = (rotation * Vec3::X, rotation * Vec3::Y);
@@ -671,7 +784,7 @@ fn shadow_texels(sim: &Simulation, centre: Vec3, rotation: Quat, base: f32) -> V
                     let t = (base - p.y) / back.y.max(1e-3);
                     let ground = p + back * t;
                     let sim_point = DVec3::new(ground.x as f64, -ground.z as f64, base as f64);
-                    *out = (w.sun_transmittance(sim_point) * 255.0).round() as u8;
+                    *out = (sampler.transmittance(sim_point) * 255.0).round() as u8;
                 }
             });
         }
@@ -679,37 +792,61 @@ fn shadow_texels(sim: &Simulation, centre: Vec3, rotation: Quat, base: f32) -> V
     data
 }
 
-/// Hands the weather and the graphics settings to the cloud material.
+/// Hands the weather and graphics settings to the render snapshot.
 fn update_clouds(
     sim: Res<Simulation>,
     graphics: Res<GraphicsSettings>,
-    clouds: Option<Res<Clouds>>,
-    mut materials: ResMut<Assets<CloudMaterial>>,
-    mut visibility: Query<&mut Visibility>,
+    clouds: Option<ResMut<Clouds>>,
+    mut images: ResMut<Assets<Image>>,
+    mut timings: Option<ResMut<crate::capture::CloudCpuTimings>>,
 ) {
-    let Some(clouds) = clouds else { return };
-    let (steps, light_steps, detail) = graphics.clouds.march();
-    if let Ok(mut v) = visibility.get_mut(clouds.entity) {
-        v.set_if_neq(if steps > 0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    if let Some(t) = &mut timings {
+        t.upload_ms = 0.0;
     }
+    let Some(mut clouds) = clouds else { return };
+    let (steps, light_steps, detail) = graphics.clouds.march();
+    clouds.params.steps = steps;
     if steps == 0 {
         return;
     }
-    let Some(mut material) = materials.get_mut(&clouds.material) else {
+    let w = &sim.weather;
+    let Some(snapshot) = w.cloud_snapshot() else {
         return;
     };
+    let stamp = (snapshot.generation, snapshot.current.time);
+    if clouds.uploaded != Some(stamp) {
+        let started = timings.as_ref().map(|_| std::time::Instant::now());
+        let new_generation = clouds.uploaded.is_none_or(|s| s.0 != snapshot.generation)
+            || clouds.uploaded.is_some_and(|s| s.1 > snapshot.current.time);
+        if new_generation && let Some(map) = w.cloud_map() {
+            images
+                .insert(clouds.cloud_map.id(), clouds::cloud_map_image(map))
+                .unwrap();
+        }
+        images
+            .insert(clouds.field.id(), clouds::field_image(Some(snapshot)))
+            .unwrap();
+        clouds.uploaded = Some(stamp);
+        clouds.params.occupied_bands = clouds::occupied_bands(snapshot);
+        if let (Some(t), Some(started)) = (&mut timings, started) {
+            t.upload_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+    }
     let light = daylight(&sim);
-    let w = &sim.weather;
     let base = w.road().map_or(0.0, |r| r.base_height()) as f32;
     let layers = w.cloud_layers();
-    let (_, from) = w.wind();
-    // The cirrus streaks run along the upper wind, which blows from `from` veered.
-    let heading = (90.0 - from + 180.0).to_radians() as f32 - 0.7;
-    material.params = clouds::CloudParams {
+    let upper = w.cloud_winds()[3].normalize_or(glam::DVec2::X);
+    let delay = w.weather_time() - snapshot.time;
+    let shape_offset = layers[0].offset - w.cloud_winds()[0] * delay;
+    let cirrus_offset = layers[3].offset - w.cloud_winds()[3] * delay;
+    clouds.time = snapshot.time;
+    clouds.generation = snapshot.generation;
+    clouds.divisor = if graphics.clouds == crate::graphics::Level::Low {
+        4
+    } else {
+        2
+    };
+    clouds.params = clouds::CloudParams {
         sun_direction: light.sun,
         steps,
         sun_illuminance: light.sun_lux,
@@ -717,34 +854,57 @@ fn update_clouds(
         sky_radiance: light.zenith.lerp(light.horizon, 0.3),
         detail,
         ground_radiance: light.ground,
-        planet_centre: base - EARTH_RADIUS,
+        base_height: base,
         horizon_radiance: light.horizon,
-        temporal: if graphics.anti_aliasing == crate::graphics::AntiAliasing::Taa {
-            1.0
-        } else {
-            0.0
-        },
-        // World X, Z of a direction at `heading` from the simulation's +X.
-        streaks: Vec2::new(heading.cos(), -heading.sin()),
-        density_scale: CLOUD_DENSITY_SCALE,
-        _pad: 0.0,
-        // The wind at the cumulus tops outruns that at their bases.
-        shear: {
-            let d = (layers[0].top - layers[0].base) as f32 * CUMULUS_SHEAR;
-            Vec2::new(heading.cos(), -heading.sin()) * d
-        },
-        _pad2: Vec2::ZERO,
-        layers: layers.map(|l: CloudLayer| clouds::GpuLayer {
-            base: base + l.base as f32,
-            top: base + l.top as f32,
-            threshold: l.threshold as f32,
-            cover: l.cover as f32,
-            offset: Vec2::new(l.offset.x as f32, l.offset.y as f32),
-            weights: Vec2::new(l.weights[0] as f32, l.weights[1] as f32),
-            scale: l.scale as f32,
-            extinction: l.extinction as f32,
-            cell_threshold: l.cell_threshold as f32,
-            _pad: Vec3::ZERO,
+        blend: snapshot.blend(),
+        // Independently wrap each noise field in f64, not the shared displacement.
+        shape_offset: Vec2::from_array(
+            shape_offset
+                .rem_euclid(glam::DVec2::splat(2600.0))
+                .as_vec2()
+                .to_array(),
+        ),
+        detail_offset: Vec2::from_array(
+            shape_offset
+                .rem_euclid(glam::DVec2::splat(320.0))
+                .as_vec2()
+                .to_array(),
+        ),
+        frame_ages: Vec2::new(
+            (snapshot.time - snapshot.previous.time) as f32,
+            (snapshot.time - snapshot.current.time) as f32,
+        ),
+        streaks: Vec2::new(upper.x as f32, -upper.y as f32),
+        cirrus_phase: Vec2::new(
+            (cirrus_offset.dot(upper) / 7000.0).rem_euclid(1.0) as f32,
+            (-cirrus_offset.dot(upper.perp()) / 1200.0).rem_euclid(1.0) as f32,
+        ),
+        noise_mean: clouds.params.noise_mean,
+        upper_wind: Vec2::from_array(w.cloud_winds()[3].as_vec2().to_array()),
+        occupied_bands: clouds.params.occupied_bands,
+        march_base: (layers[0].base.min(layers[1].base) as f32 - 250.0).max(0.0),
+        winds: std::array::from_fn(|z| {
+            Vec4::new(
+                snapshot.previous.winds[z].x as f32,
+                snapshot.previous.winds[z].y as f32,
+                snapshot.current.winds[z].x as f32,
+                snapshot.current.winds[z].y as f32,
+            )
         }),
+        cirrus: clouds::GpuCirrus {
+            altitude: 0.5 * (layers[3].base as f32 + layers[3].top as f32),
+            threshold: layers[3].threshold as f32,
+            cover: layers[3].cover as f32,
+            scale: layers[3].scale as f32,
+            offset: Vec2::from_array(
+                cirrus_offset
+                    .rem_euclid(glam::DVec2::splat(
+                        open_racing_sim::weather::CLOUD_MAP_PERIOD * layers[3].scale,
+                    ))
+                    .as_vec2()
+                    .to_array(),
+            ),
+            weights: Vec2::new(layers[3].weights[0] as f32, layers[3].weights[1] as f32),
+        },
     };
 }

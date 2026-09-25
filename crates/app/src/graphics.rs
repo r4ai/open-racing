@@ -418,6 +418,13 @@ fn on_off(on: bool) -> &'static str {
 impl GraphicsSettings {
     pub fn load() -> Self {
         let mut s: Self = bindings::load_config(SETTINGS_FILE);
+        if let Ok(name) = std::env::var("OPEN_RACING_CAPTURE_QUALITY")
+            && let Some(preset) = Preset::ALL.into_iter().find(|p| p.name() == name)
+        {
+            s = preset.apply(s);
+            s.vsync = false;
+            s.motion_blur = Level::Off;
+        }
         // A file saved before the clouds setting existed keeps the preset it was on.
         if s.preset().is_none()
             && let Some(clouds) = Level::ALL

@@ -60,7 +60,7 @@ fn setup_eye(
     primary: Query<Entity, With<PrimaryView>>,
 ) {
     let mut eye = commands.entity(add.entity);
-    eye.insert(weather::camera_components(&sky));
+    eye.insert(weather::additional_camera_components(&sky));
     if eyes.get(add.entity).is_ok_and(|e| e.0 == 0) {
         eye.insert(PrimaryView);
         for e in &primary {

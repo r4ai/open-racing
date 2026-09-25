@@ -264,6 +264,12 @@ pub struct FfbPlugin;
 
 impl Plugin for FfbPlugin {
     fn build(&self, app: &mut App) {
+        if std::env::var_os("OPEN_RACING_SCREENSHOT").is_some() {
+            app.insert_resource(FfbSettings::load())
+                .init_resource::<FfbStatus>()
+                .init_resource::<FfbTest>();
+            return;
+        }
         app.init_non_send::<Ffb>()
             .insert_resource(FfbSettings::load())
             .init_resource::<FfbStatus>()

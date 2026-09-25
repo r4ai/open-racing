@@ -20,21 +20,24 @@
 //!   - altostratus and altocumulus, a mid-level sheet at about 3 km;
 //!   - cirrus, thin ice cloud at about 9 km.
 //!
-//!   Each layer sits on the cloud map ([`CloudMap`]) at its own scale, drifts with the
-//!   wind at its height (stronger and veering with height) and slowly changes shape. A
-//!   point is shaded where the sun's ray crosses cloud in any layer.
+//!   A 64×64×32 moist grid transports vapour, liquid water and potential temperature
+//!   with height-dependent wind and buoyancy. The cloud map seeds the broad moisture
+//!   supply; condensation and evaporation evolve the low/mid-level clouds. Cirrus
+//!   remains a separate thin ice layer. Shadows integrate the same liquid-water field.
 //! - Clear-sky sunlight follows the air mass (Meinel, Haurwitz); cloud cover turns
 //!   direct into diffuse light and takes some away (Kasten–Czeplak).
 //! - The air temperature follows a daily cycle about the month's mean, damped by cloud,
 //!   and falls with height.
 //! - The road's temperature balances sun, sky, air and ground ([`RoadTemperature`]).
 //!
-//! Everything advances with the physics steps, so a drive replays exactly. The slow
-//! parts update once per simulated second; time can run faster than real time.
+//! Everything advances with the physics steps, so a drive replays exactly. Moist
+//! convection and the slow forecast update every two weather seconds, independent
+//! of time acceleration; the renderer interpolates timestamped density snapshots.
 
 mod clouds;
 mod road;
 mod shade;
+mod volume;
 
 use std::sync::Arc;
 
@@ -47,11 +50,15 @@ pub use clouds::{
 };
 pub use road::{Forcing, LANES, LAPSE_RATE, RoadExposure, RoadTemperature};
 pub use shade::{OccluderBuilder, Occluders};
+pub use volume::{
+    CloudFrame, CloudSnapshot, VOLUME_HEIGHT, VOLUME_PERIOD, VOLUME_TICK, VOLUME_X, VOLUME_Z,
+};
+use volume::{CloudVolume, VolumeForcing};
 
 use crate::{AIR_DENSITY, AMBIENT_TEMPERATURE};
 
 /// Simulated time between updates of the slow parts of the weather, s.
-const TICK: f64 = 1.0;
+const TICK: f64 = VOLUME_TICK;
 /// Ticks between updates of the road's temperature, whose time constants are tens of
 /// minutes.
 const ROAD_TICKS: u32 = 5;
@@ -355,6 +362,8 @@ pub struct Weather {
     density: f64,
     engine: f64,
     clouds: Option<Arc<CloudMap>>,
+    volume: Option<CloudVolume>,
+    generation: u64,
     road: Option<RoadTemperature>,
     scenery: Option<Arc<Occluders>>,
 }
@@ -392,6 +401,8 @@ impl Weather {
         density: AIR_DENSITY,
         engine: 1.0,
         clouds: None,
+        volume: None,
+        generation: 0,
         road: None,
         scenery: None,
     };
@@ -426,7 +437,11 @@ impl Weather {
         if self.road.is_none() {
             return;
         }
-        if settings.seed != self.settings.seed || self.clouds.is_none() {
+        if self
+            .clouds
+            .as_ref()
+            .is_none_or(|map| map.seed != settings.seed)
+        {
             self.clouds = Some(Arc::new(CloudMap::new(settings.seed)));
         }
         if let Some(road) = &self.road {
@@ -483,6 +498,11 @@ impl Weather {
         self.air = self.air_target();
         self.update_air();
         self.update_winds();
+        self.generation = self.generation.wrapping_add(1);
+        self.volume = self
+            .clouds
+            .as_ref()
+            .map(|map| CloudVolume::new(map, &self.volume_forcing(), self.time));
     }
 
     /// Caches what the physics steps need between ticks.
@@ -493,25 +513,72 @@ impl Weather {
 
     /// Advances the weather by one physics step of `dt` s.
     pub fn step(&mut self, dt: f64) {
-        if self.road.is_none() {
+        if self.road.is_none() || !dt.is_finite() || dt <= 0.0 {
             return;
         }
-        let scale = self.settings.time_scale;
-        self.time += dt * scale;
         self.clock += dt;
-        for ((offset, wind), layer_scale) in
-            self.offsets.iter_mut().zip(self.winds).zip(LAYER_SCALE)
-        {
-            // Each layer's pattern repeats every period times its scale.
-            let period = DVec2::splat(CLOUD_MAP_PERIOD * layer_scale);
-            *offset = (*offset + wind * dt * scale).rem_euclid(period);
+        let scale = self.settings.time_scale;
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
         }
-        self.since_tick += dt;
-        if self.since_tick >= TICK {
-            let dt = self.since_tick * scale;
-            self.since_tick = 0.0;
-            self.tick(dt);
+        let mut remaining = dt * scale.min(120.0);
+        while remaining > 1e-12 {
+            let part = remaining.min(TICK - self.since_tick);
+            self.time += part;
+            for (offset, wind) in self.offsets.iter_mut().zip(self.winds) {
+                // Never wrap the shared displacement. Each texture wraps at its own
+                // period when converted to GPU coordinates.
+                *offset += wind * part;
+            }
+            self.since_tick += part;
+            remaining -= part;
+            if self.since_tick >= TICK - 1e-9 {
+                self.since_tick = 0.0;
+                self.tick(TICK);
+                let forcing = self.volume_forcing();
+                if let Some(volume) = &mut self.volume {
+                    volume.advance(&forcing);
+                }
+            }
         }
+    }
+
+    fn volume_forcing(&self) -> VolumeForcing {
+        let mut layers = self.cloud_layers();
+        // Synoptic moisture regions translate, but never morph between noise
+        // maps. The transported thermodynamic state drives cloud evolution.
+        for layer in &mut layers[..3] {
+            layer.weights = [1.0, 0.0];
+        }
+        VolumeForcing {
+            temperature: self.air as f32,
+            dew_point: self.dew_point as f32,
+            pressure: self.pressure as f32,
+            sunlight: self.sunlight().global as f32,
+            winds: self.winds,
+            layers,
+        }
+    }
+
+    pub fn cloud_snapshot(&self) -> Option<CloudSnapshot<'_>> {
+        self.volume.as_ref().map(|v| CloudSnapshot {
+            previous: &v.previous,
+            current: &v.current,
+            time: (self.time - TICK).max(v.previous.time),
+            generation: self.generation,
+        })
+    }
+
+    pub fn weather_time(&self) -> f64 {
+        self.time
+    }
+
+    pub fn cloud_generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn cloud_winds(&self) -> [DVec2; 4] {
+        self.winds
     }
 
     /// Updates the slow parts over `dt` s of weather time.
@@ -563,18 +630,22 @@ impl Weather {
         let dt = std::mem::take(&mut self.road_time);
         self.road_ticks = 0;
         let forcing = self.forcing();
-        let (clouds, layers) = (self.clouds.clone(), self.cloud_layers());
-        let sun = forcing.sun;
+        let layers = self.cloud_layers();
+        let snapshot = self.volume.as_ref().map(|v| CloudSnapshot {
+            previous: &v.previous,
+            current: &v.current,
+            time: (self.time - TICK).max(v.previous.time),
+            generation: self.generation,
+        });
         if let Some(road) = &mut self.road {
-            let base = road.base_height();
-            road.step(
-                &forcing,
-                |p| match &clouds {
-                    Some(map) => sun_through_clouds(map, &layers, sun, p, base),
-                    None => 1.0,
-                },
-                dt,
-            );
+            let sampler = CloudShadowSampler {
+                map: self.clouds.as_deref(),
+                snapshot,
+                layers,
+                sun: forcing.sun,
+                base: road.base_height(),
+            };
+            road.step(&forcing, |p| sampler.transmittance(p), dt);
         }
     }
 
@@ -849,16 +920,49 @@ impl Weather {
 
     /// Share of direct sunlight the clouds let through to `point`.
     pub fn sun_transmittance(&self, point: DVec3) -> f64 {
-        match (&self.clouds, &self.road) {
-            (Some(map), Some(road)) => sun_through_clouds(
-                map,
-                &self.cloud_layers(),
-                self.sun_direction(),
-                point,
-                road.base_height(),
-            ),
-            _ => 1.0,
+        self.cloud_shadow_sampler().transmittance(point)
+    }
+
+    /// Cache the common sun/layer state when sampling many shadow rays.
+    pub fn cloud_shadow_sampler(&self) -> CloudShadowSampler<'_> {
+        CloudShadowSampler {
+            map: self.cloud_map(),
+            snapshot: self.cloud_snapshot(),
+            layers: self.cloud_layers(),
+            sun: self.sun_direction(),
+            base: self.road.as_ref().map_or(0.0, RoadTemperature::base_height),
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CloudShadowSampler<'a> {
+    map: Option<&'a CloudMap>,
+    snapshot: Option<CloudSnapshot<'a>>,
+    layers: [CloudLayer; 4],
+    sun: DVec3,
+    base: f64,
+}
+
+impl<'a> CloudShadowSampler<'a> {
+    pub fn with_snapshot(mut self, snapshot: CloudSnapshot<'a>) -> Self {
+        self.snapshot = Some(snapshot);
+        self
+    }
+
+    pub fn transmittance(&self, point: DVec3) -> f64 {
+        self.map.map_or(1.0, |map| {
+            sun_through_clouds(
+                map,
+                &self.layers,
+                self.sun,
+                point,
+                self.base,
+                self.snapshot.is_some(),
+            )
+        }) * self.snapshot.map_or(1.0, |s| {
+            s.sun_transmittance(point - DVec3::Z * self.base, self.sun)
+        })
     }
 }
 
@@ -870,13 +974,17 @@ fn sun_through_clouds(
     sun: DVec3,
     point: DVec3,
     base: f64,
+    cirrus_only: bool,
 ) -> f64 {
     if sun.z <= 0.01 {
         return 0.0;
     }
     let slant = (1.0 / sun.z).min(MAX_SLANT);
     let mut depth = 0.0;
-    for layer in layers.iter().filter(|l| l.cover > 1e-3) {
+    for layer in layers
+        .iter()
+        .filter(|l| l.cover > 1e-3 && (!cirrus_only || l.kind == CloudKind::Cirrus))
+    {
         let middle = base + 0.5 * (layer.base + layer.top);
         let rise = (middle - point.z).max(0.0);
         let at = point.truncate() + sun.truncate() * (rise / sun.z);
@@ -1041,9 +1149,12 @@ mod tests {
                 ..Default::default()
             },
         );
+        // This test exercises the long-term scalar forecast/RNG. The volume has
+        // separate, shorter transport and replay tests below.
+        a.volume = None;
         let mut b = a.clone();
         let mut regimes = std::collections::HashSet::new();
-        for _ in 0..(3 * 3600) {
+        for _ in 0..180 {
             a.step(1.0);
             b.step(1.0);
             regimes.insert(a.regime());
@@ -1102,5 +1213,204 @@ mod tests {
         assert_eq!(air.density, AIR_DENSITY);
         assert_eq!(air.wind, DVec3::ZERO);
         assert_eq!(w.road_temperature(10.0, 0.0), AMBIENT_TEMPERATURE);
+    }
+
+    #[test]
+    fn volume_is_independent_of_frame_rate_and_speed() {
+        let initial = weather(Sky::Fair, 14.0);
+        let mut reference = initial.clone();
+        reference.settings.time_scale = 1.0;
+        reference.step(12.0);
+        for speed in [1.0, 10.0, 60.0, 120.0] {
+            for fps in [30.0, 60.0, 120.0] {
+                let mut w = initial.clone();
+                w.settings.time_scale = speed;
+                for _ in 0..(12.0 / speed * fps) as usize {
+                    w.step(1.0 / fps);
+                }
+                let a = w.cloud_snapshot().unwrap();
+                let b = reference.cloud_snapshot().unwrap();
+                assert!((a.time - b.time).abs() < 1e-6, "speed={speed}, fps={fps}");
+                for (a, b) in a.current.cells.iter().zip(b.current.cells.iter()) {
+                    assert!(
+                        (*a - *b).abs().max_element() < 2e-5,
+                        "speed={speed}, fps={fps}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_speed_and_restoring_a_snapshot_preserves_the_trajectory() {
+        let mut w = weather(Sky::Fair, 14.0);
+        w.step(1.3);
+        let mut replay = w.clone();
+        w.settings.time_scale = 0.0;
+        w.step(20.0);
+        w.settings.time_scale = 10.0;
+        w.step(0.87);
+        replay.settings.time_scale = 1.0;
+        replay.step(8.7);
+        assert_eq!(
+            w.cloud_snapshot().unwrap().current.cells,
+            replay.cloud_snapshot().unwrap().current.cells
+        );
+        let mut changed = w.settings;
+        changed.seed += 1;
+        w.settings = changed; // UI may modify the public settings before restarting.
+        w.restart(changed);
+        assert_eq!(
+            w.cloud_map().unwrap().texels(),
+            CloudMap::new(changed.seed).texels()
+        );
+    }
+
+    #[test]
+    fn volume_replay_and_acceleration_have_the_same_weather_clock() {
+        let mut slow = weather(Sky::PartlyCloudy, 14.0);
+        slow.settings.dynamic = false;
+        slow.settings.time_scale = 1.0;
+        let mut fast = slow.clone();
+        fast.settings.time_scale = 120.0;
+        let replay = fast.clone();
+        for _ in 0..120 {
+            slow.step(0.1);
+        }
+        fast.step(0.1);
+        let a = slow.cloud_snapshot().unwrap();
+        let b = fast.cloud_snapshot().unwrap();
+        assert!((a.time - b.time).abs() < 1e-6);
+        let max_error = a
+            .current
+            .extinction
+            .iter()
+            .zip(b.current.extinction.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_error < 1e-6, "{max_error}");
+        let mut replay = replay;
+        replay.step(0.1);
+        assert_eq!(
+            replay.cloud_snapshot().unwrap().current.cells,
+            b.current.cells
+        );
+        assert!(
+            b.current
+                .cells
+                .iter()
+                .all(|c| c.is_finite() && c.y >= 0.0 && c.z >= 0.0)
+        );
+    }
+
+    #[test]
+    fn pause_restart_and_noise_displacements_are_continuous() {
+        let mut w = weather(Sky::Fair, 14.0);
+        w.settings.time_scale = 0.0;
+        let before = w.weather_time();
+        w.step(10.0);
+        assert_eq!(w.weather_time(), before);
+        w.settings.time_scale = 120.0;
+        w.offsets[0] = DVec2::splat(CLOUD_MAP_PERIOD - 0.01);
+        let offset = w.offsets[0];
+        let wind = w.winds[0];
+        w.step(0.01);
+        assert!((w.offsets[0] - offset - wind * 1.2).length() < 1e-8);
+        let generation = w.cloud_generation();
+        let old = w.cloud_snapshot().unwrap().current.cells.clone();
+        w.settings.seed += 1;
+        // Restart must rebuild the volume even if the caller already changed settings.
+        w.restart(w.settings);
+        assert_ne!(w.cloud_generation(), generation);
+        assert_ne!(w.cloud_snapshot().unwrap().current.cells, old);
+    }
+
+    #[test]
+    fn a_cloudy_forecast_supplies_moisture_over_twenty_minutes() {
+        let mut w = weather(Sky::Cloudy, 14.0);
+        w.settings.dynamic = false;
+        w.settings.time_scale = 120.0;
+        let mass = |w: &Weather| {
+            w.cloud_snapshot()
+                .unwrap()
+                .current
+                .cells
+                .iter()
+                .map(|c| c.z as f64)
+                .sum::<f64>()
+        };
+        let initial = mass(&w);
+        for _ in 0..100 {
+            w.step(0.1);
+        }
+        let final_mass = mass(&w);
+        assert!(
+            final_mass > initial * 0.1 && final_mass < initial * 10.0,
+            "initial {initial}, final {final_mass}"
+        );
+    }
+
+    #[test]
+    fn dry_forcing_evaporates_clouds_and_sunlight_drives_updrafts() {
+        let w = weather(Sky::Fair, 14.0);
+        let mut dry = w.volume.clone().unwrap();
+        let mut shaded = dry.clone();
+        let mut heated = dry.clone();
+        let mut f = w.volume_forcing();
+        let original = dry.current.cells.iter().map(|c| c.z as f64).sum::<f64>();
+        let mut dry_forcing = f;
+        dry_forcing.dew_point = -30.0;
+        dry_forcing.sunlight = 0.0;
+        for layer in &mut dry_forcing.layers {
+            layer.cover = 0.0;
+        }
+        for _ in 0..300 {
+            dry.advance(&dry_forcing);
+        }
+        assert!(dry.current.cells.iter().map(|c| c.z as f64).sum::<f64>() < original * 0.1);
+        for _ in 0..60 {
+            f.sunlight = 0.0;
+            shaded.advance(&f);
+            f.sunlight = 650.0;
+            heated.advance(&f);
+        }
+        let updraft = |v: &CloudVolume| {
+            v.current
+                .cells
+                .iter()
+                .map(|c| c.w.max(0.0) as f64)
+                .sum::<f64>()
+        };
+        assert!(updraft(&heated) > updraft(&shaded));
+    }
+
+    #[test]
+    fn fair_and_overcast_forecasts_remain_stable_for_an_hour() {
+        for sky in [Sky::Fair, Sky::Overcast] {
+            let mut w = weather(sky, 14.0);
+            w.settings.time_scale = 120.0;
+            let mass = |w: &Weather| {
+                w.cloud_snapshot()
+                    .unwrap()
+                    .current
+                    .cells
+                    .iter()
+                    .map(|c| c.z as f64)
+                    .sum::<f64>()
+            };
+            let initial = mass(&w);
+            for _ in 0..300 {
+                w.step(0.1);
+            }
+            let final_mass = mass(&w);
+            assert!(
+                final_mass > initial * 0.25 && final_mass < initial * 4.0,
+                "{sky:?}: initial={initial}, final={final_mass}"
+            );
+            for c in w.cloud_snapshot().unwrap().current.cells.iter() {
+                assert!(c.is_finite() && c.y >= 0.0 && c.z >= 0.0 && c.w.abs() <= 8.0);
+                assert!((220.0..370.0).contains(&c.x));
+            }
+        }
     }
 }

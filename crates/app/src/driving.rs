@@ -307,7 +307,11 @@ pub fn step_simulation(
     mut input: ResMut<DriverInput>,
     mut ai: Option<NonSendMut<AiDriver>>,
     assists: Res<AssistSettings>,
+    mut timings: Option<ResMut<crate::capture::CloudCpuTimings>>,
 ) {
+    if let Some(t) = &mut timings {
+        t.weather_ms = 0.0;
+    }
     let sim = &mut *sim;
     sim.accumulator += time.delta_secs_f64().min(0.25);
     let mut steps = 0;
@@ -346,7 +350,11 @@ pub fn step_simulation(
         }
         sim.controls = controls;
         sim.previous = sim.car.state;
+        let started = timings.as_ref().map(|_| std::time::Instant::now());
         sim.weather.step(DT);
+        if let (Some(t), Some(started)) = (&mut timings, started) {
+            t.weather_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
         sim.car
             .step_in(&sim.track, &mut sim.evolution, &sim.weather, &controls);
         torque += sim.car.telemetry.steering_torque;

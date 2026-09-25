@@ -6867,6 +6867,7 @@ dependencies = [
  "bevy_mod_xr",
  "clap",
  "glam 0.33.8",
+ "half",
  "open-racing-api",
  "open-racing-car",
  "open-racing-sim",
@@ -6906,6 +6907,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "glam 0.33.8",
+ "rayon",
  "ron",
  "serde",
 ]
