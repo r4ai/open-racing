@@ -354,6 +354,26 @@ pub fn gizmos(
         }
     }
 
+    // What a grabbed node or stretch end has caught on.
+    if let Some(at) = tool
+        .modal
+        .as_ref()
+        .and_then(|m| *m.snapped.lock().expect("snap"))
+    {
+        let r = 1.8 * node_size(eye, at);
+        let c = lift(at);
+        gizmos.circle(
+            Isometry3d::new(c, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            r,
+            theme::SNAP,
+        );
+        gizmos.circle(
+            Isometry3d::new(c, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            1.4 * r,
+            theme::SNAP.with_alpha(0.5),
+        );
+    }
+
     // Axis lines of a transform.
     if let Some(m) = &tool.modal {
         let dir = match m.axis {

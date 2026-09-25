@@ -212,6 +212,8 @@ enum Target {
         nodes: Vec<usize>,
         side: Side,
         curve: StationCurve,
+        /// The other side's width, for setting both alike.
+        other: StationCurve,
     },
     /// A road's width or bank at some of its nodes.
     Shape {
@@ -241,6 +243,10 @@ pub struct Modal {
     pub typed: String,
     /// Started by dragging: ends when the button is let go.
     by_drag: bool,
+    /// Dragging a road's edge sets both sides alike (B).
+    pub both: bool,
+    /// What the grabbed node or end has caught on, to show it.
+    pub snapped: std::sync::Mutex<Option<DVec3>>,
 }
 
 /// What the draw tool is laying out.
@@ -767,6 +773,14 @@ mod tests {
         let w = r.width_left.eval(1.0, r.period(), true);
         assert!((w - 9.0).abs() < 1e-9, "{w}");
         assert_eq!(r.width_right.eval(1.0, r.period(), true), 6.0);
+        // B sets both sides alike.
+        let m = tool.modal.as_mut().unwrap();
+        m.both = true;
+        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        assert!(readout.contains("both sides"), "{readout}");
+        editor.apply(ops, None);
+        let r = &editor.project.roads[0];
+        assert!((r.width_right.eval(1.0, r.period(), true) - 9.0).abs() < 1e-9);
         editor.cancel_drag();
         tool.modal = None;
 

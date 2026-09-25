@@ -24,6 +24,8 @@ pub const STRIP: Color = Color::srgb(0.2, 0.85, 0.75);
 pub const BARRIER: Color = Color::srgb(0.7, 0.7, 0.95);
 /// A road's first node, showing which way it runs.
 pub const START: Color = Color::srgb(0.25, 0.9, 0.4);
+/// What a grabbed node or end has caught on.
+pub const SNAP: Color = Color::srgb(1.0, 0.2, 0.85);
 
 /// The same in the panels.
 pub const SELECTED_UI: Color32 = Color32::from_rgb(255, 160, 40);

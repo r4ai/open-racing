@@ -85,7 +85,28 @@ pub fn labels(ctx: &egui::Context, rect: egui::Rect, c: &mut Ctx, view: View) {
         return;
     };
     let mut clicked = None;
-    for k in corners {
+    // Not under the view's own widgets: the navigation at the top right, the mode at
+    // the top left and the toolbar down the left.
+    let widgets = [
+        egui::Rect::from_min_max(
+            egui::pos2(rect.max.x - 130.0, rect.min.y),
+            egui::pos2(rect.max.x, rect.min.y + 250.0),
+        ),
+        egui::Rect::from_min_size(rect.min, egui::vec2(260.0, 64.0)),
+        egui::Rect::from_min_size(rect.min, egui::vec2(56.0, 380.0)),
+    ];
+    // The corner looked at first; the others where they do not crowd what is drawn.
+    let current = c
+        .shell
+        .corner
+        .filter(|&(road, _)| road == r)
+        .map(|(_, n)| n);
+    let order = corners
+        .iter()
+        .filter(|k| Some(k.number) == current)
+        .chain(corners.iter().filter(|k| Some(k.number) != current));
+    let mut placed: Vec<egui::Pos2> = Vec::new();
+    for k in order {
         let f = smp.frame_at(k.apex);
         let (sign, edge) = match k.outside() {
             Side::Left => (1.0, f.width_left),
@@ -95,10 +116,15 @@ pub fn labels(ctx: &egui::Context, rect: egui::Rect, c: &mut Ctx, view: View) {
         let Some(p) = view.screen(at).map(|s| egui::pos2(s.x, s.y)) else {
             continue;
         };
-        if !rect.shrink(12.0).contains(p) {
+        let label = egui::Rect::from_center_size(p, egui::vec2(36.0, 22.0));
+        if !rect.shrink(12.0).contains(p)
+            || widgets.iter().any(|w| w.intersects(label))
+            || placed.iter().any(|q| q.distance(p) < 34.0)
+        {
             continue;
         }
-        let current = c.shell.corner == Some((r, k.number));
+        placed.push(p);
+        let current = Some(k.number) == current;
         let text = egui::RichText::new(format!("T{}", k.number))
             .strong()
             .color(if current {

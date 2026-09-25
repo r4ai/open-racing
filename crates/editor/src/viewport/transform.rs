@@ -105,6 +105,10 @@ pub fn start_modal(
                     Side::Left => road.width_left.clone(),
                     Side::Right => road.width_right.clone(),
                 },
+                other: match side {
+                    Side::Left => road.width_right.clone(),
+                    Side::Right => road.width_left.clone(),
+                },
             }
         }
         _ if editor.selection.prop().is_some() => {
@@ -207,6 +211,8 @@ pub fn start_modal(
         axis: Axis::Free,
         typed: String::new(),
         by_drag,
+        both: false,
+        snapped: Default::default(),
     });
 }
 
@@ -238,6 +244,10 @@ pub(super) fn modal(
         if keys.just_pressed(k) && allowed {
             m.axis = if m.axis == a { Axis::Free } else { a };
         }
+    }
+    let edge = matches!(m.target, Target::Edge { .. });
+    if edge && keys.just_pressed(KeyCode::KeyB) {
+        m.both = !m.both;
     }
     m.typed.push_str(&typed_keys(keys));
     if keys.just_pressed(KeyCode::Backspace) {
@@ -271,6 +281,7 @@ pub(super) fn modal(
     let keys_hint = match m.mode {
         Mode::Width => "X left only · Y right only",
         Mode::Tilt => "",
+        _ if edge => "B both sides",
         _ => "X/Y/Z axis",
     };
     tool.hint = format!(
@@ -306,6 +317,7 @@ pub(super) fn transform_ops(
     snap: bool,
     free: bool,
 ) -> (Vec<Op>, String) {
+    *m.snapped.lock().expect("snap") = None;
     // How far the pointer moved the pivot, in the plane or up and down.
     let slide = || -> DVec3 {
         if m.axis == Axis::Z {
@@ -408,6 +420,7 @@ pub(super) fn transform_ops(
                     if one && let Some((to, what)) = snap_node(editor, built, *item, index, pos) {
                         pos = to.with_z(pos.z);
                         snapped = Some(what);
+                        *m.snapped.lock().expect("snap") = Some(to);
                     }
                     if let Some(g) = ground {
                         pos = drape(Some(g), pos.with_z(p.z.max(pos.z)));
@@ -518,6 +531,7 @@ pub(super) fn transform_ops(
             nodes,
             side,
             curve,
+            other,
         } => {
             let (Some(smp), Some(at)) = (built.roads.get(*index), view.on_plane(cursor, m.pivot.z))
             else {
@@ -532,7 +546,7 @@ pub(super) fn transform_ops(
             }
             .max(0.5);
             let changes: Vec<(usize, f64)> = nodes.iter().map(|&n| (n, w)).collect();
-            let op = Op::SetProfile {
+            let set = |side: Side, curve: &StationCurve| Op::SetProfile {
                 road: road.clone(),
                 curve: match side {
                     Side::Left => Curve::WidthLeft,
@@ -540,19 +554,30 @@ pub(super) fn transform_ops(
                 },
                 keys: crate::edit::node_keys(curve, *count, *closed, &changes),
             };
+            let mut ops = vec![set(*side, curve)];
+            if m.both {
+                ops.push(set(side.other(), other));
+            }
             let what = match nodes.len() {
                 1 => format!("node {node}"),
                 n => format!("{n} nodes"),
             };
+            let total = if m.both {
+                2.0 * w
+            } else {
+                w + match side {
+                    Side::Left => f.width_right,
+                    Side::Right => f.width_left,
+                }
+            };
+            let sides = if m.both {
+                "both sides".to_string()
+            } else {
+                format!("{side:?}")
+            };
             (
-                vec![op],
-                format!("width {side:?} {w:.2} m at {what} (total {:.2} m)", {
-                    let other = match side {
-                        Side::Left => f.width_right,
-                        Side::Right => f.width_left,
-                    };
-                    w + other
-                }),
+                ops,
+                format!("width {sides} {w:.2} m at {what} (total {total:.2} m)"),
             )
         }
         Target::Range { end } => {
@@ -616,6 +641,9 @@ pub(super) fn transform_ops(
                     }
                 }
             };
+            if caught.is_some() {
+                *m.snapped.lock().expect("snap") = Some(range_end_pos(road, smp, end.part, u));
+            }
             let at = caught.map_or(String::new(), |(_, what)| format!(" → on {what}"));
             (vec![op], format!("u {u:.2}, s {:.0} m{at}", f.s))
         }
