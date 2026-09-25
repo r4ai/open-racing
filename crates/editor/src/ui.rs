@@ -24,6 +24,7 @@ use crate::{menus, outliner, overlay, popups, properties, sidebar};
 pub enum BottomTab {
     #[default]
     Curves,
+    Checks,
     Assets,
     Report,
 }
@@ -397,6 +398,42 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
     });
 }
 
+/// The problems the last build found; clicking one with a place looks at it.
+fn checks(ui: &mut egui::Ui, c: &mut Ctx) {
+    if c.built.issues.is_empty() {
+        ui.label(
+            "No problems found: corners, grades, banking, crossings and markers look drivable.",
+        );
+        ui.weak("Bake to drive a test lap as well.");
+        return;
+    }
+    ui.weak("Updated as you edit. Click one to look at it.");
+    for issue in c.built.issues.clone() {
+        let place = issue
+            .road
+            .as_deref()
+            .and_then(|r| c.editor.project.road_index(r))
+            .zip(issue.s);
+        let text = egui::RichText::new(format!("⚠ {}", issue.text))
+            .color(egui::Color32::from_rgb(255, 190, 90));
+        let resp = if place.is_some() {
+            ui.add(egui::Button::new(text).frame(false))
+                .on_hover_text("Select the road and look here")
+        } else {
+            ui.label(text)
+        };
+        if let Some((r, s)) = place
+            && resp.clicked()
+        {
+            c.editor.selection.select(Item::Road(r));
+            if let Some(smp) = c.built.roads.get(r) {
+                c.orbit.focus = open_racing_track_render::to_bevy(smp.frame_at(s).pos);
+                c.orbit.distance = c.orbit.distance.min(150.0);
+            }
+        }
+    }
+}
+
 /// What the mouse does over what the pointer is on, Blender's status bar hints.
 fn mouse_hints(c: &Ctx) -> String {
     let t = &*c.tool;
@@ -484,16 +521,23 @@ fn bottom_area(
     props: &Props,
 ) {
     ui.horizontal(|ui| {
-        let failed = c.jobs.report.as_deref().is_some_and(|r| r.contains("FAIL"));
+        let failed = c.jobs.passed == Some(false);
+        let issues = c.built.issues.len();
+        let checks = if issues == 0 {
+            "✔ Checks".to_string()
+        } else {
+            format!("⚠ Checks ({issues})")
+        };
         for (tab, label) in [
-            (BottomTab::Curves, "📈 Curves"),
-            (BottomTab::Assets, "📦 Assets"),
+            (BottomTab::Curves, "📈 Curves".to_string()),
+            (BottomTab::Checks, checks),
+            (BottomTab::Assets, "📦 Assets".to_string()),
             (
                 BottomTab::Report,
                 if failed {
-                    "⚠ Bake Report"
+                    "⚠ Bake Report".to_string()
                 } else {
-                    "📋 Bake Report"
+                    "📋 Bake Report".to_string()
                 },
             ),
         ] {
@@ -503,6 +547,12 @@ fn bottom_area(
     ui.separator();
     match c.shell.bottom {
         BottomTab::Curves => curve_graph::panel(ui, c.editor, profile, curve_graph),
+        BottomTab::Checks => {
+            egui::ScrollArea::vertical()
+                .id_salt("checks")
+                .auto_shrink([false, false])
+                .show(ui, |ui| checks(ui, c));
+        }
         BottomTab::Assets => {
             egui::ScrollArea::vertical()
                 .id_salt("assets")

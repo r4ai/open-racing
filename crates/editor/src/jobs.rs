@@ -20,6 +20,8 @@ pub struct Jobs {
     bake: Option<(Task<Result<Baked, String>>, bool)>,
     /// Report of the last bake.
     pub report: Option<String>,
+    /// Whether the last bake passed its checks.
+    pub passed: Option<bool>,
 }
 
 impl Jobs {
@@ -48,6 +50,7 @@ impl Jobs {
             })
         });
         self.bake = Some((task, play));
+        self.passed = None;
         self.report = Some("baking and driving a test lap…".into());
     }
 }
@@ -65,6 +68,7 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
         Ok(b) => {
             editor.status = format!("baked into {}", b.dir.display());
             jobs.report = Some(b.report);
+            jobs.passed = Some(b.ok);
             if play && b.ok {
                 match launch(&b.name) {
                     Ok(how) => editor.status = format!("driving \"{}\" ({how})", b.name),
@@ -77,6 +81,7 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
         Err(e) => {
             editor.status = format!("bake failed: {e}");
             jobs.report = Some(e);
+            jobs.passed = Some(false);
         }
     }
 }

@@ -789,7 +789,7 @@ mod tests {
     fn appending_to_a_closed_road_keeps_the_closing_segment_s_keys() {
         let mut p = Project::new("t");
         let n = p.roads[0].nodes.len() as f64;
-        // A key and a stretch on the closing segment, from the last node back to 0.
+        // A key on the closing segment, from the last node back to 0.
         apply_all(
             &mut p,
             &[Op::SetKey {
@@ -816,6 +816,27 @@ mod tests {
             .find(|k| k.value == 0.1)
             .unwrap();
         assert_eq!(key.u, n + 0.5, "the key stays on the closing segment");
+
+        // Removing node 0 joins the first segment onto the closing one.
+        let mut p = Project::new("t");
+        let key = |u| Op::SetKey {
+            road: "circuit".into(),
+            curve: Curve::Bank,
+            u,
+            value: 0.2,
+        };
+        let remove = Op::RemoveNode {
+            line: "circuit".into(),
+            index: 0,
+        };
+        apply_all(&mut p, &[key(0.5), remove]).unwrap();
+        let bank = &p.roads[0].bank.keys;
+        let k = bank.iter().find(|k| k.value == 0.2).unwrap();
+        assert_eq!(k.u, n - 1.5, "wrapped round, not squashed onto 0");
+        assert!(
+            bank.windows(2).all(|w| w[0].u <= w[1].u),
+            "keys stay in order"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::Sampled;
+use open_racing_track_project::inspect::{self, Issue};
 use open_racing_track_project::model::{Model, Placement};
 use open_racing_track_project::project::MaterialDef;
 use open_racing_track_project::road::MeshData;
@@ -40,6 +41,8 @@ pub struct Built {
     pub splines: Vec<Sampled>,
     /// Everything solid, to find what the pointer is over.
     pub ground: Option<Arc<GroundMesh>>,
+    /// What will not drive well, as of the last build.
+    pub issues: Vec<Issue>,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -49,6 +52,7 @@ struct Meshes {
     roads: Vec<Sampled>,
     splines: Vec<Sampled>,
     ground: Option<Arc<GroundMesh>>,
+    issues: Vec<Issue>,
     /// (material, mesh, casts shadows)
     meshes: Vec<(usize, Mesh, bool)>,
 }
@@ -77,6 +81,7 @@ fn to_mesh(m: MeshData) -> Mesh {
 
 fn build(project: Project) -> Meshes {
     let scene = bake::build(&project);
+    let issues = inspect::issues(&project, &scene);
     let terrain = project
         .material_index(&project.terrain.material)
         .unwrap_or(0);
@@ -92,6 +97,7 @@ fn build(project: Project) -> Meshes {
         ground: Some(Arc::new(scene.ground.build(&surfaces))),
         roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
         splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
+        issues,
         meshes,
     }
 }
@@ -158,6 +164,7 @@ pub fn rebuild(
         built.roads = done.roads;
         built.splines = done.splines;
         built.ground = done.ground;
+        built.issues = done.issues;
         built.count += 1;
     }
 

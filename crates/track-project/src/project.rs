@@ -446,16 +446,24 @@ impl Road {
         self.shift_params(index as f64, -1.0);
     }
 
-    /// Moves every parameter beyond `after` by `by`.
+    /// Moves every parameter beyond `after` by `by`. On a closed road what falls off the
+    /// start wraps round to the end, as the segments before and after node 0 join.
     fn shift_params(&mut self, after: f64, by: f64) {
         let period = self.period().max(1.0);
+        let closed = self.closed;
         let shift = |u: &mut f64| {
             if *u > after {
-                *u = (*u + by).clamp(0.0, period);
+                let v = *u + by;
+                *u = if closed && v < 0.0 {
+                    v.rem_euclid(period)
+                } else {
+                    v.clamp(0.0, period)
+                };
             }
         };
         for c in [&mut self.width_left, &mut self.width_right, &mut self.bank] {
             c.keys.iter_mut().for_each(|k| shift(&mut k.u));
+            c.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
         }
         let ranges = self
             .left
@@ -745,6 +753,18 @@ impl Project {
     /// a circuit.
     pub fn validate(&self) -> Result<(), Error> {
         let invalid = |msg: String| Err(Error::Invalid(msg));
+        // The name is the package's directory under tracks/.
+        let name = self.name.as_str();
+        if name.trim().is_empty()
+            || name != name.trim()
+            || name == "."
+            || name == ".."
+            || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+        {
+            return invalid(format!(
+                "the track name \"{name}\" must be usable as a folder name"
+            ));
+        }
         for (what, names) in [
             (
                 "road or spline",
