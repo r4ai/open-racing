@@ -560,7 +560,13 @@ fn mouse_hints(c: &Ctx) -> String {
             }
         ),
         Some(Hit::Marker(_)) => "Marker  ·  Drag: slide it along the road · Right: menu".into(),
-        Some(Hit::Range(_)) => "Stretch end  ·  Drag: move it · Right: remove".into(),
+        Some(Hit::Range(_)) => {
+            "Stretch end  ·  Drag: move it (catches on nodes and corners; Ctrl: free) · Right: remove".into()
+        }
+        Some(Hit::Reach(_)) => "Stretch's outer edge  ·  Drag: its width, or a wall's distance".into(),
+        Some(Hit::Edge(..)) => {
+            "Road edge  ·  Drag: the width on this side at the selected nodes".into()
+        }
         Some(Hit::Body(item)) => format!(
             "{} {}  ·  {tool} · Right: insert node, markers",
             edit::item_kind(item),

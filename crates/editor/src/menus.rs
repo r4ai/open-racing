@@ -333,7 +333,7 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 remove_stretch(c, end);
             }
         }
-        Some(Hit::Gizmo(_)) | None => {}
+        Some(Hit::Gizmo(_) | Hit::Reach(_) | Hit::Edge(..)) | None => {}
     }
     if menu.hit.is_some() {
         ui.separator();

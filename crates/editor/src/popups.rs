@@ -279,6 +279,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Numpad 5", "Perspective / Orthographic"),
             ("Numpad . or F", "Frame selected"),
             ("Home", "Frame all"),
+            ("Page Up / Page Down", "Previous / next corner"),
             ("`", "View pie"),
             ("T / N", "Toolbar / Sidebar"),
             ("Ctrl Space", "Maximize the 3D view"),
@@ -302,6 +303,22 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Alt S / Ctrl T", "Road width / bank at the nodes"),
             ("  X / Y (width)", "Left / right side only"),
             ("Drag a node, handle or marker", "Move it"),
+            (
+                "  a single node",
+                "Snaps onto nodes, road edges, centre lines (Ctrl: free)",
+            ),
+            (
+                "Drag a road edge square",
+                "Width on that side at the selected nodes",
+            ),
+            (
+                "Drag a stretch's yellow square",
+                "Strip width, or a wall's distance",
+            ),
+            (
+                "Drag a stretch end",
+                "Catches on nodes and corners (Ctrl: free)",
+            ),
             ("  X / Y / Z", "Hold to an axis"),
             ("  Shift / Ctrl", "Fine / Snap"),
             ("  type a number", "Exact value"),

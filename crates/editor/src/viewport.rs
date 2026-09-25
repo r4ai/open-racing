@@ -41,6 +41,7 @@ use open_racing_track_project::model::Placement;
 use crate::presets::{PRESETS, unique_name, unique_prop_name};
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
+use open_racing_track_project::corners::Corner;
 
 /// Screen distance within which the pointer picks a node or handle, logical pixels.
 const PICK_RADIUS: f32 = 12.0;
@@ -131,6 +132,11 @@ pub enum Hit {
     Marker(Marker),
     /// An end of a stretch of the selected road's strip or barrier.
     Range(RangeEnd),
+    /// The outer edge of a stretch of a strip (its width) or of a barrier (its offset),
+    /// in the stretch's middle.
+    Reach(RangeEnd),
+    /// A road's edge on one side at one of its selected nodes: its width there.
+    Edge(usize, usize, Side),
     /// A road's or spline's body.
     Body(Item),
     /// A part of the active tool's gizmo: an axis, or `Free` for its middle or ring.
@@ -170,30 +176,83 @@ fn parts(road: &Road) -> impl Iterator<Item = (Part, &[Range])> {
     strips.chain(barriers).filter(|(_, r)| !r.is_empty())
 }
 
-/// How far to the left of the road's centre a part lies in frame `f`: a strip's middle,
-/// a barrier's face.
-fn part_offset(road: &Road, part: Part, f: &Frame) -> f64 {
-    let edge = |side: Side| match side {
+/// Width of a side's strips inside strip `i` at frame `f`: each as wide as it is there,
+/// so none where it is limited to stretches elsewhere, as the road is built.
+fn inner_width(road: &Road, smp: &Sampled, side: Side, i: usize, f: &Frame) -> f64 {
+    road.strips(side)[..i]
+        .iter()
+        .map(|s| s.width * smp.presence(&s.ranges, s.fade, f.s))
+        .sum()
+}
+
+fn edge_of(f: &Frame, side: Side) -> f64 {
+    match side {
         Side::Left => f.width_left,
         Side::Right => f.width_right,
-    };
+    }
+}
+
+/// How far to the left of the road's centre a part lies in frame `f`: a strip's middle,
+/// a barrier's face.
+fn part_offset(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> f64 {
     match part {
         Part::Strip(side, i) => {
-            let strips = road.strips(side);
-            let inner: f64 = strips[..i].iter().map(|s| s.width).sum();
-            side.sign() * (edge(side) + inner + 0.5 * strips[i].width)
+            let inner = inner_width(road, smp, side, i, f);
+            side.sign() * (edge_of(f, side) + inner + 0.5 * road.strips(side)[i].width)
         }
         Part::Barrier(i) => {
             let b = &road.barriers[i];
-            b.side.sign() * (edge(b.side) + b.offset)
+            b.side.sign() * (edge_of(f, b.side) + b.offset)
         }
     }
+}
+
+/// How far to the left of the road's centre a part's outer edge lies: a strip's far
+/// side, a barrier's face.
+fn part_reach(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> f64 {
+    match part {
+        Part::Strip(side, i) => {
+            let inner = inner_width(road, smp, side, i, f);
+            side.sign() * (edge_of(f, side) + inner + road.strips(side)[i].width)
+        }
+        Part::Barrier(_) => part_offset(road, smp, part, f),
+    }
+}
+
+/// Distance along the road to a stretch's middle.
+fn range_middle(smp: &Sampled, rg: &Range) -> f64 {
+    let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
+    if b < a && smp.closed {
+        b += smp.length;
+    }
+    0.5 * (a + b)
+}
+
+/// Where the handle on a stretch's outer edge is drawn.
+fn reach_pos(road: &Road, smp: &Sampled, part: Part, rg: &Range) -> DVec3 {
+    let f = smp.frame_at(range_middle(smp, rg));
+    f.pos + flat_left(&f) * part_reach(road, smp, part, &f)
+}
+
+/// A frame's lateral, level.
+fn flat_left(f: &Frame) -> DVec3 {
+    f.lateral.truncate().normalize_or(DVec2::Y).extend(0.0)
+}
+
+/// Where the handle on a road's edge at node `n` is drawn.
+fn edge_pos(smp: &Sampled, n: usize, side: Side) -> DVec3 {
+    let f = smp.frame_at(smp.s_at(n as f64));
+    let w = match side {
+        Side::Left => f.width_left,
+        Side::Right => f.width_right,
+    };
+    f.pos + flat_left(&f) * (side.sign() * w)
 }
 
 /// Where a stretch's end is drawn.
 fn range_end_pos(road: &Road, smp: &Sampled, part: Part, u: f64) -> DVec3 {
     let f = smp.frame_at(smp.s_at(u));
-    f.pos + f.lateral * part_offset(road, part, &f)
+    f.pos + f.lateral * part_offset(road, smp, part, &f)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,6 +302,22 @@ enum Target {
     },
     Range {
         end: RangeEnd,
+    },
+    /// A strip's width or a barrier's offset, at a stretch of it.
+    Reach {
+        end: RangeEnd,
+    },
+    /// A road's width on one side at some of its nodes.
+    Edge {
+        road: String,
+        index: usize,
+        count: usize,
+        closed: bool,
+        /// The node grabbed, and all it sets.
+        node: usize,
+        nodes: Vec<usize>,
+        side: Side,
+        curve: StationCurve,
     },
     /// A road's width or bank at some of its nodes.
     Shape {
@@ -688,6 +763,24 @@ fn pick(
                         }));
                     }
                 }
+                let p = reach_pos(road, smp, part, rg) + DVec3::Z * LIFT;
+                if near(p, PICK_RADIUS).is_some() {
+                    return Some(Hit::Reach(RangeEnd {
+                        road: r,
+                        part,
+                        range,
+                        to: false,
+                    }));
+                }
+            }
+        }
+        // The road's edges at its selected nodes.
+        for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
+            for side in [Side::Left, Side::Right] {
+                let p = edge_pos(smp, n, side) + DVec3::Z * LIFT;
+                if near(p, PICK_RADIUS).is_some() {
+                    return Some(Hit::Edge(r, n, side));
+                }
             }
         }
     }
@@ -1112,7 +1205,14 @@ pub fn input(
                     editor.selection.select(item);
                     start_modal(editor, tool, &built, Mode::Grab, None, from, true);
                 }
-                Some(h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_))) => {
+                Some(
+                    h @ (Hit::Node(..)
+                    | Hit::Handle(..)
+                    | Hit::Marker(_)
+                    | Hit::Range(_)
+                    | Hit::Reach(_)
+                    | Hit::Edge(..)),
+                ) => {
                     tool.press = None;
                     if let Hit::Node(item, n) = h
                         && !(editor.selection.item == Some(item)
@@ -1453,7 +1553,14 @@ fn click(
                 editor.selection.nodes.clear();
             }
         }
-        Some(Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_) | Hit::Gizmo(_)) => {}
+        Some(
+            Hit::Handle(..)
+            | Hit::Marker(_)
+            | Hit::Range(_)
+            | Hit::Reach(_)
+            | Hit::Edge(..)
+            | Hit::Gizmo(_),
+        ) => {}
         None => {
             if !shift {
                 editor.selection.nodes.clear();
@@ -1722,6 +1829,31 @@ pub fn start_modal(
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
         Some(Hit::Range(end)) => Target::Range { end },
+        Some(Hit::Reach(end)) => Target::Reach { end },
+        Some(Hit::Edge(r, node, side)) => {
+            let Some(road) = editor.project.roads.get(r) else {
+                return;
+            };
+            // Every selected node takes the width, when the grabbed one is among them.
+            let nodes = if editor.selection.nodes.contains(&node) {
+                editor.picked_nodes()
+            } else {
+                vec![node]
+            };
+            Target::Edge {
+                road: road.name.clone(),
+                index: r,
+                count: road.nodes.len(),
+                closed: road.closed,
+                node,
+                nodes,
+                side,
+                curve: match side {
+                    Side::Left => road.width_left.clone(),
+                    Side::Right => road.width_right.clone(),
+                },
+            }
+        }
         _ if editor.selection.prop().is_some() => {
             let index = editor.selection.prop().expect("a prop");
             let Some(p) = editor.project.props.get(index) else {
@@ -1775,6 +1907,28 @@ pub fn start_modal(
             };
             let u = if end.to { rg.to } else { rg.from };
             (Mode::Grab, range_end_pos(road, smp, end.part, u))
+        }
+        Target::Reach { end } => {
+            let Some(road) = editor.project.roads.get(end.road) else {
+                return;
+            };
+            let (Some(smp), Some(rg)) = (
+                built.roads.get(end.road),
+                parts(road)
+                    .find(|(p, _)| *p == end.part)
+                    .and_then(|(_, r)| r.get(end.range)),
+            ) else {
+                return;
+            };
+            (Mode::Grab, reach_pos(road, smp, end.part, rg))
+        }
+        Target::Edge {
+            index, node, side, ..
+        } => {
+            let Some(smp) = built.roads.get(*index) else {
+                return;
+            };
+            (Mode::Grab, edge_pos(smp, *node, *side))
         }
         Target::Prop { index, .. } => (
             mode,
@@ -1849,7 +2003,7 @@ fn modal(
     } || keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]);
     let cancel = buttons.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape);
 
-    let (ops, readout) = transform_ops(editor, built, view, m, cursor, typed, snap);
+    let (ops, readout) = transform_ops(editor, built, view, m, cursor, typed, snap, ctrl);
     let label = match m.mode {
         Mode::Grab => format!("Grab {:?}", m.axis),
         Mode::Rotate => format!("Rotate {:?}", m.axis),
@@ -1888,6 +2042,7 @@ fn modal(
 
 /// The operations that put what a transform moves where the pointer now says, and a
 /// readout of the change.
+#[allow(clippy::too_many_arguments)]
 fn transform_ops(
     editor: &Editor,
     built: &Built,
@@ -1896,6 +2051,7 @@ fn transform_ops(
     cursor: Vec2,
     typed: Option<f64>,
     snap: bool,
+    free: bool,
 ) -> (Vec<Op>, String) {
     // How far the pointer moved the pivot, in the plane or up and down.
     let slide = || -> DVec3 {
@@ -1989,10 +2145,17 @@ fn transform_ops(
                 }
                 Mode::Width | Mode::Tilt => return (vec![], String::new()),
             };
+            // One node grabbed on its own snaps onto what is near it (Ctrl frees it).
+            let one = m.mode == Mode::Grab && start.len() == 1 && !free && typed.is_none();
+            let mut snapped = None;
             let ops = start
                 .iter()
                 .map(|&(index, p)| {
                     let mut pos = moved(p);
+                    if one && let Some((to, what)) = snap_node(editor, built, *item, index, pos) {
+                        pos = to.with_z(pos.z);
+                        snapped = Some(what);
+                    }
                     if let Some(g) = ground {
                         pos = drape(Some(g), pos.with_z(p.z.max(pos.z)));
                     }
@@ -2003,6 +2166,10 @@ fn transform_ops(
                     }
                 })
                 .collect();
+            let readout = match snapped {
+                Some(what) => format!("{readout} → on {what}"),
+                None => readout,
+            };
             (ops, readout)
         }
         Target::Handle {
@@ -2034,6 +2201,107 @@ fn transform_ops(
                 format!("handle {:.1} m", h.length()),
             )
         }
+        Target::Reach { end } => {
+            let Some(road) = editor.project.roads.get(end.road) else {
+                return (vec![], String::new());
+            };
+            let (Some(smp), Some(at), Some(rg)) = (
+                built.roads.get(end.road),
+                view.on_plane(cursor, m.pivot.z),
+                parts(road)
+                    .find(|(p, _)| *p == end.part)
+                    .and_then(|(_, r)| r.get(end.range)),
+            ) else {
+                return (vec![], String::new());
+            };
+            let f = smp.frame_at(range_middle(smp, rg));
+            let d = (at - f.pos).dot(flat_left(&f));
+            let step = |v: f64| {
+                if let Some(t) = typed {
+                    t
+                } else if snap {
+                    (v * 10.0).round() / 10.0
+                } else {
+                    v
+                }
+            };
+            let name = road.name.clone();
+            match end.part {
+                Part::Strip(side, i) => {
+                    let mut strip = road.strips(side)[i].clone();
+                    let inner = part_reach(road, smp, end.part, &f).abs() - strip.width;
+                    strip.width = step(side.sign() * d - inner).max(0.1);
+                    let readout = format!("{}: {:.2} m wide", strip.name, strip.width);
+                    let op = Op::PutStrip {
+                        road: name,
+                        side,
+                        strip,
+                        at: None,
+                    };
+                    (vec![op], readout)
+                }
+                Part::Barrier(i) => {
+                    let mut barrier = road.barriers[i].clone();
+                    let edge = part_reach(road, smp, end.part, &f).abs() - barrier.offset;
+                    barrier.offset = step(barrier.side.sign() * d - edge).max(0.0);
+                    let readout =
+                        format!("{}: {:.2} m from the edge", barrier.name, barrier.offset);
+                    (
+                        vec![Op::PutBarrier {
+                            road: name,
+                            barrier,
+                        }],
+                        readout,
+                    )
+                }
+            }
+        }
+        Target::Edge {
+            road,
+            index,
+            count,
+            closed,
+            node,
+            nodes,
+            side,
+            curve,
+        } => {
+            let (Some(smp), Some(at)) = (built.roads.get(*index), view.on_plane(cursor, m.pivot.z))
+            else {
+                return (vec![], String::new());
+            };
+            let f = smp.frame_at(smp.s_at(*node as f64));
+            let d = side.sign() * (at - f.pos).dot(flat_left(&f));
+            let w = match typed {
+                Some(t) => t,
+                None if snap => (d * 10.0).round() / 10.0,
+                None => d,
+            }
+            .max(0.5);
+            let changes: Vec<(usize, f64)> = nodes.iter().map(|&n| (n, w)).collect();
+            let op = Op::SetProfile {
+                road: road.clone(),
+                curve: match side {
+                    Side::Left => Curve::WidthLeft,
+                    Side::Right => Curve::WidthRight,
+                },
+                keys: crate::edit::node_keys(curve, *count, *closed, &changes),
+            };
+            let what = match nodes.len() {
+                1 => format!("node {node}"),
+                n => format!("{n} nodes"),
+            };
+            (
+                vec![op],
+                format!("width {side:?} {w:.2} m at {what} (total {:.2} m)", {
+                    let other = match side {
+                        Side::Left => f.width_right,
+                        Side::Right => f.width_left,
+                    };
+                    w + other
+                }),
+            )
+        }
         Target::Range { end } => {
             let road = &editor.project.roads[end.road];
             let (Some(smp), Some(at)) =
@@ -2042,10 +2310,14 @@ fn transform_ops(
                 return (vec![], String::new());
             };
             let f = &smp.frames[smp.nearest(at)];
-            let u = if snap {
-                (f.u * 10.0).round() / 10.0
-            } else {
-                f.u
+            // Nodes and the corners' entries, apexes and exits nearby catch the end.
+            let caught = (!free)
+                .then(|| range_snap(smp, built.corners.get(end.road), f.s))
+                .flatten();
+            let u = match &caught {
+                Some((u, _)) => *u,
+                None if snap => (f.u * 10.0).round() / 10.0,
+                None => f.u,
             };
             let set = |ranges: &mut Vec<Range>| {
                 if let Some(r) = ranges.get_mut(end.range) {
@@ -2077,7 +2349,8 @@ fn transform_ops(
                     }
                 }
             };
-            (vec![op], format!("u {u:.2}, s {:.0} m", f.s))
+            let at = caught.map_or(String::new(), |(_, what)| format!(" → on {what}"));
+            (vec![op], format!("u {u:.2}, s {:.0} m{at}", f.s))
         }
         Target::Shape {
             road,
@@ -2215,6 +2488,113 @@ fn transform_ops(
             (vec![op], format!("u {u:.2}, s {:.0} m", f.s))
         }
     }
+}
+
+/// How near along the road, m, a node or a corner's place catches a stretch's end.
+const CATCH: f64 = 4.0;
+
+/// The node or corner place within `CATCH` of `s` along a road, as its spline
+/// parameter and a name for it.
+fn range_snap(smp: &Sampled, corners: Option<&Vec<Corner>>, s: f64) -> Option<(f64, String)> {
+    let gap = |a: f64| {
+        let d = (a - s).abs();
+        if smp.closed {
+            d.rem_euclid(smp.length)
+                .min(smp.length - d.rem_euclid(smp.length))
+        } else {
+            d
+        }
+    };
+    let node = smp.u_at(s).round();
+    let mut best: Option<(f64, f64, String)> =
+        Some((gap(smp.s_at(node)), node, format!("node {node}")));
+    for c in corners.into_iter().flatten() {
+        for (what, at) in [("entry", c.entry), ("apex", c.apex), ("exit", c.exit)] {
+            let d = gap(at);
+            if best.as_ref().is_none_or(|b| d < b.0) {
+                let at = if smp.closed {
+                    at.rem_euclid(smp.length)
+                } else {
+                    at
+                };
+                best = Some((d, smp.u_at(at), format!("T{} {what}", c.number)));
+            }
+        }
+    }
+    best.filter(|b| b.0 < CATCH).map(|(_, u, what)| (u, what))
+}
+
+/// Where a single node dragged to `pos` snaps: onto another line's node (joining
+/// them), a road's centreline for a road's node (a pit lane's ends), or a road's edge
+/// for a kerb's or wall's node.
+fn snap_node(
+    editor: &Editor,
+    built: &Built,
+    item: Item,
+    index: usize,
+    pos: DVec3,
+) -> Option<(DVec3, String)> {
+    let p = pos.truncate();
+    // Nodes of other lines, and this line's own ends (closing it up).
+    type Best = Option<(f64, DVec3, String)>;
+    fn consider(best: &mut Best, d: f64, at: DVec3, what: String, reach: f64) {
+        if d < reach && best.as_ref().is_none_or(|b| d < b.0) {
+            *best = Some((d, at, what));
+        }
+    }
+    let mut best: Best = None;
+    for other in items(editor) {
+        let Some((name, nodes, _)) = item_line(&editor.project, other) else {
+            continue;
+        };
+        for (i, n) in nodes.iter().enumerate() {
+            if other == item && (i == index || !(i == 0 || i + 1 == nodes.len())) {
+                continue;
+            }
+            let d = n.pos.truncate().distance(p);
+            consider(&mut best, d, n.pos, format!("node {i} of {name}"), 2.0);
+        }
+    }
+    if best.is_some() {
+        return best.map(|(_, at, what)| (at, what));
+    }
+    for (r, smp) in built.roads.iter().enumerate() {
+        if smp.frames.is_empty() || item == Item::Road(r) {
+            continue;
+        }
+        let name = &editor.project.roads.get(r)?.name;
+        let f = smp.frames[smp.nearest(pos)];
+        let left = flat_left(&f);
+        let d = (pos - f.pos).dot(left);
+        match item {
+            // Straight across onto the line, keeping the node's place along it.
+            Item::Road(_) => consider(
+                &mut best,
+                d.abs(),
+                pos - left * d,
+                format!("{name}'s centre line"),
+                3.0,
+            ),
+            Item::Spline(s) => {
+                let half = match editor.project.splines.get(s).map(|s| &s.shape) {
+                    Some(Shape::Band { width, .. }) => 0.5 * width,
+                    _ => 0.0,
+                };
+                for (side, edge) in [(Side::Left, f.width_left), (Side::Right, -f.width_right)] {
+                    let at = pos + left * (edge + side.sign() * half - d);
+                    consider(
+                        &mut best,
+                        (d - edge).abs(),
+                        at,
+                        format!("{name}'s {side:?} edge"),
+                        EDGE_SNAP,
+                    );
+                }
+            }
+            Item::Prop(_) => {}
+        }
+    }
+    best.map(|(_, at, what)| (at, what))
 }
 
 /// The turn a rotation has reached, radians anticlockwise seen from above: typed in
@@ -2512,7 +2892,7 @@ pub fn gizmos(
                 let steps = ((b - a) / 3.0).ceil().max(1.0) as usize;
                 let pts = (0..=steps).map(|k| {
                     let f = smp.frame_at(a + (b - a) * k as f64 / steps as f64);
-                    lift(f.pos + f.lateral * part_offset(road, part, &f))
+                    lift(f.pos + f.lateral * part_offset(road, smp, part, &f))
                 });
                 gizmos.linestrip(pts, color);
                 for (to, u) in [(false, rg.from), (true, rg.to)] {
@@ -2534,6 +2914,46 @@ pub fn gizmos(
                         c,
                     );
                 }
+            }
+        }
+    }
+
+    // Handles for widths: the outer edge of each stretch (a strip's width, a barrier's
+    // distance) and the road's edges at its selected nodes.
+    if let Some(r) = sel.road()
+        && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
+        && smp.frames.len() > 1
+    {
+        let lit = |hit: Hit, c: Color| if hover == Some(hit) { Color::WHITE } else { c };
+        if overlays.stretches {
+            for (part, ranges) in parts(road) {
+                for (range, rg) in ranges.iter().enumerate() {
+                    let at = reach_pos(road, smp, part, rg);
+                    let end = RangeEnd {
+                        road: r,
+                        part,
+                        range,
+                        to: false,
+                    };
+                    let size = 0.6 * node_size(eye, at);
+                    gizmos.cube(
+                        Transform::from_translation(lift(at)).with_scale(Vec3::splat(size * 1.6)),
+                        lit(Hit::Reach(end), Color::srgb(1.0, 0.85, 0.3)),
+                    );
+                }
+            }
+        }
+        for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
+            let centre = smp.frame_at(smp.s_at(n as f64)).pos;
+            for side in [Side::Left, Side::Right] {
+                let at = edge_pos(smp, n, side);
+                let color = lit(Hit::Edge(r, n, side), Color::srgb(0.3, 0.9, 1.0));
+                gizmos.line(lift(centre), lift(at), color.with_alpha(0.4));
+                gizmos.cube(
+                    Transform::from_translation(lift(at))
+                        .with_scale(Vec3::splat(node_size(eye, at) * 1.2)),
+                    color,
+                );
             }
         }
     }
@@ -2833,6 +3253,135 @@ mod tests {
         let ring = view.screen(c + DVec3::Y * size * 0.8).unwrap();
         assert_eq!(pick(ToolKind::Rotate, ring), Some(Axis::Free));
         assert_eq!(pick(ToolKind::Rotate, middle), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An editor on a new project with its roads built, and a camera looking straight
+    /// down at `at` from 300 m.
+    fn top_down(name: &str, at: DVec3) -> (Editor, Built, Camera, GlobalTransform, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let editor = Editor::open(dir.clone()).unwrap();
+        let scene = open_racing_track_project::bake::build(&editor.project);
+        let built = Built {
+            roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
+            corners: vec![],
+            ..default()
+        };
+        let mut projection = perspective();
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(1200, 800),
+            scale_factor: 1.0,
+        });
+        projection.update(1200.0, 800.0);
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        let target = to_bevy(at);
+        let t = GlobalTransform::from(
+            Transform::from_translation(target + Vec3::Y * 300.0).looking_at(target, Vec3::NEG_Z),
+        );
+        (editor, built, camera, t, dir)
+    }
+
+    #[test]
+    fn dragging_a_road_edge_or_a_strip_s_reach_sets_its_width() {
+        let n0 = DVec3::new(250.0, 0.0, 0.0);
+        let (mut editor, built, camera, t, dir) = top_down("edge", n0);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        let mut tool = Tool::default();
+        // Node 1 of the oval lies on its bottom straight, driven towards +x: left is +y.
+        editor.selection.select_node(Item::Road(0), 1);
+        let smp = &built.roads[0];
+        let handle = edge_pos(smp, 1, Side::Left);
+        let at = view.screen(handle).unwrap();
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            Some(Hit::Edge(0, 1, Side::Left)),
+            at,
+            true,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        let f = smp.frame_at(smp.s_at(1.0));
+        let to = view.screen(f.pos + flat_left(&f) * 9.0).unwrap();
+        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        assert!(readout.contains("9.00"), "{readout}");
+        editor.apply(ops, None);
+        let r = &editor.project.roads[0];
+        let w = r.width_left.eval(1.0, r.period(), true);
+        assert!((w - 9.0).abs() < 1e-9, "{w}");
+        assert_eq!(r.width_right.eval(1.0, r.period(), true), 6.0);
+        editor.cancel_drag();
+        tool.modal = None;
+
+        // The left kerb's stretch round the first corner: drag its outer edge out.
+        let road = &editor.project.roads[0];
+        let rg = road.left[0].ranges[0];
+        let at = view.screen(reach_pos(road, smp, Part::Strip(Side::Left, 0), &rg));
+        let end = RangeEnd {
+            road: 0,
+            part: Part::Strip(Side::Left, 0),
+            range: 0,
+            to: false,
+        };
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            Some(Hit::Reach(end)),
+            at.unwrap_or_default(),
+            true,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        let f = smp.frame_at(range_middle(smp, &rg));
+        let to = view.screen(f.pos + flat_left(&f) * (f.width_left + 2.0));
+        let (ops, _) = transform_ops(&editor, &built, view, m, to.unwrap(), None, true, false);
+        editor.apply(ops, None);
+        let w = editor.project.roads[0].left[0].width;
+        assert!((w - 2.0).abs() < 0.05, "{w}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stretch_ends_catch_on_nodes_and_spline_nodes_on_road_edges() {
+        let (editor, built, _, _, dir) = top_down("snaps", DVec3::ZERO);
+        let smp = &built.roads[0];
+        let s2 = smp.s_at(2.0);
+        let (u, what) = range_snap(smp, None, s2 + 2.5).unwrap();
+        assert_eq!((u, what.as_str()), (2.0, "node 2"));
+        assert!(range_snap(smp, None, s2 + 30.0).is_none());
+
+        // A wall's node near the circuit's right edge.
+        let mut editor = editor;
+        let spline = crate::presets::PRESETS[4].spline(
+            &editor.project,
+            vec![DVec3::new(100.0, -20.0, 0.0), DVec3::new(150.0, -20.0, 0.0)],
+        );
+        assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        // 1.5 m outside the right edge, halfway along the first straight.
+        let f = smp.frame_at(smp.s_at(0.5));
+        let edge = f.pos - flat_left(&f) * f.width_right;
+        let near = edge - flat_left(&f) * 1.5;
+        let (at, what) = snap_node(&editor, &built, Item::Spline(0), 0, near).unwrap();
+        assert!(at.distance(edge) < 0.3, "{at:?} {edge:?}");
+        assert!(what.contains("Right edge"), "{what}");
+        // And onto another line's node, joining them.
+        let (at, _) = snap_node(
+            &editor,
+            &built,
+            Item::Spline(0),
+            1,
+            DVec3::new(249.0, 1.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(at, editor.project.roads[0].nodes[1].pos);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
