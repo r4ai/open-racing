@@ -1,5 +1,5 @@
 //! Settings screen (Esc), with pages switched by Tab:
-//! - Input: assign steering, pedals and shift buttons from any connected device and
+//! - Input: assign steering, pedals, shift buttons and H-shifter gates from any connected device and
 //!   check the result on live values. Axes are calibrated while they are assigned,
 //!   so inverted pedals and any axis layout work.
 //! - Force feedback: the base's peak torque, strength, maximum output in N·m, road
@@ -9,6 +9,8 @@
 //!   month, the temperature and the latitude, with the conditions now.
 //! - Graphics: a quality preset, and the details it sets (anti-aliasing, textures,
 //!   shadows, ambient occlusion, ...) tuned one by one, with motion blur and VSync.
+//! - Assists: the clutch assist, auto-blip and automatic gear selection, with the
+//!   gearbox and electronics the car is fitted with.
 //!
 //! The simulation is paused while the screen is open.
 
@@ -18,9 +20,10 @@ use std::fmt::Write;
 use bevy::input::gamepad::GamepadInput;
 use bevy::prelude::*;
 
-use open_racing_sim::{Sky, TrackCondition};
+use open_racing_sim::{GearboxKind, Sky, TrackCondition};
 
-use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, Reported, Source};
+use crate::assists::AssistSettings;
+use crate::bindings::{Action, Binding, Bindings, Calibration, DeviceId, GATES, Reported, Source};
 use crate::driving::Simulation;
 use crate::ffb::{self, FfbSettings, FfbStatus, FfbTest};
 use crate::graphics::{GraphicsSettings, GraphicsSupport, Preset, Setting};
@@ -79,7 +82,17 @@ enum Page {
     Track,
     Weather,
     Graphics,
+    Assists,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum AssistRow {
+    Clutch,
+    Blip,
+    AutoShift,
+}
+
+const ASSIST_ROWS: [AssistRow; 3] = [AssistRow::Clutch, AssistRow::Blip, AssistRow::AutoShift];
 
 #[derive(Clone, Copy, PartialEq)]
 enum WeatherRow {
@@ -144,7 +157,7 @@ enum Row {
     Rotation,
 }
 
-const ROWS: [Row; 7] = [
+const ROWS: [Row; 15] = [
     Row::Action(Action::Steer),
     Row::Rotation,
     Row::Action(Action::Throttle),
@@ -152,6 +165,14 @@ const ROWS: [Row; 7] = [
     Row::Action(Action::Clutch),
     Row::Action(Action::ShiftUp),
     Row::Action(Action::ShiftDown),
+    Row::Action(Action::Gate(GATES[0])),
+    Row::Action(Action::Gate(GATES[1])),
+    Row::Action(Action::Gate(GATES[2])),
+    Row::Action(Action::Gate(GATES[3])),
+    Row::Action(Action::Gate(GATES[4])),
+    Row::Action(Action::Gate(GATES[5])),
+    Row::Action(Action::Gate(GATES[6])),
+    Row::Action(Action::Gate(GATES[7])),
 ];
 
 /// An assignment in progress: the range each analog input has covered so far.
@@ -201,6 +222,7 @@ impl Plugin for SettingsPlugin {
                         navigate_track,
                         navigate_weather,
                         navigate_graphics,
+                        navigate_assists,
                     )
                         .chain()
                         .run_if(|o: Res<SettingsOpen>| o.0),
@@ -260,7 +282,8 @@ fn switch_page(keys: Res<ButtonInput<KeyCode>>, mut screen: ResMut<Screen>) {
             Page::ForceFeedback => Page::Track,
             Page::Track => Page::Weather,
             Page::Weather => Page::Graphics,
-            Page::Graphics => Page::Input,
+            Page::Graphics => Page::Assists,
+            Page::Assists => Page::Input,
         };
         screen.row = 0;
         screen.message.clear();
@@ -324,6 +347,31 @@ fn navigate_ffb(
     if *settings != before {
         settings.save();
     }
+}
+
+fn navigate_assists(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut screen: ResMut<Screen>,
+    mut settings: ResMut<AssistSettings>,
+) {
+    if screen.page != Page::Assists {
+        return;
+    }
+    move_cursor(&keys, &mut screen.row, ASSIST_ROWS.len());
+    if !(keys.just_pressed(KeyCode::ArrowLeft)
+        || keys.just_pressed(KeyCode::ArrowRight)
+        || keys.just_pressed(KeyCode::Enter))
+    {
+        return;
+    }
+    let s = &mut *settings;
+    let flag = match ASSIST_ROWS[screen.row] {
+        AssistRow::Clutch => &mut s.clutch,
+        AssistRow::Blip => &mut s.blip,
+        AssistRow::AutoShift => &mut s.auto_shift,
+    };
+    *flag = !*flag;
+    settings.save();
 }
 
 fn navigate_graphics(
@@ -614,6 +662,7 @@ fn instructions(action: Action) -> &'static str {
             "Turn the wheel (or stick) fully to the RIGHT, bring it back to centre, then press Enter."
         }
         Action::ShiftUp | Action::ShiftDown => "Press the button or paddle to use.",
+        Action::Gate(_) => "Put the shifter into this gear.",
         _ => "Press the pedal (or trigger) fully, release it, then press Enter.",
     }
 }
@@ -635,6 +684,7 @@ fn render(
     graphics: Res<GraphicsSettings>,
     graphics_support: Res<GraphicsSupport>,
     weather: Res<WeatherConfig>,
+    assists: Res<AssistSettings>,
     sim: Res<Simulation>,
     pads: Query<(Entity, &Gamepad, &Name)>,
     mut panel: Query<(&mut Text, &mut Visibility), With<SettingsPanel>>,
@@ -652,11 +702,12 @@ fn render(
         return;
     }
     let tabs = match screen.page {
-        Page::Input => "[INPUT]  force feedback   track   weather   graphics ",
-        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   weather   graphics ",
-        Page::Track => " input   force feedback  [TRACK]  weather   graphics ",
-        Page::Weather => " input   force feedback   track  [WEATHER]  graphics ",
-        Page::Graphics => " input   force feedback   track   weather  [GRAPHICS]",
+        Page::Input => "[INPUT]  force feedback   track   weather   graphics   assists ",
+        Page::ForceFeedback => " input  [FORCE FEEDBACK]  track   weather   graphics   assists ",
+        Page::Track => " input   force feedback  [TRACK]  weather   graphics   assists ",
+        Page::Weather => " input   force feedback   track  [WEATHER]  graphics   assists ",
+        Page::Graphics => " input   force feedback   track   weather  [GRAPHICS]  assists ",
+        Page::Assists => " input   force feedback   track   weather   graphics  [ASSISTS]",
     };
     let mut s = format!("{tabs}   (Tab page, paused)   Esc close\n\n");
     match screen.page {
@@ -665,6 +716,7 @@ fn render(
         Page::Track => render_track(&mut s, &screen, &sim),
         Page::Weather => render_weather(&mut s, &screen, &weather, &sim),
         Page::Graphics => render_graphics(&mut s, &screen, &graphics, *graphics_support),
+        Page::Assists => render_assists(&mut s, &screen, &assists, &sim),
     }
     text.0 = s;
 }
@@ -697,6 +749,62 @@ fn render_graphics(
         s,
         "\nLeft/Right change, Enter on/off. Lower settings run faster."
     );
+}
+
+fn render_assists(s: &mut String, screen: &Screen, settings: &AssistSettings, sim: &Simulation) {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    for (i, row) in ASSIST_ROWS.iter().enumerate() {
+        let cursor = if i == screen.row { ">" } else { " " };
+        let (name, on, hint) = match row {
+            AssistRow::Clutch => (
+                "Clutch",
+                settings.clutch,
+                "pulls away, saves stalls and works H-pattern shifts",
+            ),
+            AssistRow::Blip => (
+                "Auto-blip",
+                settings.blip,
+                "matches revs on downshifts (heel-and-toe)",
+            ),
+            AssistRow::AutoShift => ("Auto shift", settings.auto_shift, "picks the gears"),
+        };
+        let _ = writeln!(s, "{cursor} {name:<12} {:<5} {hint}", on_off(on));
+    }
+    let p = &sim.car.model.params;
+    let gearbox = match p.gearbox.kind {
+        GearboxKind::HPattern { .. } => "H-pattern manual with a clutch pedal",
+        GearboxKind::Sequential { .. } => "sequential, paddle shift",
+        GearboxKind::DualClutch { .. } => "dual clutch (works its own clutches)",
+    };
+    let e = &p.electronics;
+    let mut fitted = Vec::new();
+    if e.anti_stall.is_some() {
+        fitted.push("anti-stall");
+    }
+    if e.auto_blip {
+        fitted.push("auto-blip");
+    }
+    if e.ignition_cut {
+        fitted.push("ignition cut");
+    }
+    if e.downshift_protection_rpm.is_some() {
+        fitted.push("downshift protection");
+    }
+    let _ = writeln!(s, "\n{}: {gearbox}", p.name);
+    let _ = writeln!(
+        s,
+        "Fitted: {}",
+        if fitted.is_empty() {
+            "no gearbox electronics".to_string()
+        } else {
+            fitted.join(", ")
+        }
+    );
+    let _ = writeln!(
+        s,
+        "\nLeft/Right or Enter toggles. The aids work the pedals as a driver would; what the"
+    );
+    let _ = writeln!(s, "car is fitted with works regardless.");
 }
 
 /// "14:05" for 14.08 h.
@@ -913,7 +1021,7 @@ fn render_input(
                         bindings.value(action, pads, reported) as f64 * bindings.steer_rotation
                             / 2.0
                     ),
-                    Action::ShiftUp | Action::ShiftDown => {
+                    Action::ShiftUp | Action::ShiftDown | Action::Gate(_) => {
                         (if bindings.value(action, pads, reported) > 0.5 {
                             "pressed"
                         } else {

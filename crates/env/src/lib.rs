@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use glam::DVec3;
 use open_racing_sim::{
-    AutoShift, Car, CarModel, Controls, DT, GRAVITY, RubberMap, Shift, Track, TrackEvolution,
+    AutoShift, BlipAssist, Car, CarModel, ClutchAssist, Controls, DT, GRAVITY, RubberMap, Shift,
+    Track, TrackEvolution,
 };
 use rayon::prelude::*;
 
@@ -340,6 +341,8 @@ pub struct Actuator {
     abs_release: f64,
     /// Gear request of the current decision, not yet sent to the gearbox.
     shift: Shift,
+    /// Works the clutch pedal: the agent drives with its two feet on throttle and brake.
+    clutch: ClutchAssist,
 }
 
 impl Actuator {
@@ -358,7 +361,7 @@ impl Actuator {
         let target = f64::from(action[0]).clamp(-1.0, 1.0) * lock;
         let max_delta = cfg.max_steer_rate * DT;
         self.steer += (target - self.steer).clamp(-max_delta, max_delta);
-        Controls {
+        let mut controls = Controls {
             steer_wheel_angle: self.steer,
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
             brake: self.brake(cfg, car, f64::from(action[2]).clamp(0.0, 1.0)),
@@ -368,7 +371,11 @@ impl Actuator {
             } else {
                 self.take_shift(car)
             },
-        }
+            selector: None,
+        };
+        self.clutch.apply(car, &mut controls);
+        BlipAssist.apply(car, &mut controls);
+        controls
     }
 
     /// Brake pressure for `pedal`: with [`EnvConfig::abs`], released while a wheel slips

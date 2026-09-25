@@ -1,6 +1,7 @@
 //! Bevy front-end. The simulation runs in its own fixed 1 kHz loop inside the
 //! `Simulation` resource; Bevy only reads the resulting state for rendering.
 
+mod assists;
 mod audio;
 mod bindings;
 mod camera;
@@ -38,7 +39,8 @@ pub struct Args {
     /// Directory of a trained policy to watch (toggle with T).
     #[arg(long)]
     pub ai: Option<PathBuf>,
-    /// Let the gearbox shift automatically for the human driver.
+    /// Let the gearbox shift automatically for the human driver. Also set with the other
+    /// driver aids in the settings screen (Esc, Tab to "assists"), which keeps them.
     #[arg(long)]
     pub auto_shift: bool,
     /// Track evolution: grip on the racing line at the start (dusty, green, fast,
@@ -101,6 +103,7 @@ fn main() {
     app.insert_resource(ClearColor(Color::srgb(0.55, 0.72, 0.9)))
         .insert_resource(sim)
         .insert_resource(weather)
+        .insert_resource(assists::AssistSettings::load(&args))
         .insert_resource(track_model)
         .insert_resource(car_model)
         .insert_resource(args.clone())

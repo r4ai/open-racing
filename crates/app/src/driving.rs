@@ -8,11 +8,12 @@ use glam::{DQuat, DVec3};
 use open_racing_api::{AgentDriver, EnvSpec, LapTimer, Policy};
 use open_racing_sim::weather::{OccluderBuilder, Occluders};
 use open_racing_sim::{
-    AutoShift, Car, CarState, Controls, DT, RubberMap, Shift, Track, TrackEvolution, Weather,
-    WeatherSettings,
+    AutoShift, BlipAssist, Car, CarState, ClutchAssist, Controls, DT, RubberMap, Shift, Track,
+    TrackEvolution, Weather, WeatherSettings,
 };
 
 use crate::Args;
+use crate::assists::AssistSettings;
 use crate::input::{AppRequests, DriverInput};
 use crate::settings::settings_closed;
 
@@ -80,7 +81,8 @@ pub struct Simulation {
     accumulator: f64,
     pub mode: Mode,
     pub lap: LapTimer,
-    pub auto_shift: bool,
+    /// Clutch assist state for the human driver.
+    clutch_assist: ClutchAssist,
     pub controls: Controls,
     /// Steering torque averaged over the physics steps of the last frame, for force feedback.
     pub ffb_torque: f64,
@@ -117,7 +119,7 @@ impl Simulation {
             alpha: 0.0,
             accumulator: 0.0,
             mode: Mode::Human,
-            auto_shift: args.auto_shift,
+            clutch_assist: ClutchAssist::default(),
             controls: Controls::default(),
             ffb_torque: 0.0,
             spec,
@@ -141,6 +143,7 @@ impl Simulation {
             .locate(self.car.state.position, self.lap.hint())
             .s;
         self.car.reset(&self.track, s, 0.0, 0.0, 1);
+        self.clutch_assist = ClutchAssist::default();
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);
         self.recording = self.new_recording();
@@ -303,6 +306,7 @@ pub fn step_simulation(
     mut sim: ResMut<Simulation>,
     mut input: ResMut<DriverInput>,
     mut ai: Option<NonSendMut<AiDriver>>,
+    assists: Res<AssistSettings>,
     mut timings: Option<ResMut<crate::capture::CloudCpuTimings>>,
 ) {
     if let Some(t) = &mut timings {
@@ -329,8 +333,14 @@ pub fn step_simulation(
                 let mut c = input.controls;
                 // A gear request applies to one physics step only.
                 input.controls.shift = Shift::None;
-                if sim.auto_shift && c.shift == Shift::None {
+                if assists.auto_shift && c.shift == Shift::None {
                     c.shift = AutoShift.shift(&sim.car);
+                }
+                if assists.clutch {
+                    sim.clutch_assist.apply(&sim.car, &mut c);
+                }
+                if assists.blip {
+                    BlipAssist.apply(&sim.car, &mut c);
                 }
                 c
             }

@@ -27,16 +27,29 @@ pub enum Action {
     Clutch,
     ShiftUp,
     ShiftDown,
+    /// A gate of an H-pattern shifter: −1 = reverse, 1.. = forward gears.
+    Gate(i32),
 }
 
+/// Gates of an H-pattern shifter that can be bound, in the order of `Bindings::gates`.
+pub const GATES: [i32; 8] = [1, 2, 3, 4, 5, 6, 7, -1];
+
 impl Action {
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 14] = [
         Action::Steer,
         Action::Throttle,
         Action::Brake,
         Action::Clutch,
         Action::ShiftUp,
         Action::ShiftDown,
+        Action::Gate(GATES[0]),
+        Action::Gate(GATES[1]),
+        Action::Gate(GATES[2]),
+        Action::Gate(GATES[3]),
+        Action::Gate(GATES[4]),
+        Action::Gate(GATES[5]),
+        Action::Gate(GATES[6]),
+        Action::Gate(GATES[7]),
     ];
 
     pub fn name(self) -> &'static str {
@@ -47,12 +60,28 @@ impl Action {
             Action::Clutch => "Clutch",
             Action::ShiftUp => "Shift up",
             Action::ShiftDown => "Shift down",
+            Action::Gate(-1) => "Gear R",
+            Action::Gate(1) => "Gear 1",
+            Action::Gate(2) => "Gear 2",
+            Action::Gate(3) => "Gear 3",
+            Action::Gate(4) => "Gear 4",
+            Action::Gate(5) => "Gear 5",
+            Action::Gate(6) => "Gear 6",
+            Action::Gate(_) => "Gear 7",
         }
     }
 
     pub fn is_button(self) -> bool {
-        matches!(self, Action::ShiftUp | Action::ShiftDown)
+        matches!(self, Action::ShiftUp | Action::ShiftDown | Action::Gate(_))
     }
+}
+
+/// Index of `gate` in [`GATES`].
+fn gate_index(gate: i32) -> usize {
+    GATES
+        .iter()
+        .position(|&g| g == gate)
+        .expect("a bindable gate")
 }
 
 /// `GamepadInput` with serde support.
@@ -197,6 +226,8 @@ pub struct Bindings {
     pub clutch: Option<Binding>,
     pub shift_up: Option<Binding>,
     pub shift_down: Option<Binding>,
+    /// H-pattern shifter gates, in the order of [`GATES`].
+    pub gates: [Option<Binding>; 8],
 }
 
 impl Default for Bindings {
@@ -209,6 +240,7 @@ impl Default for Bindings {
             clutch: None,
             shift_up: None,
             shift_down: None,
+            gates: Default::default(),
         }
     }
 }
@@ -234,6 +266,7 @@ impl Bindings {
             Action::Clutch => &self.clutch,
             Action::ShiftUp => &self.shift_up,
             Action::ShiftDown => &self.shift_down,
+            Action::Gate(g) => &self.gates[gate_index(g)],
         }
     }
 
@@ -245,6 +278,7 @@ impl Bindings {
             Action::Clutch => &mut self.clutch,
             Action::ShiftUp => &mut self.shift_up,
             Action::ShiftDown => &mut self.shift_down,
+            Action::Gate(g) => &mut self.gates[gate_index(g)],
         }
     }
 
@@ -270,6 +304,22 @@ impl Bindings {
                 .find(pads)
                 .is_some_and(|(_, pad)| b.just_pressed(pad))
         })
+    }
+
+    /// The gate the bound H-pattern shifter holds (0 when none of its gates is), or
+    /// `None` when no gate is bound.
+    pub fn selector(
+        &self,
+        pads: &Query<(Entity, &Gamepad, &Name)>,
+        reported: &Reported,
+    ) -> Option<i32> {
+        if self.gates.iter().all(Option::is_none) {
+            return None;
+        }
+        let held = GATES
+            .into_iter()
+            .find(|&g| self.value(Action::Gate(g), pads, reported) > 0.5);
+        Some(held.unwrap_or(0))
     }
 
     pub fn load() -> Self {

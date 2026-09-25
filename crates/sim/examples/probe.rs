@@ -47,14 +47,12 @@ fn main() {
     let mut t100 = None;
     for k in 0..60000 {
         let rpm = car.state.drivetrain.rpm();
-        let shift = if rpm > 8900.0
-            && car.state.drivetrain.gear < 6
-            && car.state.drivetrain.shift_timer == 0.0
-        {
-            Shift::Up
-        } else {
-            Shift::None
-        };
+        let shift =
+            if rpm > 8900.0 && car.state.drivetrain.gear < 6 && !car.state.drivetrain.shifting() {
+                Shift::Up
+            } else {
+                Shift::None
+            };
         car.step(
             &track,
             &Controls {

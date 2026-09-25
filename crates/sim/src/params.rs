@@ -93,14 +93,67 @@ pub struct EngineParams {
     pub limiter_rpm: f64,
     /// Engine stops below this unless the clutch is open.
     pub stall_rpm: f64,
+    /// Most throttle the idle control opens to hold `idle_rpm`, 0..1.
+    #[serde(default = "default_idle_authority")]
+    pub idle_authority: f64,
+    /// Gain of the idle control: it opens the throttle by 1 / `idle_band_rpm` for each rpm
+    /// below `idle_rpm`, up to `idle_authority`, rpm.
+    #[serde(default = "default_idle_band_rpm")]
+    pub idle_band_rpm: f64,
+}
+
+fn default_idle_authority() -> f64 {
+    0.35
+}
+fn default_idle_band_rpm() -> f64 {
+    300.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClutchParams {
-    /// Maximum transmissible torque in N·m.
+    /// Maximum transmissible torque in N·m, fully engaged and not slipping.
     pub max_torque: f64,
-    /// Anti-stall: clutch capacity fades to zero between `stall_rpm` and this rpm.
-    pub anti_stall_rpm: f64,
+    /// Pedal travel (0 = released, 1 = floored) beyond which the clutch transmits nothing.
+    /// Between it and the released pedal the capacity grows with the travel from it raised
+    /// to `engagement_exponent`.
+    #[serde(default = "default_bite_point")]
+    pub bite_point: f64,
+    /// Shape of the engagement past the bite point: 1 = linear in the pedal travel, above 1
+    /// = a gentle bite that firms up as the pedal comes back.
+    #[serde(default = "default_engagement_exponent")]
+    pub engagement_exponent: f64,
+    /// Friction while slipping relative to friction while stuck.
+    #[serde(default = "default_kinetic_ratio")]
+    pub kinetic_ratio: f64,
+}
+
+fn default_bite_point() -> f64 {
+    0.7
+}
+fn default_engagement_exponent() -> f64 {
+    2.0
+}
+fn default_kinetic_ratio() -> f64 {
+    0.8
+}
+
+impl ClutchParams {
+    /// Fraction of the capacity transmitted at `pedal`.
+    pub fn engagement(&self, pedal: f64) -> f64 {
+        ((self.bite_point - pedal) / self.bite_point)
+            .clamp(0.0, 1.0)
+            .powf(self.engagement_exponent)
+    }
+
+    /// Pedal travel that transmits `engagement` of the capacity (inverse of
+    /// [`Self::engagement`]).
+    pub fn pedal_for(&self, engagement: f64) -> f64 {
+        self.bite_point
+            * (1.0
+                - engagement
+                    .clamp(0.0, 1.0)
+                    .powf(1.0 / self.engagement_exponent))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,10 +162,175 @@ pub struct GearboxParams {
     pub ratios: Vec<f64>,
     pub reverse: f64,
     pub final_drive: f64,
-    /// Time with no drive during a gear change, in s.
-    pub shift_time: f64,
     /// Mechanical efficiency of gearbox + differential.
     pub efficiency: f64,
+    /// Clutch disc, input shaft and the gears turning with it, kg·m² at the input shaft.
+    #[serde(default = "default_input_inertia")]
+    pub input_inertia: f64,
+    /// Oil drag on the input shaft while no gear holds it, N·m.
+    #[serde(default = "default_input_drag")]
+    pub input_drag: f64,
+    pub kind: GearboxKind,
+}
+
+fn default_input_inertia() -> f64 {
+    0.02
+}
+fn default_input_drag() -> f64 {
+    1.0
+}
+
+/// How gears are selected and engaged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GearboxKind {
+    /// Manual gearbox with an H-pattern lever and synchromesh: a synchroniser cone matches
+    /// the input shaft to the selected gear before its dog teeth can mesh, which it can
+    /// only do quickly with the clutch open.
+    HPattern {
+        /// Torque a synchroniser cone exerts on the input shaft, N·m.
+        synchro_torque: f64,
+        /// Time the driver's hand takes from one gate to the next with sequential
+        /// up / down requests, s.
+        lever_time: f64,
+        /// Speed difference across a synchroniser at which the dogs mesh, rad/s at the input
+        /// shaft.
+        #[serde(default = "default_sync_window")]
+        sync_window: f64,
+        /// How long a synchroniser fights before its gear grinds, s.
+        #[serde(default = "default_grind_time")]
+        grind_time: f64,
+        /// Whether reverse has a synchroniser. Without one, reverse goes in only once the
+        /// input shaft turns with the wheels, as it does with the clutch down at rest after
+        /// its drag has stopped it.
+        #[serde(default = "default_reverse_synchro")]
+        reverse_synchro: bool,
+    },
+    /// Sequential dog box actuated by paddles: a dog ring leaves its gear once the torque
+    /// through it is low enough, a barrel turns to the next gear, and the dogs mesh at
+    /// whatever speed difference the clutch then absorbs.
+    Sequential {
+        /// Time the barrel takes from one gear to the next, s.
+        shift_time: f64,
+        /// Most torque through the dogs, at the input shaft, at which they let go, N·m.
+        dog_release_torque: f64,
+    },
+    /// Dual-clutch gearbox: odd and even gears sit on two input shafts with a clutch each,
+    /// the next gear is preselected, and a shift hands the torque from one clutch to the
+    /// other. Its control unit works the clutches; the car has no clutch pedal.
+    DualClutch {
+        /// Time over which the torque passes from one clutch to the other, s.
+        shift_time: f64,
+        /// Torque the clutch transmits at rest with neither pedal pressed, N·m.
+        creep_torque: f64,
+        /// Engine speed the control unit holds while slipping the clutch at full throttle
+        /// to pull away, rpm.
+        launch_rpm: f64,
+        /// How the control unit slips, closes and changes down.
+        #[serde(default)]
+        control: DualClutchControl,
+    },
+}
+
+fn default_sync_window() -> f64 {
+    3.0
+}
+fn default_grind_time() -> f64 {
+    0.3
+}
+fn default_reverse_synchro() -> bool {
+    true
+}
+
+impl GearboxKind {
+    /// An H-pattern gearbox with the default synchroniser tolerances and a synchronised
+    /// reverse.
+    pub fn h_pattern(synchro_torque: f64, lever_time: f64) -> Self {
+        Self::HPattern {
+            synchro_torque,
+            lever_time,
+            sync_window: default_sync_window(),
+            grind_time: default_grind_time(),
+            reverse_synchro: default_reverse_synchro(),
+        }
+    }
+}
+
+/// How a dual-clutch control unit works the clutch of the gear carrying the drive. Speeds
+/// are relative to the engine's `idle_rpm`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DualClutchControl {
+    /// Engine speed above idle at which the clutch starts to bite with the throttle closed;
+    /// the throttle raises it towards `launch_rpm`, rpm.
+    pub bite_rpm: f64,
+    /// Engine speed range above the bite speed over which the clutch goes from creeping to
+    /// its full capacity, rpm.
+    pub engage_band_rpm: f64,
+    /// Slip between the engine and the gear below which the clutch closes fully, rpm.
+    pub lock_slip_rpm: f64,
+    /// Speed above idle the gear must turn the engine at before the clutch closes fully,
+    /// rpm.
+    pub lock_rpm: f64,
+    /// Speed above idle below which the gear turns the engine when the control unit drops
+    /// a gear, rpm.
+    pub downshift_rpm: f64,
+}
+
+impl Default for DualClutchControl {
+    fn default() -> Self {
+        Self {
+            bite_rpm: 150.0,
+            engage_band_rpm: 500.0,
+            lock_slip_rpm: 100.0,
+            lock_rpm: 100.0,
+            downshift_rpm: 0.0,
+        }
+    }
+}
+
+/// Engine and gearbox control electronics a car is fitted with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ElectronicsParams {
+    /// Opens the clutch as the engine slows towards stalling (not on dual-clutch
+    /// gearboxes, whose control unit always does).
+    pub anti_stall: Option<AntiStall>,
+    /// Blips the throttle to match revs on downshifts, a dual clutch's included.
+    pub auto_blip: bool,
+    /// How far below the incoming gear's speed the engine has to be for the blip to open
+    /// the throttle fully; closer, it opens in proportion, rpm.
+    pub blip_band_rpm: f64,
+    /// Cuts the ignition to unload the dogs on sequential upshifts.
+    pub ignition_cut: bool,
+    /// Refuses a downshift that would spin the engine faster than this, rpm.
+    pub downshift_protection_rpm: Option<f64>,
+}
+
+impl Default for ElectronicsParams {
+    fn default() -> Self {
+        Self {
+            anti_stall: None,
+            auto_blip: false,
+            blip_band_rpm: 500.0,
+            ignition_cut: false,
+            downshift_protection_rpm: None,
+        }
+    }
+}
+
+/// Anti-stall: while the driveline drags the engine down, the clutch opens over
+/// `band_rpm` above `rpm` and is fully open below it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AntiStall {
+    /// Engine speed below which the clutch is fully open, rpm.
+    pub rpm: f64,
+    /// Engine speed range over which the clutch opens, rpm.
+    #[serde(default = "default_anti_stall_band_rpm")]
+    pub band_rpm: f64,
+}
+
+fn default_anti_stall_band_rpm() -> f64 {
+    200.0
 }
 
 /// A limited-slip differential: it splits its input torque and moves up to its locking
@@ -198,6 +416,9 @@ pub struct CarParams {
     pub engine: EngineParams,
     pub clutch: ClutchParams,
     pub gearbox: GearboxParams,
+    /// Engine and gearbox control electronics; none when left out.
+    #[serde(default)]
+    pub electronics: ElectronicsParams,
     /// Driven wheels; rear-wheel drive when left out.
     #[serde(default)]
     pub drive: Drive,
@@ -274,8 +495,88 @@ impl CarParams {
             "drag_curve needs two points",
         )?;
         check(
-            self.engine.stall_rpm < self.clutch.anti_stall_rpm,
-            "anti_stall_rpm must exceed stall_rpm",
+            self.engine.stall_rpm < self.engine.idle_rpm,
+            "idle_rpm must exceed stall_rpm",
+        )?;
+        check(
+            (0.0..=1.0).contains(&self.engine.idle_authority),
+            "idle_authority must be in 0..1",
+        )?;
+        check(
+            self.engine.idle_band_rpm > 0.0,
+            "idle_band_rpm must be positive",
+        )?;
+        check(
+            self.clutch.max_torque > 0.0,
+            "clutch max_torque must be positive",
+        )?;
+        check(
+            self.clutch.bite_point > 0.0 && self.clutch.bite_point <= 1.0,
+            "clutch bite_point must be in (0, 1]",
+        )?;
+        check(
+            self.clutch.kinetic_ratio > 0.0 && self.clutch.kinetic_ratio <= 1.0,
+            "clutch kinetic_ratio must be in (0, 1]",
+        )?;
+        check(
+            self.clutch.engagement_exponent > 0.0,
+            "clutch engagement_exponent must be positive",
+        )?;
+        check(
+            self.gearbox.input_inertia > 0.0,
+            "gearbox input_inertia must be positive",
+        )?;
+        check(
+            self.gearbox.input_drag >= 0.0,
+            "gearbox input_drag must not be negative",
+        )?;
+        check(
+            match self.gearbox.kind {
+                GearboxKind::HPattern {
+                    synchro_torque,
+                    lever_time,
+                    sync_window,
+                    grind_time,
+                    ..
+                } => {
+                    synchro_torque > 0.0
+                        && lever_time >= 0.0
+                        && sync_window > 0.0
+                        && grind_time >= 0.0
+                }
+                GearboxKind::Sequential {
+                    shift_time,
+                    dog_release_torque,
+                } => shift_time >= 0.0 && dog_release_torque > 0.0,
+                GearboxKind::DualClutch {
+                    shift_time,
+                    creep_torque,
+                    launch_rpm,
+                    ref control,
+                } => {
+                    shift_time > 0.0
+                        && creep_torque >= 0.0
+                        && launch_rpm > self.engine.idle_rpm
+                        && launch_rpm < self.engine.limiter_rpm
+                        && control.bite_rpm >= 0.0
+                        && control.engage_band_rpm > 0.0
+                        && control.lock_slip_rpm > 0.0
+                        && control.lock_rpm >= 0.0
+                        && control.downshift_rpm >= 0.0
+                }
+            },
+            "gearbox kind: invalid timing, torque, window or control speed",
+        )?;
+        check(
+            self.electronics
+                .anti_stall
+                .as_ref()
+                .is_none_or(|a| a.rpm > self.engine.stall_rpm && a.band_rpm > 0.0),
+            "anti_stall rpm must exceed stall_rpm, and its band_rpm be positive",
+        )?;
+        check(
+            self.electronics.blip_band_rpm > 0.0,
+            "blip_band_rpm must be positive",
         )?;
         check(
             self.front.pressure > 0.0 && self.rear.pressure > 0.0,
@@ -466,6 +767,27 @@ pub(crate) fn lookup(table: &[(f64, f64)], x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_engagement_exponent_shapes_the_clutch_and_its_inverse_follows() {
+        let clutch = |engagement_exponent| ClutchParams {
+            max_torque: 500.0,
+            bite_point: 0.7,
+            engagement_exponent,
+            kinetic_ratio: 0.8,
+        };
+        // Halfway from the bite point to the released pedal.
+        for (exponent, half) in [(1.0, 0.5), (2.0, 0.25), (3.0, 0.125)] {
+            let c = clutch(exponent);
+            assert!((c.engagement(0.35) - half).abs() < 1e-12, "{exponent}");
+            for e in [0.0, 0.1, 0.5, 0.9, 1.0] {
+                assert!(
+                    (c.engagement(c.pedal_for(e)) - e).abs() < 1e-12,
+                    "{exponent} {e}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn load_reads_the_tyres_the_car_names() {

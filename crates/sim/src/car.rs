@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec3};
 
-use crate::controls::{Controls, Shift};
+use crate::controls::Controls;
 use crate::drivetrain::{self, DriveInput, DrivetrainState};
 use crate::evolution::TrackEvolution;
 use crate::params::{CarModel, SteeringParams};
@@ -202,6 +202,9 @@ impl Car {
         let share = m.params.drive.front_share();
         let wheel_spin = share * wheels[FL].spin + (1.0 - share) * wheels[RL].spin;
         drivetrain.engine_speed = drivetrain.engine_speed.max(wheel_spin * ratio);
+        if ratio != 0.0 {
+            drivetrain.input_speed = wheel_spin * ratio;
+        }
 
         self.state = CarState {
             position: surface + normal * m.params.cg_height,
@@ -273,12 +276,6 @@ impl Car {
         let tel = &mut self.telemetry;
         let dt = DT;
         let c = controls.sanitized(p.steering.lock);
-
-        match c.shift {
-            Shift::None => {}
-            Shift::Up => st.drivetrain.request_shift(p, true),
-            Shift::Down => st.drivetrain.request_shift(p, false),
-        }
 
         let rot = DMat3::from_quat(st.orientation);
         let rot_t = rot.transpose();
@@ -454,7 +451,10 @@ impl Car {
             p,
             &DriveInput {
                 throttle: c.throttle,
+                brake: c.brake,
                 clutch_pedal: c.clutch,
+                shift: c.shift,
+                selector: c.selector,
                 power: air.engine,
                 wheel_speed: st.wheels.map(|w| w.spin),
                 wheel_torque: road_torque,
