@@ -293,7 +293,14 @@ pub fn along(model: &Model, line: &crate::road::ModelLine) -> Vec<Mesh> {
                             .push(n.normalize_or(DVec3::Z).as_vec3().to_array());
                     }
                     mesh.uvs.extend(&m.uvs);
-                    mesh.indices.extend(m.indices.iter().map(|i| i + base));
+                    // Facing the road on a line's right mirrors the model: its
+                    // triangles then wind the other way round to keep facing out.
+                    let mirrored = chord.cross(facing).z < 0.0;
+                    for t in m.indices.as_chunks::<3>().0 {
+                        let [a, b, c] = t.map(|i| i + base);
+                        mesh.indices
+                            .extend(if mirrored { [a, c, b] } else { [a, b, c] });
+                    }
                 }
                 if !mesh.indices.is_empty() {
                     out.push(mesh);
@@ -302,4 +309,80 @@ pub fn along(model: &Model, line: &crate::road::ModelLine) -> Vec<Mesh> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::ModelRun;
+    use crate::road::{LinePoint, ModelLine};
+
+    /// A unit box, a metre along +X, faces winding outwards.
+    fn cube() -> Model {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        for axis in 0..3 {
+            for sign in [-1.0f32, 1.0] {
+                let n =
+                    Vec3::from_array(std::array::from_fn(|i| if i == axis { sign } else { 0.0 }));
+                let (u, v) = (
+                    n.any_orthonormal_vector(),
+                    n.cross(n.any_orthonormal_vector()),
+                );
+                let base = positions.len() as u32;
+                for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    let p = (n + u * a + v * b) * 0.5 + Vec3::new(0.5, 0.0, 0.5);
+                    positions.push(p.to_array());
+                    normals.push(n.to_array());
+                }
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        let n = positions.len();
+        Model {
+            meshes: vec![Mesh {
+                material: 0,
+                cast_shadows: true,
+                positions,
+                normals,
+                uvs: vec![[0.0; 2]; n],
+                indices,
+            }],
+            look: VisualBuilder::new().build(),
+            triangles: 12,
+            bounds: [Vec3::new(0.0, -0.5, 0.0), Vec3::new(1.0, 0.5, 1.0)],
+        }
+    }
+
+    #[test]
+    fn copies_face_outwards_whichever_side_of_the_line_they_face() {
+        let model = cube();
+        for toward in [DVec3::Y, -DVec3::Y] {
+            let line = ModelLine {
+                run: ModelRun {
+                    model: "cube.glb".into(),
+                    length: 0.0,
+                    bend: true,
+                    flip: false,
+                },
+                stretches: vec![
+                    (0..=4)
+                        .map(|k| LinePoint {
+                            pos: DVec3::new(k as f64, 0.0, 0.0),
+                            toward,
+                        })
+                        .collect(),
+                ],
+            };
+            for m in along(&model, &line) {
+                for t in m.indices.as_chunks::<3>().0 {
+                    let p = t.map(|i| Vec3::from(m.positions[i as usize]));
+                    let face = (p[1] - p[0]).cross(p[2] - p[0]);
+                    let n = Vec3::from(m.normals[t[0] as usize]);
+                    assert!(face.dot(n) > 0.0, "toward {toward}: {face} vs {n}");
+                }
+            }
+        }
+    }
 }
