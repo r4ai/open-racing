@@ -115,6 +115,13 @@ fn auto_screenshot(
 #[derive(Resource)]
 pub struct StartDistance(pub f32);
 
+/// What the command line asks the UI to do once the track is first built.
+pub type Start<'w> = (
+    Option<Res<'w, StartCorner>>,
+    Option<Res<'w, StartTab>>,
+    Option<Res<'w, StartDistance>>,
+);
+
 fn main() {
     let args = Args::parse();
     let path = PathBuf::from(&args.project);

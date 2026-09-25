@@ -168,11 +168,7 @@ pub fn ui(
     mut library: ResMut<Library>,
     props: Res<Props>,
     reference: Res<crate::reference::Shown>,
-    start: (
-        Option<Res<crate::StartCorner>>,
-        Option<Res<crate::StartTab>>,
-        Option<Res<crate::StartDistance>>,
-    ),
+    start: crate::Start,
     mut cmds: Commands,
     mut state: Local<UiState>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
