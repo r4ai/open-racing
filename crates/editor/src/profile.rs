@@ -6,7 +6,7 @@ use bevy_egui::egui;
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::ops::Op;
 
-use crate::state::Editor;
+use crate::state::{Editor, Item};
 
 /// Smallest height span a fit shows, m.
 const MIN_SPAN: f64 = 10.0;
@@ -54,7 +54,7 @@ impl ProfileView {
 pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
     let Some(r) = editor
         .selection
-        .road
+        .road()
         .filter(|&r| r < editor.project.roads.len())
     else {
         ui.label("Select a road to see its elevation.");
@@ -78,9 +78,18 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             "Elevation of \"{}\" ({:.0} m)",
             road.name, smp.length
         ));
-        fit |= ui.button("Fit").on_hover_text("Home, or double-click the background").clicked();
+        fit |= ui
+            .button("Fit")
+            .on_hover_text("Home, or double-click the background")
+            .clicked();
         ui.checkbox(&mut view.true_scale, "1:1");
-        ui.weak("drag or G: move node · Shift: fine · Ctrl: snap · middle: pan · wheel: zoom (Ctrl: height) · Home: fit");
+        ui.weak("controls").on_hover_text(
+            "Drag a node, or G over the view, to move the selected one up or down\n\
+             Shift: fine · Ctrl: snap to 0.1 m · click or Enter: done · right click or Esc: undo\n\
+             Double-click the line: add a node there\n\
+             Middle drag: pan · wheel: zoom along the road · Ctrl+wheel: zoom the height\n\
+             Home or double-click the background: fit",
+        );
     });
     if fit {
         view.road = Some(road.name.clone());
@@ -194,7 +203,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         );
     }
     for (i, &p) in nodes.iter().enumerate() {
-        let selected = editor.selection.node == Some(i);
+        let selected = editor.selection.nodes.contains(&i);
         let color = if selected {
             egui::Color32::from_rgb(255, 215, 30)
         } else {
@@ -257,7 +266,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         } else if hovered && key(egui::Key::G) {
             editor
                 .selection
-                .node
+                .node()
                 .filter(|&i| i < road.nodes.len())
                 .map(|i| (i, true))
         } else {
@@ -269,7 +278,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
                 z: road.nodes[node].pos.z,
                 modal,
             });
-            editor.selection.node = Some(node);
+            editor.selection.select_node(Item::Road(r), node);
             editor.begin_drag();
         }
     }
@@ -351,7 +360,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
     if resp.clicked()
         && let Some(i) = resp.interact_pointer_pos().and_then(nearest)
     {
-        editor.selection.node = Some(i);
+        editor.selection.select_node(Item::Road(r), i);
     }
     if resp.double_clicked()
         && let Some(pos) = resp.interact_pointer_pos()
@@ -375,7 +384,9 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
                 }],
                 None,
             ) {
-                editor.selection.node = Some(before.unwrap_or(road.nodes.len()));
+                editor
+                    .selection
+                    .select_node(Item::Road(r), before.unwrap_or(road.nodes.len()));
             }
         } else {
             view.fit(&smp, road.nodes.iter().map(|n| n.pos.z));

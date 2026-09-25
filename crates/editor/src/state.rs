@@ -9,17 +9,73 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bevy::prelude::*;
 use open_racing_track_project::ops::{self, Op};
-use open_racing_track_project::{PROJECT_FILE, Project};
+use open_racing_track_project::{Node, PROJECT_FILE, Project};
 
 /// Undo steps kept.
 const HISTORY: usize = 200;
 /// Edits with the same key this soon after each other undo as one (dragging a value).
 const COALESCE: Duration = Duration::from_millis(800);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Something in the project that is selected and edited as a whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    Road(usize),
+    Spline(usize),
+}
+
+/// The selected item and, as in Blender's edit mode, its selected nodes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
-    pub road: Option<usize>,
-    pub node: Option<usize>,
+    pub item: Option<Item>,
+    /// Selected nodes of the item's line, the active one last.
+    pub nodes: Vec<usize>,
+}
+
+impl Selection {
+    pub fn road(&self) -> Option<usize> {
+        match self.item {
+            Some(Item::Road(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn spline(&self) -> Option<usize> {
+        match self.item {
+            Some(Item::Spline(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The active node.
+    pub fn node(&self) -> Option<usize> {
+        self.nodes.last().copied()
+    }
+
+    /// Selects an item with none of its nodes.
+    pub fn select(&mut self, item: Item) {
+        self.item = Some(item);
+        self.nodes.clear();
+    }
+
+    /// Selects one node of an item.
+    pub fn select_node(&mut self, item: Item, node: usize) {
+        self.item = Some(item);
+        self.nodes = vec![node];
+    }
+
+    /// Adds a node to the selection, or takes it out if it is the active one already
+    /// (Shift+click in Blender).
+    pub fn toggle_node(&mut self, item: Item, node: usize) {
+        if self.item != Some(item) {
+            return self.select_node(item, node);
+        }
+        if self.node() == Some(node) {
+            self.nodes.pop();
+        } else {
+            self.nodes.retain(|&n| n != node);
+            self.nodes.push(node);
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -71,8 +127,8 @@ impl Editor {
             last_check: Instant::now(),
             last_edit: None,
             selection: Selection {
-                road: Some(0),
-                node: None,
+                item: Some(Item::Road(0)),
+                nodes: Vec::new(),
             },
             status,
             dragging: false,
@@ -191,14 +247,11 @@ impl Editor {
     }
 
     fn clamp_selection(&mut self) {
+        let count = self.line().map(|(_, nodes, _)| nodes.len());
         let s = &mut self.selection;
-        if s.road.is_some_and(|r| r >= self.project.roads.len()) {
-            *s = Selection::default();
-        }
-        if let (Some(r), Some(n)) = (s.road, s.node)
-            && n >= self.project.roads[r].nodes.len()
-        {
-            s.node = None;
+        match count {
+            Some(n) => s.nodes.retain(|&i| i < n),
+            None => *s = Selection::default(),
         }
     }
 
@@ -234,9 +287,28 @@ impl Editor {
     /// Name of the selected road.
     pub fn road_name(&self) -> Option<String> {
         self.selection
-            .road
+            .road()
             .and_then(|r| self.project.roads.get(r))
             .map(|r| r.name.clone())
+    }
+
+    /// The selected road or spline: its name, nodes and whether it is closed.
+    pub fn line(&self) -> Option<(&str, &[Node], bool)> {
+        item_line(&self.project, self.selection.item?)
+    }
+}
+
+/// A road's or spline's name, nodes and whether it is closed.
+pub fn item_line(project: &Project, item: Item) -> Option<(&str, &[Node], bool)> {
+    match item {
+        Item::Road(r) => project
+            .roads
+            .get(r)
+            .map(|r| (r.name.as_str(), r.nodes.as_slice(), r.closed)),
+        Item::Spline(s) => project
+            .splines
+            .get(s)
+            .map(|s| (s.name.as_str(), s.nodes.as_slice(), s.closed)),
     }
 }
 

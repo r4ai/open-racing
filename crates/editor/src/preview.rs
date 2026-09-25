@@ -1,10 +1,13 @@
 //! The 3D preview: the project's meshes, rebuilt in the background whenever the project
 //! changes, in the same materials the game renders them with.
 
+use std::sync::Arc;
+
 use bevy::image::CompressedImageFormatSupport;
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
+use open_racing_sim::GroundMesh;
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::project::MaterialDef;
 use open_racing_track_project::road::MeshData;
@@ -17,10 +20,13 @@ use crate::state::Editor;
 #[derive(Component)]
 pub struct PreviewMesh;
 
-/// What the last finished build knows about the roads, for gizmos and picking.
+/// What the last finished build knows, for gizmos and picking.
 #[derive(Resource, Default)]
 pub struct Built {
     pub roads: Vec<Sampled>,
+    pub splines: Vec<Sampled>,
+    /// Everything solid, to find what the pointer is over.
+    pub ground: Option<Arc<GroundMesh>>,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -28,6 +34,8 @@ pub struct Built {
 #[derive(Default)]
 struct Meshes {
     roads: Vec<Sampled>,
+    splines: Vec<Sampled>,
+    ground: Option<Arc<GroundMesh>>,
     /// (material, mesh, casts shadows)
     meshes: Vec<(usize, Mesh, bool)>,
 }
@@ -66,8 +74,13 @@ fn build(project: Project) -> Meshes {
     if let Some(t) = scene.terrain {
         meshes.extend(t.chunks.into_iter().map(|m| (terrain, to_mesh(m), false)));
     }
-    let roads = scene.roads.into_iter().map(|b| b.sampled).collect();
-    Meshes { roads, meshes }
+    let surfaces: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
+    Meshes {
+        ground: Some(Arc::new(scene.ground.build(&surfaces))),
+        roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
+        splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
+        meshes,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -127,6 +140,8 @@ pub fn rebuild(
             }
         }
         built.roads = done.roads;
+        built.splines = done.splines;
+        built.ground = done.ground;
         built.count += 1;
     }
 
