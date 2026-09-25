@@ -68,6 +68,7 @@
         idle_rpm: 850.0,
         limiter_rpm: 7400.0,
         stall_rpm: 500.0,
+        position: Mid,               // its bay heats the rear tyres
     ),
 
     clutch: (

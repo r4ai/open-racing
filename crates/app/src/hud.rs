@@ -235,10 +235,12 @@ fn update(
     let w = &h.wear;
     let _ = writeln!(
         s,
-        "engine coolant {:.0} C   oil {:.0} C   cylinders {:.0} C   power {:.0} %{}{}",
+        "engine coolant {:.0} C   oil {:.0} C   cylinders {:.0} C   intake {:.0} C            gearbox {:.0} C   power {:.0} %{}{}",
         h.coolant,
         h.oil,
         h.cylinder,
+        h.intake,
+        h.gearbox,
         h.power * 100.0,
         if w.pistons.max(w.bearings).max(w.valvetrain) > 0.0 {
             format!(

@@ -1211,7 +1211,7 @@ fn brake_repeatedly(
 #[test]
 fn hard_stops_bring_racing_brakes_up_to_temperature_and_warm_the_rims() {
     let model = gt3();
-    let start = model.brakes.fresh();
+    let start = model.brakes.fresh(AMBIENT_TEMPERATURE);
     let (brakes, _) = brake_repeatedly(model, 200.0, 60.0, 6);
     eprintln!("{brakes:#?}");
     let last = brakes[brakes.len() - 1];
@@ -1296,4 +1296,71 @@ fn an_engine_held_on_the_limiter_at_rest_overheats_and_fails() {
         !heat.failed() && heat.coolant > 110.0 && heat.power < 1.0,
         "{heat:?}"
     );
+}
+
+/// Weather of `month` at `hour`, with the air `offset` K off the season's.
+fn weather_of(track: &Track, month: u32, hour: f64, offset: f64) -> Weather {
+    Weather::new(
+        track,
+        None,
+        WeatherSettings {
+            sky: Sky::Clear,
+            dynamic: false,
+            hour,
+            month,
+            temperature_offset: offset,
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn a_reset_starts_the_car_from_the_day_s_weather() {
+    let track = circle(200.0);
+    let winter = weather_of(&track, 1, 7.0, -5.0);
+    let summer = weather_of(&track, 7, 15.0, 5.0);
+    assert!(summer.air_temperature() > winter.air_temperature() + 20.0);
+    let reset = |weather: &Weather| {
+        let mut car = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
+        car.reset_in(&track, weather, 0.0, 0.0, 0.0, 1);
+        car.state
+    };
+    let (cold, hot) = (reset(&winter), reset(&summer));
+    let (c, h) = (cold.wheels[0], hot.wheels[0]);
+    assert!(c.brake.caliper < h.brake.caliper && c.brake.rim < h.brake.rim);
+    assert!(c.tire.inflated_at < h.tire.inflated_at - 20.0);
+    let (ce, he) = (cold.drivetrain.engine.heat, hot.drivetrain.engine.heat);
+    assert!(
+        ce.oil < he.oil && ce.gearbox < he.gearbox,
+        "{ce:?} / {he:?}"
+    );
+    assert!(ce.friction > he.friction, "{ce:?} / {he:?}");
+}
+
+#[test]
+fn a_hot_engine_bay_warms_the_intake_and_the_gearbox() {
+    // Revving at rest on a hot day: the engine sheds its heat into air that barely
+    // moves, and the intake draws from the bay.
+    let track = circle(200.0);
+    let weather = weather_of(&track, 7, 15.0, 5.0);
+    let mut car = Car::new(asset_car("fr_coupe"), &track, 0.0, 0.0, 0.0, 0);
+    car.reset_in(&track, &weather, 0.0, 0.0, 0.0, 0);
+    let start = car.state.drivetrain.engine.heat;
+    let mut evolution = TrackEvolution::UNIFORM;
+    let controls = Controls {
+        throttle: 0.5,
+        brake: 1.0,
+        ..Default::default()
+    };
+    for _ in 0..(120.0 / DT) as usize {
+        car.step_in(&track, &mut evolution, &weather, &controls);
+    }
+    let heat = car.state.drivetrain.engine.heat;
+    eprintln!(
+        "{start:?}
+{heat:?}"
+    );
+    assert!(heat.bay > start.bay + 15.0, "{start:?} / {heat:?}");
+    assert!(heat.intake > start.intake + 5.0, "{start:?} / {heat:?}");
+    assert!(heat.gearbox > start.gearbox, "{start:?} / {heat:?}");
 }

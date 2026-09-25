@@ -101,11 +101,12 @@ impl Simulation {
             open_racing_api::load_track_with_visual(args.track.as_deref().unwrap_or("lakeside"))?;
         let (car_model, car_visual) = open_racing_api::load_car_with_visual(&args.car)?;
         let spec = EnvSpec::new(track, car_model, Default::default());
-        let car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
         let rubber = Arc::new(RubberMap::new(&spec.track));
         let evolution = TrackEvolution::new(rubber, args.track_grip, args.grip_gain);
         let scenery = model.as_ref().map(|m| Arc::new(scenery(&spec.track, m)));
         let weather = Weather::new(&spec.track, scenery, weather);
+        let mut car = Car::new(spec.car.clone(), &spec.track, 0.0, 0.0, 0.0, 1);
+        car.reset_in(&spec.track, &weather, 0.0, 0.0, 0.0, 1);
         let sim = Self {
             lap: LapTimer::new(&spec.track, car.state.position),
             previous: car.state,
@@ -136,13 +137,15 @@ impl Simulation {
         )
     }
 
-    /// Puts the car back on the centreline at the nearest point, at rest.
+    /// Puts the car back on the centreline at the nearest point, at rest, warmed up and
+    /// inflated in the air there.
     fn reset_car(&mut self) {
         let s = self
             .track
             .locate(self.car.state.position, self.lap.hint())
             .s;
-        self.car.reset(&self.track, s, 0.0, 0.0, 1);
+        self.car
+            .reset_in(&self.track, &self.weather, s, 0.0, 0.0, 1);
         self.clutch_assist = ClutchAssist::default();
         self.previous = self.car.state;
         self.lap = LapTimer::new(&self.track, self.car.state.position);

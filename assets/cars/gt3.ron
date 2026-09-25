@@ -76,6 +76,7 @@
         limiter_rpm: 9250.0,
         stall_rpm: 700.0,
         cooling: (fan: false),       // no radiator fan: it overheats standing still
+        position: Mid,
     ),
 
     clutch: (

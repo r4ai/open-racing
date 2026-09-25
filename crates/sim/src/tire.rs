@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::AMBIENT_TEMPERATURE;
 use crate::params::lookup;
 use crate::track::Surface;
 
@@ -205,8 +204,10 @@ pub struct ThermalParams {
     /// Temperature rise above the grip curve's peak over which wear speeds up by one
     /// rate, K.
     pub wear_window: f64,
-    /// Temperature of tread and carcass after a reset (out of the tyre blankets), °C.
-    pub start_temperature: f64,
+    /// Temperature of tread and carcass after a reset out of the tyre blankets, °C.
+    /// Without blankets the tyres start at the air's temperature.
+    #[serde(default)]
+    pub start_temperature: Option<f64>,
     /// Heat capacity of the whole tread surface layer / the carcass, J/K.
     pub surface_capacity: f64,
     pub core_capacity: f64,
@@ -263,14 +264,16 @@ pub struct TireCondition {
     /// Loose material on the tread by kind ([`crate::Coat`] order); the sum is 0 when clean and
     /// 1 when fully coated.
     pub coat: [f64; 3],
+    /// Temperature of the air the tyre was inflated in, °C: its cold pressure holds at it.
+    pub inflated_at: f64,
 }
 
 impl TireCondition {
-    /// Gauge pressure in bar of a tyre set to `cold` bar at the ambient temperature: the
-    /// air inside is at the carcass temperature.
+    /// Gauge pressure in bar of a tyre set to `cold` bar in the air it was inflated in:
+    /// the air inside is at the carcass temperature.
     #[inline]
     pub fn pressure(&self, cold: f64) -> f64 {
-        (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (AMBIENT_TEMPERATURE + KELVIN)
+        (cold + ATMOSPHERE) * (self.core_temperature + KELVIN) / (self.inflated_at + KELVIN)
             - ATMOSPHERE
     }
 
@@ -380,14 +383,16 @@ impl TireModel {
         1.0 / (1.0 + self.p.speed_sensitivity * slide_speed)
     }
 
-    /// A new tyre at its start temperature.
-    pub fn fresh(&self) -> TireCondition {
-        let t = self.p.thermal.start_temperature;
+    /// A new tyre inflated to its cold pressure in air at `air` °C, at its start
+    /// temperature: out of the blankets, or at the air's.
+    pub fn fresh(&self, air: f64) -> TireCondition {
+        let t = self.p.thermal.start_temperature.unwrap_or(air);
         TireCondition {
             tread_temperature: [t; 3],
             core_temperature: t,
             wear: 0.0,
             coat: [0.0; 3],
+            inflated_at: air,
         }
     }
 
@@ -587,6 +592,7 @@ impl TireModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AMBIENT_TEMPERATURE;
     use crate::params::CarModel;
 
     #[test]
@@ -626,7 +632,7 @@ mod tests {
     #[test]
     fn grass_coats_the_tread_and_the_road_wipes_it_off() {
         use crate::track::Coat;
-        let mut c = front().fresh();
+        let mut c = front().fresh(AMBIENT_TEMPERATURE);
         for _ in 0..20 {
             c.roll_dirt(Surface::Grass, 1.0, 1.0, 0.0);
         }
@@ -652,7 +658,7 @@ mod tests {
         c.roll_dirt(Surface::Asphalt, 0.0, 10.0, 10.0);
         assert!(rolled - c.dirt() > 5.0 * rolled * 10.0 / COAT_SHED_LENGTH[0] * 0.9);
         // Turf barely coats.
-        let mut t = front().fresh();
+        let mut t = front().fresh(AMBIENT_TEMPERATURE);
         t.roll_dirt(Surface::Turf, Surface::Turf.dirt(), 1.0, 0.0);
         assert!(t.dirt() < 0.02);
     }
@@ -669,6 +675,7 @@ mod tests {
                     core_temperature: temperature,
                     wear,
                     coat: [0.0; 3],
+                    inflated_at: AMBIENT_TEMPERATURE,
                 },
                 &even,
                 pressure,
@@ -688,7 +695,7 @@ mod tests {
         p.thermal.grip_curve = vec![(20.0, 1.4), (80.0, 2.0), (140.0, 1.6)];
         let tire = TireModel::new(p);
         let at = |temperature: f64| {
-            let mut c = tire.fresh();
+            let mut c = tire.fresh(AMBIENT_TEMPERATURE);
             c.tread_temperature = [temperature; 3];
             tire.condition_grip(&c, &[1.0 / 3.0; 3], tire.p.pressure.optimal)
         };
@@ -716,7 +723,7 @@ mod tests {
 
     #[test]
     fn pressure_follows_carcass_temperature() {
-        let mut c = front().fresh();
+        let mut c = front().fresh(AMBIENT_TEMPERATURE);
         c.core_temperature = AMBIENT_TEMPERATURE;
         assert!((c.pressure(1.4) - 1.4).abs() < 1e-12);
         c.core_temperature = 85.0;
@@ -726,6 +733,24 @@ mod tests {
             "{}",
             c.pressure(1.4)
         );
+    }
+
+    #[test]
+    fn cold_pressure_is_set_in_the_day_s_air() {
+        let tire = front();
+        let (mut winter, mut summer) = (tire.fresh(5.0), tire.fresh(35.0));
+        winter.core_temperature = 5.0;
+        assert!((winter.pressure(1.4) - 1.4).abs() < 1e-12);
+        // Warmed to the same carcass temperature, the tyre set on a cold day has taken
+        // in more air and runs higher.
+        winter.core_temperature = 85.0;
+        summer.core_temperature = 85.0;
+        let gain = winter.pressure(1.4) - summer.pressure(1.4);
+        assert!((0.25..0.35).contains(&gain), "{gain}");
+        // Without blankets the tyre starts at the air's temperature.
+        let mut p = tire.p.clone();
+        p.thermal.start_temperature = None;
+        assert_eq!(TireModel::new(p).fresh(5.0).core_temperature, 5.0);
     }
 
     #[test]
@@ -748,7 +773,7 @@ mod tests {
     #[test]
     fn sliding_heats_the_loaded_zone_and_wears_rolling_cools() {
         let tire = front();
-        let mut c = tire.fresh();
+        let mut c = tire.fresh(AMBIENT_TEMPERATURE);
         let load = [0.5, 0.3, 0.2];
         for _ in 0..3000 {
             tire.update_condition(
@@ -765,8 +790,9 @@ mod tests {
         }
         let [inner, middle, outer] = c.tread_temperature;
         assert!(inner > middle && middle > outer, "{c:?}");
-        assert!(outer > tire.p.thermal.start_temperature + 20.0, "{c:?}");
-        assert!(c.core_temperature > tire.p.thermal.start_temperature);
+        let start = tire.p.thermal.start_temperature.unwrap();
+        assert!(outer > start + 20.0, "{c:?}");
+        assert!(c.core_temperature > start);
         assert!(c.wear > 0.0);
         let (hot, wear) = (c.surface_temperature(&load), c.wear);
         for _ in 0..20_000 {

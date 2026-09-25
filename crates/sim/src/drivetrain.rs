@@ -588,8 +588,14 @@ pub fn step(
     // What the couplings gave the driveline, less what spun up the meshed shafts.
     let coupled = bodies[DRIVELINE].torque - out_torque - meshed_inertia * out_accel;
     let power = s.clutch_torque >= 0.0;
-    let eff = p.gearbox.efficiency;
+    // Thick cold gear oil churns, adding to the losses, which heat the gearbox.
+    let eff = 1.0 - (1.0 - p.gearbox.efficiency) * s.engine.heat.gearbox_loss;
     let input_torque = coupled * if power { eff } else { 1.0 / eff };
+    engine.thermal.heat_gearbox(
+        &mut s.engine.heat,
+        ((coupled - input_torque) * out).abs(),
+        dt,
+    );
     // An axle's differential: equal shares for the two wheels.
     let across = |d: &DifferentialParams, torque: f64, front: bool| {
         let [l, r] = axle(front);

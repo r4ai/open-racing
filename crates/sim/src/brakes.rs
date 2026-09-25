@@ -6,22 +6,23 @@
 //! Each wheel has three bodies: the disc, the caliper with its pads, pistons and fluid,
 //! and the rim with the hub. The friction heat goes into the disc and the caliper on
 //! every step; the bodies exchange heat with each other, the tyre and the air every
-//! [`crate::THERMAL_STEPS`] steps, as they change over seconds.
+//! [`crate::THERMAL_STEPS`] steps, as they change over seconds. The air reaches them
+//! through the ducts, with the car's airspeed, and is pumped through the discs' vanes
+//! as the wheel turns; thin air cools them less.
 
-use crate::AMBIENT_TEMPERATURE;
+use crate::Airflow;
 use crate::params::{BrakeParams, lookup};
 
 /// Specific heat of cast iron at brake temperatures, J/(kg·K).
 const IRON_HEAT_CAPACITY: f64 = 500.0;
 /// Disc mass per N·m of the wheel's brake torque when the car does not give it, kg.
 const DISC_MASS_PER_TORQUE: f64 = 0.0033;
-/// Cooling at the reference speed per kg of disc when the car does not give it, W/(K·kg).
+/// Cooling at the rated airspeed per kg of disc when the car does not give it, W/(K·kg).
 const DISC_COOLING_PER_MASS: f64 = 8.0;
-/// Rolling speed at which the cooling is given, m/s.
-const REFERENCE_SPEED: f64 = 50.0;
-/// Turbulent forced convection grows with the air's speed raised to this.
-const CONVECTION_EXPONENT: f64 = 0.8;
-/// Cooling at rest (natural convection) relative to that at the reference speed.
+/// Share of the air over the brakes that the ducts bring in with the car's airspeed; the
+/// rest the discs' vanes pump as the wheel turns.
+const DUCT_SHARE: f64 = 0.7;
+/// Cooling at rest (natural convection) relative to that at the rated airspeed.
 const STILL_AIR: f64 = 0.04;
 /// Radiating area of a disc (both faces and the vanes' openings) per kg, m²/kg, and its
 /// emissivity (oxidised iron).
@@ -42,7 +43,7 @@ const DISC_TO_CALIPER_PER_MASS: f64 = 0.3;
 const CALIPER_COOLING: f64 = 0.1;
 /// Conductance from the disc through its bell and the hub into the rim, W/K.
 const DISC_TO_RIM: f64 = 6.0;
-/// Heat capacity of the rim and hub, J/K, and their cooling at the reference speed, W/K.
+/// Heat capacity of the rim and hub, J/K, and their cooling at the rated airspeed, W/K.
 const RIM_CAPACITY: f64 = 8000.0;
 const RIM_COOLING: f64 = 30.0;
 /// Conductance from the rim into the tyre's carcass and the air inside it, W/K.
@@ -78,7 +79,7 @@ struct Axle {
     /// Heat capacities of the disc and the caliper, J/K.
     disc_capacity: f64,
     caliper_capacity: f64,
-    /// Cooling of the disc and the caliper at the reference speed, W/K.
+    /// Cooling of the disc and the caliper at the rated airspeed, W/K.
     disc_cooling: f64,
     caliper_cooling: f64,
     /// Disc to caliper conductance, W/K.
@@ -132,9 +133,9 @@ impl BrakeModel {
         &self.axles[usize::from(wheel >= 2)]
     }
 
-    /// A brake after a reset.
-    pub fn fresh(&self) -> BrakeState {
-        let (air, t) = (AMBIENT_TEMPERATURE, self.start_temperature);
+    /// A brake after a reset in air at `air` °C.
+    pub fn fresh(&self, air: f64) -> BrakeState {
+        let t = self.start_temperature.max(air);
         let mut s = BrakeState {
             disc: t,
             caliper: air + CALIPER_START * (t - air),
@@ -165,21 +166,23 @@ impl BrakeModel {
         lookup(&self.friction, s.disc) * (1.0 - VAPOUR_LOSS * vapour)
     }
 
-    /// Exchanges heat for `dt` between `wheel`'s disc, caliper and rim, the air at `air`
-    /// °C flowing at `speed` m/s (the wheel's rolling speed: the car's speed through the
-    /// ducts, the vanes' pumping) and the tyre's carcass at `tyre` °C. Returns the heat
-    /// flowing from the rim into the tyre, W.
+    /// Exchanges heat for `dt` between `wheel`'s disc, caliper and rim, the `air` the
+    /// ducts bring in, the air the vanes pump as the wheel rolls at `rolling` m/s, and
+    /// the tyre's carcass at `tyre` °C. Returns the heat flowing from the rim into the
+    /// tyre, W.
     pub fn exchange(
         &self,
         wheel: usize,
         s: &mut BrakeState,
-        speed: f64,
-        air: f64,
+        rolling: f64,
+        air: &Airflow,
         tyre: f64,
         dt: f64,
     ) -> f64 {
         let a = self.axle(wheel);
-        let flow = STILL_AIR + (speed.abs() / REFERENCE_SPEED).powf(CONVECTION_EXPONENT);
+        let speed = DUCT_SHARE * air.speed.max(0.0) + (1.0 - DUCT_SHARE) * rolling.abs();
+        let flow = STILL_AIR + air.convection(speed);
+        let air = air.temperature;
         let (disc_k, air_k) = (s.disc + KELVIN, air + KELVIN);
         let radiated = a.radiation * (disc_k.powi(4) - air_k.powi(4));
         let to_caliper = a.to_caliper * (s.disc - s.caliper);
@@ -198,25 +201,38 @@ impl BrakeModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CarModel;
+    use crate::{AIR_DENSITY, CarModel};
 
     fn gt3() -> BrakeModel {
         CarModel::gt3().brakes
     }
 
-    /// Runs the exchange of the front-left brake for `seconds` at `speed`, with the tyre's
-    /// carcass at 80 °C.
-    fn cool(m: &BrakeModel, s: &mut BrakeState, speed: f64, seconds: f64) {
+    /// Standard air flowing past a car driving at `speed` m/s in still air.
+    fn air(speed: f64) -> Airflow {
+        Airflow {
+            speed,
+            ..Airflow::STILL
+        }
+    }
+
+    /// Runs the exchange of the front-left brake for `seconds` in `air`, the wheel
+    /// rolling at `rolling`, with the tyre's carcass at 80 °C.
+    fn cool_in(m: &BrakeModel, s: &mut BrakeState, rolling: f64, air: &Airflow, seconds: f64) {
         let dt = 0.01;
         for _ in 0..(seconds / dt) as usize {
-            m.exchange(0, s, speed, 25.0, 80.0, dt);
+            m.exchange(0, s, rolling, air, 80.0, dt);
         }
+    }
+
+    /// Runs the exchange for `seconds` driving at `speed` in still standard air.
+    fn cool(m: &BrakeModel, s: &mut BrakeState, speed: f64, seconds: f64) {
+        cool_in(m, s, speed, &air(speed), seconds);
     }
 
     #[test]
     fn a_stop_heats_the_disc_by_its_share_of_the_energy() {
         let m = gt3();
-        let mut s = m.fresh();
+        let mut s = m.fresh(25.0);
         // A GT3 car from 250 to 80 km/h: 0.86 MJ into each front brake.
         m.heat(0, &mut s, 0.86e6);
         let rise = s.disc - m.start_temperature;
@@ -228,9 +244,9 @@ mod tests {
     fn pads_bite_less_cold_and_fade_overheated() {
         let m = gt3();
         let at = |disc: f64| {
-            let mut s = m.fresh();
+            let mut s = m.fresh(25.0);
             s.disc = disc;
-            m.exchange(0, &mut s, 0.0, 25.0, 80.0, 0.0);
+            m.exchange(0, &mut s, 0.0, &air(0.0), 80.0, 0.0);
             s.effectiveness
         };
         assert!((at(500.0) - 1.0).abs() < 1e-9);
@@ -241,13 +257,13 @@ mod tests {
     #[test]
     fn boiling_fluid_takes_the_pressure() {
         let m = gt3();
-        let mut s = m.fresh();
+        let mut s = m.fresh(25.0);
         s.disc = 500.0;
         s.caliper = m.fluid_boiling_point - 10.0;
-        m.exchange(0, &mut s, 0.0, 25.0, 80.0, 0.0);
+        m.exchange(0, &mut s, 0.0, &air(0.0), 80.0, 0.0);
         let sound = s.effectiveness;
         s.caliper = m.fluid_boiling_point + VAPOUR_BAND;
-        m.exchange(0, &mut s, 0.0, 25.0, 80.0, 0.0);
+        m.exchange(0, &mut s, 0.0, &air(0.0), 80.0, 0.0);
         assert!(
             s.effectiveness < 0.5 * sound,
             "{} vs {sound}",
@@ -284,10 +300,67 @@ mod tests {
     #[test]
     fn a_hot_rim_heats_the_tyre() {
         let m = gt3();
-        let mut s = m.fresh();
+        let mut s = m.fresh(25.0);
         s.rim = 120.0;
-        assert!(m.exchange(0, &mut s, 30.0, 25.0, 80.0, 0.01) > 0.0);
+        assert!(m.exchange(0, &mut s, 30.0, &air(30.0), 80.0, 0.01) > 0.0);
         s.rim = 40.0;
-        assert!(m.exchange(0, &mut s, 30.0, 25.0, 80.0, 0.01) < 0.0);
+        assert!(m.exchange(0, &mut s, 30.0, &air(30.0), 80.0, 0.01) < 0.0);
+    }
+
+    #[test]
+    fn a_reset_starts_the_caliper_and_rim_from_the_air() {
+        let m = gt3();
+        let (cold, hot) = (m.fresh(0.0), m.fresh(35.0));
+        assert_eq!(cold.disc, hot.disc);
+        assert!(cold.caliper < hot.caliper - 20.0 && cold.rim < hot.rim - 25.0);
+        assert!((cold.rim..cold.disc).contains(&cold.caliper));
+    }
+
+    #[test]
+    fn ducts_cool_a_locked_wheel_and_a_headwind_cools_more() {
+        let m = gt3();
+        let hot = BrakeState {
+            disc: 700.0,
+            caliper: 150.0,
+            rim: 60.0,
+            effectiveness: 1.0,
+        };
+        let (mut locked, mut still) = (hot, hot);
+        cool_in(&m, &mut locked, 0.0, &air(40.0), 5.0);
+        cool_in(&m, &mut still, 0.0, &air(0.0), 5.0);
+        assert!(
+            locked.disc < still.disc - 25.0,
+            "{} / {}",
+            locked.disc,
+            still.disc
+        );
+        let (mut headwind, mut calm) = (hot, hot);
+        cool_in(&m, &mut headwind, 30.0, &air(40.0), 5.0);
+        cool_in(&m, &mut calm, 30.0, &air(30.0), 5.0);
+        assert!(
+            headwind.disc < calm.disc - 5.0,
+            "{} / {}",
+            headwind.disc,
+            calm.disc
+        );
+    }
+
+    #[test]
+    fn thin_air_cools_less() {
+        let m = gt3();
+        let hot = BrakeState {
+            disc: 700.0,
+            caliper: 150.0,
+            rim: 60.0,
+            effectiveness: 1.0,
+        };
+        let thin = Airflow {
+            density: 0.8 * AIR_DENSITY,
+            ..air(50.0)
+        };
+        let (mut sea, mut high) = (hot, hot);
+        cool_in(&m, &mut sea, 50.0, &air(50.0), 5.0);
+        cool_in(&m, &mut high, 50.0, &thin, 5.0);
+        assert!(high.disc > sea.disc + 5.0, "{} / {}", high.disc, sea.disc);
     }
 }

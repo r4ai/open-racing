@@ -162,6 +162,10 @@ pub struct EngineParams {
     /// Radiator, oil cooler and thermostat.
     #[serde(default)]
     pub cooling: CoolingParams,
+    /// Where the engine sits: the hot air from its bay flows past the tyres of the axle
+    /// nearest to it.
+    #[serde(default)]
+    pub position: EnginePosition,
     /// Engine speed above which the valvetrain wears, rpm: the valves float and the
     /// springs and bearings are overloaded. 7 % above the limiter when left out.
     #[serde(default)]
@@ -195,6 +199,25 @@ impl Default for CoolingParams {
             boiling_point: 125.0,
             fan: true,
         }
+    }
+}
+
+/// Where the engine sits in the car.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnginePosition {
+    /// Ahead of the cabin: its bay's air flows out past the front tyres.
+    #[default]
+    Front,
+    /// Behind the cabin, ahead of the rear axle, or behind it: its bay's air flows out
+    /// past the rear tyres.
+    Mid,
+    Rear,
+}
+
+impl EnginePosition {
+    /// Whether the engine sits nearer the front axle.
+    pub fn front(self) -> bool {
+        self == Self::Front
     }
 }
 

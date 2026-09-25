@@ -13,7 +13,11 @@
 //! - Wheels spin under drive, brake and road torque; brakes lock the wheel exactly. The
 //!   brakes' friction follows their temperature; their heat reaches the tyres through
 //!   the rims.
-//! - The engine's parts heat and cool, and with failures on, wear out.
+//! - The engine's parts heat and cool, and with failures on, wear out. The engine's bay
+//!   warms the intake air, the gearbox and the tyres nearest to it.
+//! - Everything starts from the weather: the brakes and the engine are warmed in the
+//!   day's air, and the tyres are inflated in it. The air's temperature, density and
+//!   the wind set the cooling.
 //! - Aerodynamics: elements (body, wings, floor) whose coefficients follow their angle
 //!   of attack (the car's pitch), the floor's ride height under them, the
 //!   sideslip and the damage the car has taken.
@@ -31,8 +35,8 @@ use crate::evolution::TrackEvolution;
 use crate::params::{CarModel, DAMAGE_ZONES, SteeringParams, lookup};
 use crate::tire::TireCondition;
 use crate::track::{Surface, Track};
-use crate::weather::Weather;
-use crate::{DT, FL, GRAVITY, RL, THERMAL_STEPS};
+use crate::weather::{Air, Weather};
+use crate::{Airflow, DT, FL, GRAVITY, KELVIN, RL, THERMAL_STEPS};
 
 /// Below this speed a slip-velocity damping term is blended in so the relaxation
 /// length model does not oscillate at standstill.
@@ -50,6 +54,9 @@ const TRAIL_REVERSAL_SPEED: f64 = 0.5;
 /// How far the air around a tyre is from the air temperature towards the road's: the
 /// air in the first centimetres over sunlit asphalt is well above the air temperature.
 const NEAR_ROAD_AIR: f64 = 0.2;
+/// How far the air around the tyres nearest the engine is from the air temperature
+/// towards the engine bay's, whose air flows out past them.
+const NEAR_BAY_AIR: f64 = 0.15;
 /// Impact speed into a wall that leaves no damage, m/s.
 const DAMAGE_THRESHOLD: f64 = 2.0;
 /// Pa per hPa.
@@ -227,13 +234,29 @@ impl Car {
         car
     }
 
+    /// Places the car as [`Self::new`] does, in standard weather.
     pub fn reset(&mut self, track: &Track, s: f64, d: f64, speed: f64, gear: i32) {
+        self.reset_in(track, &STANDARD_WEATHER, s, d, speed, gear);
+    }
+
+    /// Places the car as [`Self::new`] does, in `weather`: the brakes and the engine
+    /// warmed on the way out in the air there, the tyres inflated in it.
+    pub fn reset_in(
+        &mut self,
+        track: &Track,
+        weather: &Weather,
+        s: f64,
+        d: f64,
+        speed: f64,
+        gear: i32,
+    ) {
         let m = &*self.model;
         let (surface, tangent, normal) = track.pose_at(s, d);
         let x = (tangent - normal * tangent.dot(normal)).normalize();
         let y = normal.cross(x);
         let orientation = DQuat::from_mat3(&DMat3::from_cols(x, y, normal)).normalize();
         let hint = track.nearest_index(surface);
+        let air = weather.air_at(surface + normal * m.params.cg_height);
 
         let mut wheels = [WheelState::default(); 4];
         for (i, (w, corner)) in wheels.iter_mut().zip(&m.corners).enumerate() {
@@ -242,8 +265,8 @@ impl Car {
                 extension: corner.static_extension,
                 spin: speed / tire.p.radius,
                 hint,
-                tire: tire.fresh(),
-                brake: m.brakes.fresh(),
+                tire: tire.fresh(air.temperature),
+                brake: m.brakes.fresh(air.temperature),
                 ..Default::default()
             };
         }
@@ -256,6 +279,7 @@ impl Car {
             drivetrain.input_speed = wheel_spin * ratio;
         }
         drivetrain.engine = m.engine.settled(drivetrain.rpm(), 0.0);
+        drivetrain.engine.heat = m.engine.thermal.warmed(air.temperature, air.density);
 
         self.state = CarState {
             position: surface + normal * m.params.cg_height,
@@ -335,6 +359,10 @@ impl Car {
         let omega = st.angular_velocity;
         let steer = steer_angles(model, c.steer_wheel_angle);
         let air = weather.air_at(st.position);
+        let (engine_bay, intake) = {
+            let h = &st.drivetrain.engine.heat;
+            (h.bay, h.intake)
+        };
 
         // ---- Tyres ---------------------------------------------------------------
         // Per wheel: tyre force in body coordinates, application point, road torque.
@@ -460,6 +488,11 @@ impl Car {
             let rolling_resistance = tire.rolling_resistance(pressure);
             let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
             let road = weather.road_temperature(q.s, q.d);
+            let bay = if corner.front == p.engine.position.front() {
+                NEAR_BAY_AIR * (engine_bay - air.temperature)
+            } else {
+                0.0
+            };
             tire.update_condition(
                 &mut w.tire,
                 &tread_load,
@@ -467,7 +500,7 @@ impl Car {
                 rolling_resistance * fz * speed,
                 speed,
                 fz > 0.0,
-                air.temperature + NEAR_ROAD_AIR * (road - air.temperature),
+                air.temperature + NEAR_ROAD_AIR * (road - air.temperature) + bay,
                 road,
                 dt,
             );
@@ -515,11 +548,7 @@ impl Car {
                 clutch_pedal: c.clutch,
                 shift: c.shift,
                 selector: c.selector,
-                air: Ambient {
-                    pressure: air.pressure * HECTOPASCAL,
-                    temperature: air.temperature,
-                    charge: air.engine * STANDARD_PRESSURE / (air.pressure * HECTOPASCAL),
-                },
+                air: intake_air(&air, intake),
                 wheel_speed: st.wheels.map(|w| w.spin),
                 wheel_torque: road_torque,
                 wheel_inertia: [0, 1, 2, 3].map(|i| model.axle(i).wheel_inertia),
@@ -700,13 +729,18 @@ impl Car {
         // ---- Heat among the brakes' and the engine's parts and the air ----------------
         if st.steps.is_multiple_of(THERMAL_STEPS) {
             let dt = THERMAL_STEPS as f64 * dt;
+            let airflow = Airflow {
+                speed: v_body.x,
+                temperature: air.temperature,
+                density: air.density,
+            };
             for (i, w) in st.wheels.iter_mut().enumerate() {
                 let tire = model.tire(i);
                 let to_tyre = model.brakes.exchange(
                     i,
                     &mut w.brake,
                     w.spin * tire.p.radius,
-                    air.temperature,
+                    &airflow,
                     w.tire.core_temperature,
                     dt,
                 );
@@ -716,8 +750,7 @@ impl Car {
             model.engine.thermal.exchange(
                 &mut d.engine.heat,
                 d.engine_speed,
-                v_body.x,
-                air.temperature,
+                &airflow,
                 st.damage[0],
                 self.realism.failures,
                 dt,
@@ -730,6 +763,18 @@ impl Car {
 /// Ride height of the floor at the front / rear axle: the static ride height raised by
 /// how far the springs have extended and lowered by how far the tyres are deflected,
 /// from rest.
+/// The air the engine breathes: the weather's `air` at the pressure there, warmed to
+/// `intake` °C in the intake, which thins the charge (SAE J1349's temperature term).
+fn intake_air(air: &Air, intake: f64) -> Ambient {
+    let pressure = air.pressure * HECTOPASCAL;
+    let warming = ((air.temperature + KELVIN) / (intake + KELVIN)).sqrt();
+    Ambient {
+        pressure,
+        temperature: intake,
+        charge: air.engine * STANDARD_PRESSURE / pressure * warming,
+    }
+}
+
 fn ride_heights(model: &CarModel, st: &CarState, deflection: &[f64; 4]) -> [f64; 2] {
     let lift = |i: usize| {
         let c = &model.corners[i];

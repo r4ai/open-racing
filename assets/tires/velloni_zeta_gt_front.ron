@@ -37,7 +37,7 @@
         // Grip against the tread surface temperature, °C.
         grip_curve: [(-10.0, 0.853), (27.5, 0.881), (60.0, 0.955), (90.0, 1.0), (111.0, 0.955), (133.75, 0.881), (160.0, 0.853)],
         wear_window: 35.0,
-        start_temperature: 75.0,         // out of the tyre blankets
+        start_temperature: Some(75.0),         // out of the tyre blankets
         surface_capacity: 1500.0,
         core_capacity: 15000.0,
         core_conductance: 120.0,

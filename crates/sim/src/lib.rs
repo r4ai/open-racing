@@ -33,7 +33,7 @@ pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{
     AeroElement, AntiStall, CarModel, CarParams, CoolingParams, Drive, DualClutchControl,
-    ElectronicsParams, GearboxKind, ParamsError, ThrottleKind, TurboParams,
+    ElectronicsParams, EnginePosition, GearboxKind, ParamsError, ThrottleKind, TurboParams,
 };
 pub use tire::TireCondition;
 pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};
@@ -54,6 +54,48 @@ pub const AIR_DENSITY: f64 = 1.225;
 
 /// Air and road temperature in °C.
 pub const AMBIENT_TEMPERATURE: f64 = 25.0;
+
+/// 0 °C in K.
+pub const KELVIN: f64 = 273.15;
+
+/// Air speed at which the coolers and the brakes' cooling are rated, m/s, in air of
+/// [`AIR_DENSITY`].
+pub const RATED_AIRSPEED: f64 = 50.0;
+
+/// Air flowing over a part of the car.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Airflow {
+    /// Speed of the air past the car, m/s: its forward airspeed, the wind included.
+    pub speed: f64,
+    /// °C.
+    pub temperature: f64,
+    /// kg/m³.
+    pub density: f64,
+}
+
+impl Airflow {
+    /// Still standard air.
+    pub const STILL: Self = Self {
+        speed: 0.0,
+        temperature: AMBIENT_TEMPERATURE,
+        density: AIR_DENSITY,
+    };
+
+    /// Turbulent forced convection of air at `speed` m/s of this density, relative to
+    /// that at the rated airspeed in standard air: it goes with the Reynolds number
+    /// (∝ ρ·v) raised to 0.8, so thin air, high or hot, cools less.
+    #[inline]
+    pub fn convection(&self, speed: f64) -> f64 {
+        (self.density / AIR_DENSITY * speed.max(0.0) / RATED_AIRSPEED).powf(0.8)
+    }
+
+    /// Mass flow of this air at `speed` relative to that at the rated airspeed in
+    /// standard air.
+    #[inline]
+    pub fn mass_flow(&self, speed: f64) -> f64 {
+        self.density / AIR_DENSITY * speed.max(0.0) / RATED_AIRSPEED
+    }
+}
 
 /// Wheel index order used everywhere: front-left, front-right, rear-left, rear-right.
 pub const FL: usize = 0;
