@@ -596,6 +596,22 @@ pub struct PaintLine {
     pub dash: Option<(f64, f64)>,
 }
 
+/// A mark painted across a road: a start/finish line, a grid slot, a pit lane's
+/// speed limit line. Drawn only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    pub name: String,
+    /// Where its middle is along the road, as a spline parameter.
+    pub at: f64,
+    /// How long it is along the road, m.
+    pub length: f64,
+    /// Where it runs across, m from the road's centre, positive to the left: from its
+    /// right end to its left.
+    pub from: f64,
+    pub to: f64,
+    pub material: MaterialId,
+}
+
 /// A wall, guard rail or fence the cars collide with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Barrier {
@@ -639,6 +655,9 @@ pub struct Road {
     pub right: Vec<Strip>,
     pub lines: Vec<PaintLine>,
     pub barriers: Vec<Barrier>,
+    /// Marks painted across it: the start line, grid slots, pit lane lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<Mark>,
     /// Spacing of the cross-sections the road is built from, m.
     pub resolution: f64,
 }
@@ -720,6 +739,9 @@ impl Road {
         for r in ranges {
             shift(&mut r.from);
             shift(&mut r.to);
+        }
+        for m in &mut self.marks {
+            shift(&mut m.at);
         }
     }
 }
@@ -950,6 +972,7 @@ impl Project {
                 })
                 .to_vec(),
             barriers: vec![barrier(Side::Left), barrier(Side::Right)],
+            marks: vec![],
             resolution: 2.0,
         };
         Self {
@@ -1072,7 +1095,8 @@ impl Project {
                 .into_iter()
                 .chain(strips.map(|s| &s.material))
                 .chain(r.lines.iter().map(|l| &l.material))
-                .chain(r.barriers.iter().map(|b| &b.material));
+                .chain(r.barriers.iter().map(|b| &b.material))
+                .chain(r.marks.iter().map(|m| &m.material));
             for s in surfaces {
                 if self.surface_index(s).is_none() {
                     return invalid(format!("road \"{}\": no surface named \"{s}\"", r.name));
@@ -1110,6 +1134,15 @@ impl Project {
             }
             if r.resolution < 0.25 {
                 return invalid(format!("road \"{}\": resolution under 0.25 m", r.name));
+            }
+            if r.marks
+                .iter()
+                .any(|m| !(m.length > 0.0 && m.to > m.from && m.at.is_finite()))
+            {
+                return invalid(format!(
+                    "road \"{}\": a mark needs a length and to run from right to left",
+                    r.name
+                ));
             }
             if r.left.iter().chain(&r.right).any(|s| s.width < 0.0) {
                 return invalid(format!("road \"{}\": a strip has a negative width", r.name));

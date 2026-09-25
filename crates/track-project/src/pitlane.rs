@@ -6,7 +6,7 @@ use glam::DVec3;
 use crate::Error;
 use crate::curve::Sampled;
 use crate::ops::{Curve, Op};
-use crate::project::{Barrier, Key, Pit, Project, Range, Side};
+use crate::project::{Barrier, Key, Mark, PaintLine, Pit, Project, Range, Side};
 
 /// What pit lane to lay.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,6 +150,37 @@ pub fn ops(project: &Project, name: &str, plan: &Plan) -> Result<Vec<Op>, Error>
             corner: None,
         },
     });
+    // White lines along both edges, and across the lane where the speed limit starts
+    // and ends: where it has moved out beside the track and before it moves back.
+    let paint = paint_material(project);
+    let edge = |name: &str, offset: f64| Op::PutLine {
+        road: name.to_string(),
+        line: PaintLine {
+            name: format!("{} edge", if offset > 0.0 { "left" } else { "right" }),
+            offset,
+            width: 0.15,
+            material: paint.clone(),
+            ranges: vec![],
+            dash: None,
+        },
+    };
+    let limit = |mark: &str, at: f64| Op::PutMark {
+        road: name.to_string(),
+        mark: Mark {
+            name: mark.to_string(),
+            at,
+            length: 0.4,
+            from: -half,
+            to: half,
+            material: paint.clone(),
+        },
+    };
+    let lines = vec![
+        edge(name, half - 0.25),
+        edge(name, -(half - 0.25)),
+        limit("speed limit", first),
+        limit("speed limit end", last),
+    ];
     Ok(vec![
         Op::AddRoad {
             name: name.to_string(),
@@ -170,8 +201,74 @@ pub fn ops(project: &Project, name: &str, plan: &Plan) -> Result<Vec<Op>, Error>
         },
     ]
     .into_iter()
+    .chain(lines)
     .chain(walls)
     .collect())
+}
+
+/// White paint, or else the project's first material.
+fn paint_material(project: &Project) -> String {
+    project
+        .material_index("paint")
+        .or((!project.materials.is_empty()).then_some(0))
+        .map_or("paint".into(), |i| project.materials[i].name.clone())
+}
+
+/// The operations that paint the start/finish line across the main road and a line
+/// at the front of each grid slot, in place of those painted before.
+pub fn start_and_grid(project: &Project) -> Vec<Op> {
+    let Some(main) = project.road(&project.main_road) else {
+        return vec![];
+    };
+    let smp = Sampled::new(main, main.resolution);
+    let m = &project.markers;
+    let start = smp.s_at(m.start);
+    let f = smp.frame_at(start);
+    let paint = paint_material(project);
+    let road = main.name.clone();
+    let mut ops: Vec<Op> = main
+        .marks
+        .iter()
+        .filter(|k| k.name == "start line" || k.name.starts_with("grid "))
+        .map(|k| Op::RemoveMark {
+            road: road.clone(),
+            name: k.name.clone(),
+        })
+        .collect();
+    ops.push(Op::PutMark {
+        road: road.clone(),
+        mark: Mark {
+            name: "start line".into(),
+            at: m.start,
+            length: 0.8,
+            from: -f.width_right,
+            to: f.width_left,
+            material: paint.clone(),
+        },
+    });
+    // Each slot's line a car's half length ahead of where it stands.
+    for i in 0..m.grid.count {
+        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let s = start - (m.grid.behind + i as f64 * m.grid.spacing) + 2.5;
+        let d = m.grid.pole.sign() * side * m.grid.stagger;
+        let at = if smp.closed {
+            smp.u_at(s.rem_euclid(smp.length))
+        } else {
+            smp.u_at(s.max(0.0))
+        };
+        ops.push(Op::PutMark {
+            road: road.clone(),
+            mark: Mark {
+                name: format!("grid {}", i + 1),
+                at,
+                length: 0.2,
+                from: d - 1.2,
+                to: d + 1.2,
+                material: paint.clone(),
+            },
+        });
+    }
+    ops
 }
 
 /// Concrete for the pit wall, or else the project's first material.
@@ -222,5 +319,35 @@ mod tests {
             ..plan
         };
         assert!(super::ops(&p, "pit2", &short).is_err());
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+    use crate::ops::apply_all;
+
+    #[test]
+    fn paints_the_lane_s_lines_and_the_start_and_grid_once() {
+        let mut p = Project::new("paint");
+        let ops = ops(&p, "pit", &Plan::around_start(&p)).unwrap();
+        apply_all(&mut p, &ops).unwrap();
+        let lane = p.road("pit").unwrap();
+        assert_eq!(lane.lines.len(), 2);
+        assert_eq!(lane.marks.len(), 2);
+        for _ in 0..2 {
+            let ops = start_and_grid(&p);
+            apply_all(&mut p, &ops).unwrap();
+        }
+        let main = p.road("circuit").unwrap();
+        assert_eq!(main.marks.len(), 1 + p.markers.grid.count);
+        // Built as meshes over the road.
+        let b = crate::road::build(&p, 0);
+        let lines = b
+            .visual
+            .iter()
+            .filter(|v| v.layer == crate::road::Layer::Line)
+            .count();
+        assert!(lines >= main.marks.len());
     }
 }

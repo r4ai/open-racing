@@ -328,6 +328,47 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         );
     }
 
+    // Marks across the road, a little over the lines so that they cross them cleanly.
+    let spacing = sampled.length / frames.len().max(1) as f64;
+    for mark in &road.marks {
+        let mid = sampled.s_at(mark.at);
+        let across = ((mark.to - mark.from) / 0.5).ceil().max(1.0) as usize;
+        let mut mesh = MeshData::default();
+        for k in 0..=2 {
+            let s = mid + mark.length * (k as f64 / 2.0 - 0.5);
+            let f = sampled.frame_at(s);
+            let near = if sampled.closed {
+                ((s / spacing).round() as isize).rem_euclid(frames.len() as isize) as usize
+            } else {
+                ((s / spacing).round().max(0.0) as usize).min(frames.len() - 1)
+            };
+            for c in 0..=across {
+                let d = mark.from + (mark.to - mark.from) * c as f64 / across as f64;
+                let h = surface_height(road, &f, &outlines[near], d) + 2.0 * PAINT_LIFT;
+                mesh.positions.push(point(&f, d, h).as_vec3().to_array());
+                mesh.normals.push(f.normal.as_vec3().to_array());
+                mesh.uvs.push([
+                    ((d - mark.from) / mark.length.max(0.01)) as f32,
+                    k as f32 * 0.5,
+                ]);
+            }
+        }
+        let w = (across + 1) as u32;
+        for k in 0..2u32 {
+            for c in 0..across as u32 {
+                let (a, b) = (k * w + c, (k + 1) * w + c);
+                // Facing up: along × across.
+                mesh.indices.extend([a, b, a + 1, a + 1, b, b + 1]);
+            }
+        }
+        visual.push(VisualPart {
+            layer: Layer::Line,
+            material: material(&mark.material),
+            cast_shadows: false,
+            mesh,
+        });
+    }
+
     // Barriers: faces towards the road, over the top and away from it.
     let mut models = Vec::new();
     for barrier in &road.barriers {

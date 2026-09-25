@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::project::{
-    Barrier, Grid, HandleMode, Key, MaterialDef, NamedSurface, Node, NodeHandles, PaintLine, Pit,
-    Project, Prop, Reference, Road, Shape, Side, Spline, StationCurve, Strip, StripStyle, Terrain,
-    WallStyle,
+    Barrier, Grid, HandleMode, Key, Mark, MaterialDef, NamedSurface, Node, NodeHandles, PaintLine,
+    Pit, Project, Prop, Reference, Road, Shape, Side, Spline, StationCurve, Strip, StripStyle,
+    Terrain, WallStyle,
 };
 
 /// Which profile along a road.
@@ -152,6 +152,15 @@ pub enum Op {
         barrier: Barrier,
     },
     RemoveBarrier {
+        road: String,
+        name: String,
+    },
+    /// Paints a mark across a road, or replaces the one of the same name.
+    PutMark {
+        road: String,
+        mark: Mark,
+    },
+    RemoveMark {
         road: String,
         name: String,
     },
@@ -365,6 +374,7 @@ fn plain_road(project: &Project, name: String, closed: bool, nodes: Vec<Node>) -
         right: vec![],
         lines: vec![],
         barriers: vec![],
+        marks: vec![],
         resolution: 2.0,
     }
 }
@@ -398,6 +408,7 @@ impl Op {
                         r.right.retain(|s| s.ranges.is_empty());
                         r.lines.retain(|l| l.ranges.is_empty());
                         r.barriers.retain(|b| b.ranges.is_empty());
+                        r.marks.clear();
                         Road {
                             name,
                             closed,
@@ -642,6 +653,12 @@ impl Op {
                     &b.name
                 })?
             }
+            Op::PutMark { road, mark } => {
+                put(&mut road_mut(p, &road)?.marks, mark, |m| &m.name, None)
+            }
+            Op::RemoveMark { road, name } => {
+                remove(&mut road_mut(p, &road)?.marks, "mark", &name, |m| &m.name)?
+            }
             Op::SetMarkers {
                 start,
                 sectors,
@@ -812,6 +829,8 @@ impl Op {
             Op::RemoveLine { .. } => "RemoveLine",
             Op::PutBarrier { .. } => "PutBarrier",
             Op::RemoveBarrier { .. } => "RemoveBarrier",
+            Op::PutMark { .. } => "PutMark",
+            Op::RemoveMark { .. } => "RemoveMark",
             Op::PutSpline { .. } => "PutSpline",
             Op::RemoveSpline { .. } => "RemoveSpline",
             Op::RenameSpline { .. } => "RenameSpline",

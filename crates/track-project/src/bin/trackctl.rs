@@ -151,6 +151,9 @@ enum Command {
         #[arg(long, default_value_t = 20.0)]
         wall_offset: f64,
     },
+    /// Paints the start/finish line across the main road and a line at the front of
+    /// each grid slot, in place of those painted before.
+    Paint { project: String },
     /// Bakes the project and checks the package, without saving it.
     Check {
         project: String,
@@ -402,6 +405,17 @@ fn run(cli: Cli) -> Result<(), Error> {
             ops::apply_all(&mut p, &list)?;
             p.save(&dir)?;
             println!("kerbed {} corners of \"{name}\"", found.len());
+        }
+        Command::Paint { project } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let list = pitlane::start_and_grid(&p);
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            println!(
+                "painted the start line and {} grid slots",
+                p.markers.grid.count
+            );
         }
         Command::Check { project, lap } => {
             let dir = resolve(&project);

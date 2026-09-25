@@ -364,6 +364,7 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
         }
     }
     ui.weak("Offsets are from the road's centre, positive to the left.");
+    marks_ui(ui, c, r, &road, node);
     if ui.button("+ Line").clicked() {
         let n = (1..)
             .map(|k| format!("line {k}"))
@@ -385,6 +386,93 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             None,
         );
     }
+}
+
+/// Marks painted across the road: the start line, grid slots, pit lane lines.
+fn marks_ui(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    r: usize,
+    road: &open_racing_track_project::Road,
+    node: Option<usize>,
+) {
+    let (_, materials) = names(&c.editor.project);
+    let period = road.period();
+    section(
+        ui,
+        format!("Marks across ({})", road.marks.len()),
+        ("marks", r),
+        false,
+        |ui| {
+            let mut remove = None;
+            for (i, before) in road.marks.iter().enumerate() {
+                let mut m = before.clone();
+                egui::CollapsingHeader::new(format!("{}  ·  u {:.2}", m.name, m.at))
+                    .id_salt(("mark", r, i))
+                    .show(ui, |ui| {
+                        drag(ui, "At u", &mut m.at, 0.005, 0.0..=period);
+                        drag(ui, "Length m", &mut m.length, 0.01, 0.01..=20.0);
+                        drag(ui, "From m", &mut m.from, 0.05, -100.0..=100.0);
+                        drag(ui, "To m", &mut m.to, 0.05, -100.0..=100.0);
+                        combo_row(ui, "Material", ("mm", r, i), &mut m.material, &materials);
+                        if row(ui, "", |ui| ui.button("Remove mark").clicked()) {
+                            remove = Some(m.name.clone());
+                        }
+                    });
+                if m != *before && m.to > m.from {
+                    c.editor.apply(
+                        vec![Op::PutMark {
+                            road: road.name.clone(),
+                            mark: m,
+                        }],
+                        Some(&format!("mark {} {i}", road.name)),
+                    );
+                }
+            }
+            if let Some(name) = remove {
+                c.editor.apply(
+                    vec![Op::RemoveMark {
+                        road: road.name.clone(),
+                        name,
+                    }],
+                    None,
+                );
+            }
+            let label = match node {
+                Some(n) => format!("+ Mark at node {n}"),
+                None => "+ Mark at the start".into(),
+            };
+            if ui.small_button(label).clicked() {
+                let name =
+                    crate::presets::free_name("mark", |n| road.marks.iter().any(|m| m.name == n));
+                let (l, rt) = (
+                    road.width_left
+                        .eval(node.unwrap_or(0) as f64, period, road.closed),
+                    road.width_right
+                        .eval(node.unwrap_or(0) as f64, period, road.closed),
+                );
+                let mark = open_racing_track_project::project::Mark {
+                    name,
+                    at: node.unwrap_or(0) as f64,
+                    length: 0.5,
+                    from: -rt,
+                    to: l,
+                    material: if c.editor.project.material_index("paint").is_some() {
+                        "paint".into()
+                    } else {
+                        materials.first().cloned().unwrap_or_default()
+                    },
+                };
+                c.editor.apply(
+                    vec![Op::PutMark {
+                        road: road.name.clone(),
+                        mark,
+                    }],
+                    None,
+                );
+            }
+        },
+    );
 }
 
 pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {

@@ -149,6 +149,7 @@ pub(super) fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut St
             }
         });
     });
+    let mut paint = false;
     section(ui, "Grid", "grid", true, |ui| {
         let g: &mut Grid = &mut m.grid;
         let mut count = g.count as f64;
@@ -164,7 +165,22 @@ pub(super) fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut St
                 &[(Side::Left, "Left"), (Side::Right, "Right")],
             )
         });
+        row(ui, "", |ui| {
+            if ui
+                .button("Paint start line & grid")
+                .on_hover_text("White lines across the main road at the start line and at the front of each slot, in place of those painted before")
+                .clicked()
+            {
+                paint = true;
+            }
+        });
     });
+    if paint {
+        let ops = open_racing_track_project::pitlane::start_and_grid(&editor.project);
+        if editor.apply(ops, None) {
+            editor.status = "painted the start line and grid".into();
+        }
+    }
     if changed {
         editor.apply(
             vec![Op::SetMarkers {
