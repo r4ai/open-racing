@@ -14,7 +14,7 @@ use open_racing_track_project::project::{
 use open_racing_track_project::{Project, projects_dir};
 
 use crate::jobs::Jobs;
-use crate::preview::Built;
+use crate::profile::{ProfileView, profile};
 use crate::state::Editor;
 use crate::viewport::{Orbit, ViewRect, frame_selection};
 
@@ -36,6 +36,7 @@ pub struct UiState {
     new_surface: String,
     new_material: String,
     rename: Option<(usize, String)>,
+    profile: ProfileView,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45,7 +46,6 @@ pub fn ui(
     mut jobs: ResMut<Jobs>,
     mut orbit: ResMut<Orbit>,
     mut rect: ResMut<ViewRect>,
-    built: Res<Built>,
     mut state: Local<UiState>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) -> Result {
@@ -165,7 +165,7 @@ pub fn ui(
         .default_size(190.0)
         .show(&mut root, |ui| {
             ui.columns(2, |cols| {
-                profile(&mut cols[0], editor, &built);
+                profile(&mut cols[0], editor, &mut state.profile);
                 egui::ScrollArea::vertical()
                     .id_salt("report")
                     .show(&mut cols[1], |ui| {
@@ -1168,131 +1168,4 @@ fn materials_inspector(ui: &mut egui::Ui, editor: &mut Editor, state: &mut UiSta
             }
         }
     });
-}
-
-/// The selected road's elevation along its length, with its nodes: drag a node up or
-/// down to change its height; click one to select it.
-fn profile(ui: &mut egui::Ui, editor: &mut Editor, built: &Built) {
-    let Some(r) = editor
-        .selection
-        .road
-        .filter(|&r| r < editor.project.roads.len())
-    else {
-        return;
-    };
-    let Some(smp) = built.roads.get(r) else {
-        return;
-    };
-    if smp.frames.is_empty() {
-        return;
-    }
-    let road = editor.project.roads[r].clone();
-    ui.strong(format!(
-        "Elevation of \"{}\" ({:.0} m)",
-        road.name, smp.length
-    ));
-    let size = ui.available_size();
-    let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(60.0)),
-        egui::Sense::click_and_drag(),
-    );
-    let rect = resp.rect.shrink(8.0);
-    painter.rect_filled(resp.rect, 4.0, egui::Color32::from_gray(24));
-    let (zmin, zmax) = smp
-        .frames
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), f| {
-            (a.min(f.pos.z), b.max(f.pos.z))
-        });
-    let (zmin, zmax) = ((zmin - 2.0).min(zmax - 10.0), zmax + 2.0);
-    let x = |s: f64| rect.left() + (s / smp.length.max(1.0)) as f32 * rect.width();
-    let y = |z: f64| rect.bottom() - ((z - zmin) / (zmax - zmin)) as f32 * rect.height();
-    let z_at = |py: f32| zmin + ((rect.bottom() - py) / rect.height()) as f64 * (zmax - zmin);
-    // Height lines every 5 m.
-    let mut z = (zmin / 5.0).ceil() * 5.0;
-    while z < zmax {
-        painter.hline(
-            rect.x_range(),
-            y(z),
-            egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
-        );
-        painter.text(
-            egui::pos2(rect.left(), y(z)),
-            egui::Align2::LEFT_BOTTOM,
-            format!("{z:.0} m"),
-            egui::FontId::monospace(10.0),
-            egui::Color32::from_gray(110),
-        );
-        z += 5.0;
-    }
-    let line: Vec<egui::Pos2> = smp
-        .frames
-        .iter()
-        .map(|f| egui::pos2(x(f.s), y(f.pos.z)))
-        .collect();
-    painter.add(egui::Shape::line(
-        line,
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 200, 255)),
-    ));
-
-    let nodes: Vec<(usize, egui::Pos2)> = road
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (i, egui::pos2(x(smp.s_at(i as f64)), y(n.pos.z))))
-        .collect();
-    for &(i, p) in &nodes {
-        let selected = editor.selection.node == Some(i);
-        let color = if selected {
-            egui::Color32::from_rgb(255, 215, 30)
-        } else {
-            egui::Color32::from_rgb(90, 230, 255)
-        };
-        painter.circle_filled(p, if selected { 6.0 } else { 4.5 }, color);
-        painter.text(
-            p + egui::vec2(0.0, -9.0),
-            egui::Align2::CENTER_BOTTOM,
-            i.to_string(),
-            egui::FontId::monospace(10.0),
-            egui::Color32::WHITE,
-        );
-    }
-
-    let nearest = |pos: egui::Pos2| {
-        nodes
-            .iter()
-            .map(|&(i, p)| (i, p.distance(pos)))
-            .filter(|&(_, d)| d < 12.0)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    };
-    if resp.drag_started()
-        && let Some(i) = resp.interact_pointer_pos().and_then(nearest)
-    {
-        editor.selection.node = Some(i);
-        editor.begin_drag();
-    }
-    if resp.dragged()
-        && editor.dragging
-        && let (Some(i), Some(pos)) = (editor.selection.node, resp.interact_pointer_pos())
-    {
-        let mut p = road.nodes[i].pos;
-        p.z = z_at(pos.y.clamp(rect.top(), rect.bottom()));
-        editor.apply(
-            vec![Op::MoveNode {
-                road: road.name.clone(),
-                index: i,
-                pos: p,
-            }],
-            None,
-        );
-    }
-    if resp.drag_stopped() {
-        editor.end_drag();
-    }
-    if resp.clicked()
-        && let Some(i) = resp.interact_pointer_pos().and_then(nearest)
-    {
-        editor.selection.node = Some(i);
-    }
 }

@@ -149,6 +149,18 @@ impl Editor {
         }
     }
 
+    /// Ends a drag by putting everything back as it was when it began.
+    pub fn cancel_drag(&mut self) {
+        if self.dragging {
+            self.dragging = false;
+            if let Some(p) = self.undo.pop() {
+                self.project = p;
+                self.revision += 1;
+                self.clamp_selection();
+            }
+        }
+    }
+
     pub fn undo(&mut self) {
         if let Some(p) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.project, p));

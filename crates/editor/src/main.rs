@@ -8,6 +8,7 @@
 
 mod jobs;
 mod preview;
+mod profile;
 mod state;
 mod ui;
 mod viewport;
