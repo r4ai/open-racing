@@ -26,9 +26,9 @@ use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
-use open_racing_track_project::curve::{Sampled, handles};
+use open_racing_track_project::curve::{Frame, Sampled, handles};
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{Shape, Side};
+use open_racing_track_project::project::{Range, Road, Shape, Side};
 use open_racing_track_render::{from_bevy, to_bevy};
 
 use std::path::PathBuf;
@@ -92,8 +92,69 @@ pub enum Hit {
     /// A handle of a node: the outgoing one (true) or the incoming one.
     Handle(Item, usize, bool),
     Marker(Marker),
+    /// An end of a stretch of the selected road's strip or barrier.
+    Range(RangeEnd),
     /// A road's or spline's body.
     Body(Item),
+}
+
+/// A part of a road limited to stretches of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Strip(Side, usize),
+    Barrier(usize),
+}
+
+/// One end of one stretch of a road's part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RangeEnd {
+    pub road: usize,
+    pub part: Part,
+    pub range: usize,
+    /// The end (`to`) rather than the start (`from`).
+    pub to: bool,
+}
+
+/// The parts of a road limited to stretches, with the stretches.
+fn parts(road: &Road) -> impl Iterator<Item = (Part, &[Range])> {
+    let strips = [Side::Left, Side::Right].into_iter().flat_map(move |side| {
+        road.strips(side)
+            .iter()
+            .enumerate()
+            .map(move |(i, s)| (Part::Strip(side, i), s.ranges.as_slice()))
+    });
+    let barriers = road
+        .barriers
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (Part::Barrier(i), b.ranges.as_slice()));
+    strips.chain(barriers).filter(|(_, r)| !r.is_empty())
+}
+
+/// How far to the left of the road's centre a part lies in frame `f`: a strip's middle,
+/// a barrier's face.
+fn part_offset(road: &Road, part: Part, f: &Frame) -> f64 {
+    let edge = |side: Side| match side {
+        Side::Left => f.width_left,
+        Side::Right => f.width_right,
+    };
+    match part {
+        Part::Strip(side, i) => {
+            let strips = road.strips(side);
+            let inner: f64 = strips[..i].iter().map(|s| s.width).sum();
+            side.sign() * (edge(side) + inner + 0.5 * strips[i].width)
+        }
+        Part::Barrier(i) => {
+            let b = &road.barriers[i];
+            b.side.sign() * (edge(b.side) + b.offset)
+        }
+    }
+}
+
+/// Where a stretch's end is drawn.
+fn range_end_pos(road: &Road, smp: &Sampled, part: Part, u: f64) -> DVec3 {
+    let f = smp.frame_at(smp.s_at(u));
+    f.pos + f.lateral * part_offset(road, part, &f)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +195,9 @@ enum Target {
         pos: DVec3,
         yaw: f64,
         scale: f64,
+    },
+    Range {
+        end: RangeEnd,
     },
 }
 
@@ -427,6 +491,26 @@ fn pick(
             }
         }
     }
+    // Stretch ends of the selected road's strips and barriers.
+    if let Some(r) = sel.road()
+        && let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r))
+    {
+        for (part, ranges) in parts(road) {
+            for (range, rg) in ranges.iter().enumerate() {
+                for (to, u) in [(false, rg.from), (true, rg.to)] {
+                    let p = range_end_pos(road, smp, part, u) + DVec3::Z * LIFT;
+                    if near(p, PICK_RADIUS).is_some() {
+                        return Some(Hit::Range(RangeEnd {
+                            road: r,
+                            part,
+                            range,
+                            to,
+                        }));
+                    }
+                }
+            }
+        }
+    }
     let mut best: Option<(Hit, f32)> = None;
     for item in items(editor) {
         let Some((_, nodes, _)) = item_line(&editor.project, item) else {
@@ -648,7 +732,9 @@ pub fn input(
                         editor.selection.select(item);
                         start_modal(editor, tool, &built, Mode::Grab, None, from, true);
                     }
-                    Some(h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_))) => {
+                    Some(
+                        h @ (Hit::Node(..) | Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_)),
+                    ) => {
                         tool.press = None;
                         if let Hit::Node(item, n) = h
                             && !(editor.selection.item == Some(item)
@@ -844,7 +930,7 @@ fn click(
                 editor.selection.nodes.clear();
             }
         }
-        Some(Hit::Handle(..) | Hit::Marker(_)) => {}
+        Some(Hit::Handle(..) | Hit::Marker(_) | Hit::Range(_)) => {}
         None => {
             if !shift {
                 editor.selection.nodes.clear();
@@ -1089,6 +1175,7 @@ fn start_modal(
             }
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
+        Some(Hit::Range(end)) => Target::Range { end },
         _ if editor.selection.prop().is_some() => {
             let index = editor.selection.prop().expect("a prop");
             let p = &editor.project.props[index];
@@ -1130,6 +1217,19 @@ fn start_modal(
         }
         Target::Handle { node, start, .. } => (Mode::Grab, *node + *start),
         Target::Marker { .. } => (Mode::Grab, tool.pointer.unwrap_or_default()),
+        Target::Range { end } => {
+            let road = &editor.project.roads[end.road];
+            let (Some(smp), Some(rg)) = (
+                built.roads.get(end.road),
+                parts(road)
+                    .find(|(p, _)| *p == end.part)
+                    .and_then(|(_, r)| r.get(end.range)),
+            ) else {
+                return;
+            };
+            let u = if end.to { rg.to } else { rg.from };
+            (Mode::Grab, range_end_pos(road, smp, end.part, u))
+        }
         Target::Prop { index, .. } => (
             mode,
             Placement::of(&editor.project.props[*index], built.ground.as_deref()).pos,
@@ -1357,6 +1457,51 @@ fn transform_ops(
                 }],
                 format!("handle {:.1} m", h.length()),
             )
+        }
+        Target::Range { end } => {
+            let road = &editor.project.roads[end.road];
+            let (Some(smp), Some(at)) =
+                (built.roads.get(end.road), view.on_plane(cursor, m.pivot.z))
+            else {
+                return (vec![], String::new());
+            };
+            let f = &smp.frames[smp.nearest(at)];
+            let u = if snap {
+                (f.u * 10.0).round() / 10.0
+            } else {
+                f.u
+            };
+            let set = |ranges: &mut Vec<Range>| {
+                if let Some(r) = ranges.get_mut(end.range) {
+                    if end.to {
+                        r.to = u;
+                    } else {
+                        r.from = u;
+                    }
+                }
+            };
+            let name = road.name.clone();
+            let op = match end.part {
+                Part::Strip(side, i) => {
+                    let mut strip = road.strips(side)[i].clone();
+                    set(&mut strip.ranges);
+                    Op::PutStrip {
+                        road: name,
+                        side,
+                        strip,
+                        at: None,
+                    }
+                }
+                Part::Barrier(i) => {
+                    let mut barrier = road.barriers[i].clone();
+                    set(&mut barrier.ranges);
+                    Op::PutBarrier {
+                        road: name,
+                        barrier,
+                    }
+                }
+            };
+            (vec![op], format!("u {u:.2}, s {:.0} m", f.s))
         }
         Target::Prop {
             index,
@@ -1705,6 +1850,51 @@ pub fn gizmos(
                     };
                     gizmos.line(lift(pos), lift(pos + h), c);
                     gizmos.sphere(Isometry3d::from_translation(lift(pos + h)), 0.6 * radius, c);
+                }
+            }
+        }
+    }
+
+    // Stretches of the selected road's strips (orange) and barriers (grey), with their
+    // ends to drag.
+    if let Some(r) = sel.road()
+        && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
+        && smp.frames.len() > 1
+    {
+        for (part, ranges) in parts(road) {
+            let color = match part {
+                Part::Strip(..) => Color::srgb(1.0, 0.55, 0.2),
+                Part::Barrier(_) => Color::srgb(0.8, 0.8, 0.9),
+            };
+            for (range, rg) in ranges.iter().enumerate() {
+                let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
+                if b < a && smp.closed {
+                    b += smp.length;
+                }
+                let steps = ((b - a) / 3.0).ceil().max(1.0) as usize;
+                let pts = (0..=steps).map(|k| {
+                    let f = smp.frame_at(a + (b - a) * k as f64 / steps as f64);
+                    lift(f.pos + f.lateral * part_offset(road, part, &f))
+                });
+                gizmos.linestrip(pts, color);
+                for (to, u) in [(false, rg.from), (true, rg.to)] {
+                    let end = RangeEnd {
+                        road: r,
+                        part,
+                        range,
+                        to,
+                    };
+                    let at = range_end_pos(road, smp, part, u);
+                    let c = if hover == Some(Hit::Range(end)) {
+                        Color::WHITE
+                    } else {
+                        color
+                    };
+                    gizmos.sphere(
+                        Isometry3d::from_translation(lift(at)),
+                        0.7 * node_size(eye, at),
+                        c,
+                    );
                 }
             }
         }

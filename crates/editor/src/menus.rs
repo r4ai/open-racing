@@ -8,7 +8,7 @@ use crate::presets::PRESETS;
 use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
 use crate::viewport::{
-    Draw, DrawKind, Hit, Marker, Menu, Orbit, Tool, add_node_at, delete, frame_all,
+    Draw, DrawKind, Hit, Marker, Menu, Orbit, Part, RangeEnd, Tool, add_node_at, delete, frame_all,
     frame_selection, set_view,
 };
 
@@ -240,6 +240,12 @@ fn menu_items(
                 delete(editor);
             }
         }
+        Some(Hit::Range(end)) => {
+            ui.strong("Stretch end");
+            if entry(ui, "Remove this stretch") {
+                remove_stretch(editor, end);
+            }
+        }
         None => {}
     }
     ui.separator();
@@ -264,4 +270,49 @@ fn set_markers(editor: &mut Editor, start: Option<f64>, sectors: Option<Vec<f64>
         }],
         None,
     );
+}
+
+/// Removes a stretch of a road's strip or barrier, or the part itself with its last
+/// stretch (no stretches would mean everywhere).
+fn remove_stretch(editor: &mut Editor, end: RangeEnd) {
+    let Some(road) = editor.project.roads.get(end.road) else {
+        return;
+    };
+    let name = road.name.clone();
+    let op = match end.part {
+        Part::Strip(side, i) => {
+            let mut strip = road.strips(side)[i].clone();
+            strip.ranges.remove(end.range);
+            if strip.ranges.is_empty() {
+                Op::RemoveStrip {
+                    road: name,
+                    side,
+                    name: strip.name,
+                }
+            } else {
+                Op::PutStrip {
+                    road: name,
+                    side,
+                    strip,
+                    at: None,
+                }
+            }
+        }
+        Part::Barrier(i) => {
+            let mut barrier = road.barriers[i].clone();
+            barrier.ranges.remove(end.range);
+            if barrier.ranges.is_empty() {
+                Op::RemoveBarrier {
+                    road: name,
+                    name: barrier.name,
+                }
+            } else {
+                Op::PutBarrier {
+                    road: name,
+                    barrier,
+                }
+            }
+        }
+    };
+    editor.apply(vec![op], None);
 }

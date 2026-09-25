@@ -84,10 +84,10 @@ pub fn ui(
             (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
         )
     });
-    if undo && !ctx.egui_wants_keyboard_input() {
+    if undo && !ctx.egui_wants_keyboard_input() && tool.modal.is_none() {
         editor.undo();
     }
-    if redo && !ctx.egui_wants_keyboard_input() {
+    if redo && !ctx.egui_wants_keyboard_input() && tool.modal.is_none() {
         editor.redo();
     }
     if ctx.input(|i| i.key_pressed(egui::Key::N) && i.modifiers.is_none())
