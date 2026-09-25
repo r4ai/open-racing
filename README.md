@@ -190,7 +190,7 @@ The app can draw what the simulation computes in false colour, with the scene's 
 
 ## Adding content
 
-- Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
+- Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`. Bundled fictional layouts include Lakeside, Redwood Speedway (banked oval), Pine Ridge Club (compact technical circuit), and Harbor Street Circuit (narrow stop-and-go street course); for example, `cargo run --release -p open-racing-app -- --track harbor_street`.
 - Cars: add `assets/cars/<name>.ron` using `gt3.ron` as a template, or convert a car into a car package (below). Each axle names its tyre (`tire: "<name>"` for `assets/tires/<name>.ron`, or a `.ron` path relative to the car file) and sets the cold pressure in bar, as teams set it in the garage.
   `drive` picks the driven wheels: `Rear` (the default), `Front`, or `All(front_share: …, centre_differential: (…), front_differential: (…))`, where a centre differential splits the torque between the axles; `differential` is the driven axle's, the rear one's for all-wheel drive. Keep the front and rear tyres the same size on an all-wheel-drive car with a locking centre differential: like a real one, it fights a difference in wheel speed.
   Where the engine sits shows in `front_weight` and in `inertia`: masses near the centre lower the pitch and yaw inertia. With the same parts, a mid-engined car puts more power down, turns in quicker, understeers less and rotates more when the driver lifts mid-corner than a front-engined one, and a nose-heavy front-drive car understeers most (tests in `crates/sim/tests/physics.rs`).
