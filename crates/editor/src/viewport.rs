@@ -1320,7 +1320,7 @@ pub fn input(
             select_all(editor);
         }
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
-        delete(editor);
+        delete_selected(editor, tool);
     } else if pressed(KeyCode::NumpadAdd) && ctrl {
         crate::edit::select_more(editor);
     } else if pressed(KeyCode::NumpadSubtract) && ctrl {
@@ -1668,6 +1668,16 @@ pub fn select_all(editor: &mut Editor) {
         let n = nodes.len();
         editor.selection.nodes = (0..n).collect();
     }
+}
+
+/// X: in edit mode the selected nodes, in object mode the selected item. Edit mode with
+/// no nodes selected deletes nothing, as Blender's, rather than the whole line.
+pub fn delete_selected(editor: &mut Editor, tool: &Tool) {
+    if tool.edit && editor.selection.nodes.is_empty() {
+        editor.status = "no nodes selected (Tab to object mode deletes the whole line)".into();
+        return;
+    }
+    delete(editor);
 }
 
 /// Deletes the selected nodes, or else the selected spline, road or prop.
@@ -3462,6 +3472,22 @@ mod tests {
         editor.selection.select_node(Item::Road(0), 1);
         sync_mode(&editor, &mut tool);
         assert!(tool.edit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn delete_in_edit_mode_without_nodes_keeps_the_line() {
+        let (mut editor, _, _, _, dir) = top_down("delete-edit", DVec3::ZERO);
+        let spline = crate::presets::PRESETS[4].spline(
+            &editor.project,
+            vec![DVec3::new(0.0, -30.0, 0.0), DVec3::new(50.0, -30.0, 0.0)],
+        );
+        assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        editor.selection.select(Item::Spline(0));
+        delete_selected(&mut editor, &Tool::editing(true));
+        assert_eq!(editor.project.splines.len(), 1);
+        delete_selected(&mut editor, &Tool::editing(false));
+        assert!(editor.project.splines.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

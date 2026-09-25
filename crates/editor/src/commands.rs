@@ -13,8 +13,7 @@ use crate::preview::Built;
 use crate::state::{Editor, Item};
 use crate::ui::{BottomTab, Popup, Shell};
 use crate::viewport::{
-    self, Draw, DrawKind, Mode, Orbit, Tool, ToolKind, ViewDir, delete, frame_all, frame_selection,
-    look,
+    self, Draw, DrawKind, Mode, Orbit, Tool, ToolKind, ViewDir, frame_all, frame_selection, look,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,7 +359,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         SmoothShape => edit::smooth(c.editor, edit::Smooth::Shape),
         Flatten => edit::flatten(c.editor),
         EvenGrade => edit::even_grade(c.editor),
-        Delete => delete(c.editor),
+        Delete => viewport::delete_selected(c.editor, c.tool),
         Handles(m) => edit::set_handles(c.editor, m),
         HandleMenu => c.shell.popup = Some(Popup::Handles { at }),
         ToggleClosed => edit::toggle_closed(c.editor),
