@@ -378,6 +378,29 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
                     }
                 }
             });
+            ui.menu_button("Restore Backup", |ui| {
+                let list = crate::state::backups(&c.editor.dir);
+                if list.is_empty() {
+                    ui.weak("no backups yet: one is kept every 5 minutes of editing");
+                }
+                let now = std::time::SystemTime::now();
+                for (path, time) in list {
+                    let ago = now.duration_since(time).map_or(0, |d| d.as_secs());
+                    let label = match ago {
+                        0..=119 => format!("{ago} s ago"),
+                        120..=7199 => format!("{} min ago", ago / 60),
+                        _ => format!("{} h ago", ago / 3600),
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        c.editor.restore(&path);
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui
                 .button("Import Centreline…")

@@ -98,6 +98,8 @@ pub struct Editor {
     /// Modification time of `project.ron` when last written or read here.
     stamp: Option<SystemTime>,
     last_check: Instant,
+    /// When `project.ron` was last copied into the backups.
+    last_backup: Option<Instant>,
     /// Key and time of the last edit, for merging undo steps.
     last_edit: Option<(String, Instant)>,
     pub selection: Selection,
@@ -134,6 +136,7 @@ impl Editor {
             redo: Vec::new(),
             revision: 1,
             last_check: Instant::now(),
+            last_backup: None,
             last_edit: None,
             selection: Selection {
                 item: Some(Item::Road(0)),
@@ -273,6 +276,7 @@ impl Editor {
     }
 
     pub fn save(&mut self) {
+        self.backup();
         match self.project.save(&self.dir) {
             Ok(()) => self.stamp = stamp(&self.dir),
             Err(e) => self.status = format!("not saved: {e}"),
@@ -325,6 +329,70 @@ impl Editor {
             sel.filter(|&n| n < count).collect()
         }
     }
+}
+
+/// Folder in a project's directory the backups are kept in.
+pub const BACKUPS: &str = ".backups";
+/// How often `project.ron` is backed up while it changes, and how many copies are kept.
+const BACKUP_EVERY: Duration = Duration::from_secs(5 * 60);
+const BACKUPS_KEPT: usize = 40;
+
+impl Editor {
+    /// Copies `project.ron` as it is into the backups, at most every few minutes, before
+    /// it is written again; the oldest copies go.
+    fn backup(&mut self) {
+        if self.last_backup.is_some_and(|t| t.elapsed() < BACKUP_EVERY) {
+            return;
+        }
+        self.last_backup = Some(Instant::now());
+        let from = self.dir.join(PROJECT_FILE);
+        if !from.is_file() {
+            return;
+        }
+        let dir = self.dir.join(BACKUPS);
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let copied = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::copy(&from, dir.join(format!("project-{secs}.ron"))));
+        if let Err(e) = copied {
+            self.status = format!("backup failed: {e}");
+            return;
+        }
+        let list = backups(&self.dir);
+        for (path, _) in list.iter().skip(BACKUPS_KEPT) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Replaces the project with a backup, as a step that undoes.
+    pub fn restore(&mut self, path: &Path) {
+        let project = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|src| ron::from_str::<Project>(&src).map_err(|e| e.to_string()))
+            .and_then(|p| p.validate().map(|()| p).map_err(|e| e.to_string()));
+        match project {
+            Ok(p) => {
+                let before = std::mem::replace(&mut self.project, p);
+                self.push_undo(before);
+                self.changed("restored a backup (Ctrl Z undoes it)");
+            }
+            Err(e) => self.status = format!("{}: {e}", path.display()),
+        }
+    }
+}
+
+/// The backups of the project in `dir`, newest first, with when each was made.
+pub fn backups(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
+    let mut list: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(dir.join(BACKUPS))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "ron"))
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
+        .collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1));
+    list
 }
 
 /// A road's or spline's name, nodes and whether it is closed.
@@ -396,6 +464,28 @@ mod tests {
                 outgoing: DVec3::X * 4.0
             }
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_keeps_a_backup_that_restores() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let before = editor.project.clone();
+        assert!(editor.apply(
+            vec![Op::SetName {
+                name: "renamed".into()
+            }],
+            None
+        ));
+        let list = backups(&dir);
+        assert_eq!(list.len(), 1, "the first save backs up what was there");
+        editor.restore(&list[0].0);
+        assert_eq!(editor.project, before);
+        editor.undo();
+        assert_eq!(editor.project.name, "renamed");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
