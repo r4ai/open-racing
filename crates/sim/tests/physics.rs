@@ -273,6 +273,37 @@ fn sustained_wheelspin_warms_one_patch_while_cold_tread_can_cool_it() {
 }
 
 #[test]
+fn sustained_lateral_sliding_heats_asphalt_more_than_rolling() {
+    let track = circle(500.0);
+    let weather = Weather::new(&track, None, WeatherSettings::default());
+    let map = Arc::new(RubberMap::new(&track));
+    let base = Car::new(gt3(), &track, 0.0, 0.0, 0.0, 1);
+    let contact = |lateral_speed: f64| {
+        let mut car = base.clone();
+        let mut road = TrackEvolution::new(map.clone(), 1.0, 0.0);
+        let mut patch = None;
+        // Hold the chassis at one patch while the tyre's transient slip settles.
+        for _ in 0..500 {
+            car.state.position = base.state.position;
+            car.state.orientation = base.state.orientation;
+            car.state.velocity = car.state.orientation * DVec3::new(10.0, lateral_speed, 0.0);
+            car.state.angular_velocity = DVec3::ZERO;
+            for (i, wheel) in car.state.wheels.iter_mut().enumerate() {
+                wheel.spin = 10.0 / car.model.tire(i).p.radius;
+            }
+            car.step_in(&track, &mut road, &weather, &Controls::default());
+            let q = track.query(car.telemetry.wheels[2].contact, 0);
+            patch = Some((q.s, q.d));
+        }
+        let (s, d) = patch.unwrap();
+        road.road_temperature_at(&weather, Surface::Asphalt, s, d) - weather.road_temperature(s, d)
+    };
+    let rolling = contact(0.0);
+    let sliding = contact(5.0);
+    assert!(sliding > rolling + 0.1, "{sliding} vs {rolling} °C");
+}
+
+#[test]
 fn locally_warm_asphalt_feeds_back_into_tread_temperature() {
     let track = circle(500.0);
     let map = Arc::new(RubberMap::new(&track));
