@@ -434,8 +434,19 @@ impl Op {
                 }
             }
             Op::SetMainRoad { road } => {
-                if p.road(&road).is_none() {
-                    return Err(missing("road", &road));
+                let period = p
+                    .road(&road)
+                    .ok_or_else(|| missing("road", &road))?
+                    .period();
+                if p.main_road != road {
+                    // The markers' places were on the old road: the start goes to the
+                    // new one's first node and the sectors split it evenly.
+                    let m = &mut p.markers;
+                    let k = m.sectors.len();
+                    m.start = 0.0;
+                    m.sectors = (1..=k)
+                        .map(|i| period * i as f64 / (k + 1) as f64)
+                        .collect();
                 }
                 p.main_road = road;
             }

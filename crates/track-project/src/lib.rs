@@ -14,6 +14,7 @@
 pub mod assets;
 pub mod bake;
 pub mod builtin;
+pub mod centreline;
 pub mod curve;
 pub mod inspect;
 pub mod model;

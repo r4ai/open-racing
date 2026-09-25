@@ -288,6 +288,51 @@ fn list_projects() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Lays a new road along a centreline file the user picks, and selects it.
+fn import_centreline(c: &mut Ctx) {
+    use open_racing_track_project::centreline;
+    let Some(file) = rfd::FileDialog::new()
+        .add_filter(
+            "centrelines",
+            &["gpx", "kml", "geojson", "json", "csv", "txt"],
+        )
+        .pick_file()
+    else {
+        return;
+    };
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let line = match std::fs::read_to_string(&file)
+        .map_err(|e| e.to_string())
+        .and_then(|src| centreline::read(&name, &src).map_err(|e| e.to_string()))
+    {
+        Ok(line) => line,
+        Err(e) => {
+            c.editor.status = format!("not imported: {e}");
+            return;
+        }
+    };
+    let stem = file
+        .file_stem()
+        .map_or("imported".into(), |s| s.to_string_lossy().into_owned());
+    let road = crate::presets::unique_name(&c.editor.project, stem.trim());
+    let ops = centreline::road_ops(&c.editor.project, &line, &road, 1.0);
+    if c.editor.apply(ops, None) {
+        let r = c.editor.project.roads.len() - 1;
+        c.editor.selection.select(Item::Road(r));
+        crate::viewport::frame_selection(c.editor, c.orbit);
+        let nodes = c.editor.project.roads[r].nodes.len();
+        c.editor.status = format!(
+            "laid \"{road}\" along {} points with {nodes} nodes{}",
+            line.points.len(),
+            if line.closed {
+                "; Make Main Road to race on it"
+            } else {
+                " (an open line)"
+            }
+        );
+    }
+}
+
 /// Opens another project, dropping what the tools were doing in this one.
 fn open_project(c: &mut Ctx, dir: std::path::PathBuf) {
     let before = c.editor.dir.clone();
@@ -333,6 +378,18 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
                     }
                 }
             });
+            ui.separator();
+            if ui
+                .button("Import Centreline…")
+                .on_hover_text(
+                    "Lay a road along a real circuit: a GPS track (.gpx), a KML line, a GeoJSON \
+                     line (OpenStreetMap) or a CSV of x, y[, z] metres or lon, lat[, ele]",
+                )
+                .clicked()
+            {
+                ui.close();
+                import_centreline(c);
+            }
             ui.separator();
             entry(ui, c, Cmd::Bake);
             entry(ui, c, Cmd::BakeDrive);

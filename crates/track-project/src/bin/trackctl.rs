@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use open_racing_track_project::{
-    Cache, Error, Project, assets, bake, inspect, ops, preview, validate,
+    Cache, Error, Project, assets, bake, centreline, inspect, ops, preview, validate,
 };
 
 #[derive(Parser)]
@@ -73,6 +73,22 @@ enum Command {
     Import {
         project: String,
         files: Vec<PathBuf>,
+    },
+    /// Lays a road along a real circuit's centreline: a GPS track (.gpx), a KML line, a
+    /// GeoJSON line (as OpenStreetMap exports give) or a CSV of x, y[, z] metres or
+    /// lon, lat[, ele] with a header. Replaces the road's nodes if it exists.
+    Centreline {
+        project: String,
+        file: PathBuf,
+        /// The road to lay or replace.
+        #[arg(long, default_value = "imported")]
+        road: String,
+        /// How far the road may stray from the line, m; smaller keeps more nodes.
+        #[arg(long, default_value_t = 1.0)]
+        tolerance: f64,
+        /// Make it the main road (it must be a closed loop).
+        #[arg(long)]
+        main: bool,
     },
     /// Bakes the project and checks the package, without saving it.
     Check {
@@ -208,6 +224,35 @@ fn run(cli: Cli) -> Result<(), Error> {
             let dir = resolve(&project);
             for f in &files {
                 println!("{}", assets::import(&dir, f)?.display());
+            }
+        }
+        Command::Centreline {
+            project,
+            file,
+            road,
+            tolerance,
+            main,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let src = std::fs::read_to_string(&file).map_err(|e| Error::Io(file.clone(), e))?;
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            let line = centreline::read(&name, &src)?;
+            let mut list = centreline::road_ops(&p, &line, &road, tolerance);
+            if main {
+                list.push(ops::Op::SetMainRoad { road: road.clone() });
+            }
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            let r = p.road(&road).expect("just laid");
+            println!(
+                "laid \"{road}\" along {} points with {} nodes, {}",
+                line.points.len(),
+                r.nodes.len(),
+                if line.closed { "closed" } else { "open" }
+            );
+            if let Some((lon, lat)) = line.origin {
+                println!("(0, 0) is at longitude {lon:.6}, latitude {lat:.6}");
             }
         }
         Command::Check { project, lap } => {

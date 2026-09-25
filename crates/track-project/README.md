@@ -161,7 +161,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveRoad` | `road` | removes a road |
 | `RenameRoad` | `road`, `to` | renames a road and every reference to it |
 | `SetRoad` | `road`, `closed?`, `crown?`, `surface?`, `material?`, `resolution?` | sets the given properties |
-| `SetMainRoad` | `road` | makes that road the main road |
+| `SetMainRoad` | `road` | makes that road the main road; the start line moves to its first node and the sectors split it evenly |
 
 **Nodes**
 
@@ -220,6 +220,16 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `PutProp` / `RemoveProp` | `prop` / `name` | places, replaces or removes a prop |
 | `MoveProp` | `name`, `pos?`, `yaw?`, `scale?` | moves, turns or resizes a prop |
 | `RenameProp` | `name`, `to` | renames a prop; fails if another prop has that name |
+
+## Real circuits
+
+`trackctl centreline <project> <file> --road <name> [--main]` lays a road along a real
+circuit's centreline from a GPS track (`.gpx`), a KML line, a GeoJSON line (as
+OpenStreetMap exports give) or a CSV of `x, y[, z]` metres or `lon, lat[, ele]` under a
+header. Longitudes and latitudes become metres east and north of the line's middle, and
+the line is thinned to the nodes a spline needs to stay within `--tolerance` metres of it.
+The editor does the same from File › Import Centreline, and can lay a satellite image or
+track map under the view to trace over (the Reference image tab; `SetReference`).
 
 ## Working on a track
 
