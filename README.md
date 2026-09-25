@@ -124,6 +124,13 @@ Each car lists the electronics it is fitted with (`electronics` in its RON file)
 
 An H-pattern shifter's gates (1–7 and R) can be assigned on the input page like the other buttons; with them assigned, the shifter selects the gear directly.
 
+The behaviour of each part is set in the car's RON file; every value below has a default that matches the bundled cars, so a car file only names what it changes:
+
+- `engine`: `idle_authority` and `idle_band_rpm` (how far the idle control opens the throttle, and how many rpm below idle it takes to open it fully).
+- `clutch`: `bite_point` and `engagement_exponent` (how the capacity grows as the pedal comes back from the bite point: 1 is linear, 2 the default).
+- `gearbox`: `input_inertia` and `input_drag` (the input shaft's inertia and oil drag). `HPattern` adds `sync_window` (speed difference, rad/s, at which the dogs mesh), `grind_time` (how long a synchroniser fights before the gear grinds) and `reverse_synchro` (with `false`, reverse goes in only once the input shaft has stopped; until then it grinds). `DualClutch` adds `control`: the speeds above idle at which its clutch starts to bite with the throttle closed (`bite_rpm`), closes fully (`lock_slip_rpm`, `lock_rpm`) and drops a gear (`downshift_rpm`), and the range over which it engages (`engage_band_rpm`).
+- `electronics`: `blip_band_rpm` (how far short of the incoming gear's speed the auto-blip opens the throttle fully; it also blips a dual clutch's downshifts) and the anti-stall's `band_rpm` (the range above its `rpm` over which it opens the clutch).
+
 ## Adding content
 
 - Tracks: put a centreline control-point file (position, width, bank) in `assets/tracks/<name>.ron` and select it with `--track <name>`.
@@ -206,6 +213,7 @@ How the folder is converted:
 - **Geometry:** wheelbase, tracks and tyre sizes come from the wheels in the model, so the model and the simulated wheels line up.
 - **Physics:** read from the physics files (`car.ini`, `suspensions.ini`, `tyres.ini`, `engine.ini`, `drivetrain.ini`, `brakes.ini`, `aero.ini` and the tables they name) in the folder's `data/` or in `--data`. Physics packed into `data.acd` are **not** read: open-racing does not unpack them. Without physics files, the mass, the engine's torque curve and rev limit, the driven wheels (the `fwd`, `rwd`, `awd` or `4wd` tag) and the final drive (for the stated top speed) come from `ui/ui_car.json`, and everything else from the base car. The converter lists where each group of values came from.
 - **Drive:** `[TRACTION] TYPE` sets the driven wheels. An `AWD` car takes its torque split and front, centre and rear differentials from `[AWD]`. The newer `AWD2` model is simulated as all-wheel drive through a limited-slip centre differential.
+- **Gearbox:** a car with `[GEARBOX] SUPPORTS_SHIFTER=1` gets an H-pattern manual, the others a sequential gearbox with an ignition cut. `[AUTOBLIP] ELECTRONIC` and `[DOWNSHIFT_PROTECTION]` become the car's auto-blip and downshift protection, and an automatic clutch the car always has (`[AUTOCLUTCH] FORCED_ON=1`) becomes anti-stall that opens the clutch between `MAX_RPM` and `MIN_RPM`.
 
 Limitations:
 

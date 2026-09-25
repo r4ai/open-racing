@@ -835,6 +835,7 @@ fn gt3_dual_clutch(creep_torque: f64) -> Arc<CarModel> {
         shift_time: 0.15,
         creep_torque,
         launch_rpm: 4000.0,
+        control: Default::default(),
     };
     params.electronics = ElectronicsParams {
         auto_blip: true,

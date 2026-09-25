@@ -26,7 +26,8 @@ pub use drivetrain::ShiftPhase;
 pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{
-    AntiStall, CarModel, CarParams, Drive, ElectronicsParams, GearboxKind, ParamsError,
+    AntiStall, CarModel, CarParams, Drive, DualClutchControl, ElectronicsParams, GearboxKind,
+    ParamsError,
 };
 pub use tire::TireCondition;
 pub use track::{Coat, Surface, Track, TrackCoords, TrackDef, TrackError, TrackPoint, TrackQuery};

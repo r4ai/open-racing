@@ -15,7 +15,7 @@ use std::path::Path;
 
 use open_racing_sim::params::DifferentialParams;
 use open_racing_sim::tire::TireParams;
-use open_racing_sim::{CarParams, Drive, ElectronicsParams, GearboxKind};
+use open_racing_sim::{AntiStall, CarParams, Drive, ElectronicsParams, GearboxKind};
 
 use crate::ini::{self, Section};
 use crate::json::Value;
@@ -521,10 +521,7 @@ impl Physics {
             _ => (0.1, 100.0),
         };
         g.kind = if shifter {
-            GearboxKind::HPattern {
-                synchro_torque: SYNCHRO_TORQUE,
-                lever_time: LEVER_TIME,
-            }
+            GearboxKind::h_pattern(SYNCHRO_TORQUE, LEVER_TIME)
         } else {
             GearboxKind::Sequential {
                 shift_time: get("GEARBOX", "CHANGE_UP_TIME")
@@ -533,14 +530,25 @@ impl Physics {
                 dog_release_torque,
             }
         };
-        let limiter = self.params.engine.limiter_rpm;
+        let e = &self.params.engine;
+        // An automatic clutch the car always has works like anti-stall: open below its
+        // minimum engine speed, closed above its maximum.
+        let anti_stall = get("AUTOCLUTCH", "FORCED_ON")
+            .filter(|v| *v != 0.0)
+            .and_then(|_| Some((get("AUTOCLUTCH", "MIN_RPM")?, get("AUTOCLUTCH", "MAX_RPM")?)))
+            .filter(|&(min, max)| min > e.stall_rpm && max > min)
+            .map(|(min, max)| AntiStall {
+                rpm: min,
+                band_rpm: max - min,
+            });
         self.params.electronics = ElectronicsParams {
-            anti_stall: None,
+            anti_stall,
             auto_blip: get("AUTOBLIP", "ELECTRONIC").is_some_and(|v| v != 0.0),
             ignition_cut: !shifter,
             downshift_protection_rpm: get("DOWNSHIFT_PROTECTION", "ACTIVE")
                 .filter(|v| *v != 0.0)
-                .map(|_| limiter + get("DOWNSHIFT_PROTECTION", "OVERREV").unwrap_or(0.0)),
+                .map(|_| e.limiter_rpm + get("DOWNSHIFT_PROTECTION", "OVERREV").unwrap_or(0.0)),
+            ..Default::default()
         };
         if let Some(v) = get("CLUTCH", "MAX_TORQUE").filter(|v| *v > 0.0) {
             self.params.clutch.max_torque = v;
@@ -840,6 +848,28 @@ pub(crate) mod tests {
         let e = &p.params.electronics;
         assert!(e.auto_blip && e.ignition_cut && e.anti_stall.is_none());
         assert_eq!(e.downshift_protection_rpm, Some(7500.0 + 200.0));
+    }
+
+    #[test]
+    fn an_automatic_clutch_the_car_always_has_becomes_anti_stall() {
+        let clutch = |forced| {
+            with_drivetrain(
+                &format!("autoclutch{forced}"),
+                &format!("[AUTOCLUTCH]\nMIN_RPM=2000\nMAX_RPM=3000\nFORCED_ON={forced}\n"),
+            )
+            .params
+            .electronics
+            .anti_stall
+        };
+        assert_eq!(
+            clutch(1),
+            Some(AntiStall {
+                rpm: 2000.0,
+                band_rpm: 1000.0
+            })
+        );
+        // A driver aid the player may turn off is not the car's.
+        assert_eq!(clutch(0), None);
     }
 
     #[test]

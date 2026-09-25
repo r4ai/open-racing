@@ -9,16 +9,13 @@
 //! driveline.
 
 use crate::controls::Shift;
-use crate::params::{AntiStall, CarParams, DifferentialParams, Drive, GearboxKind, lookup};
+use crate::params::{CarParams, DifferentialParams, Drive, DualClutchControl, GearboxKind, lookup};
 
 pub const RPM_PER_RAD_S: f64 = 60.0 / std::f64::consts::TAU;
 
-/// Speed difference across a synchroniser at which the dogs mesh, rad/s at the input shaft.
-const SYNC_WINDOW: f64 = 3.0;
-/// How long a synchroniser fights before its gear grinds, s.
-const GRIND_TIME: f64 = 0.3;
-/// Oil drag on a free input shaft, N·m.
-const INPUT_DRAG: f64 = 1.0;
+/// Speed difference between the engine and the input shaft within which a sequential
+/// gearbox's clutch counts as stuck as its dogs mesh, rad/s.
+const MESH_LOCK_WINDOW: f64 = 3.0;
 /// Gauss-Seidel passes over the couplings per step.
 const ITERATIONS: usize = 8;
 
@@ -117,9 +114,9 @@ pub fn driveline_speed(p: &CarParams, wheel_speed: &[f64; 4]) -> f64 {
 }
 
 /// Throttle that brings the engine up to `target_rpm` from `rpm` for a rev-matched
-/// downshift, nothing when it already turns faster.
-pub fn blip_throttle(target_rpm: f64, rpm: f64) -> f64 {
-    ((target_rpm - rpm) / 500.0).clamp(0.0, 1.0)
+/// downshift, opening fully `band_rpm` short of it; nothing when it already turns faster.
+pub fn blip_throttle(target_rpm: f64, rpm: f64, band_rpm: f64) -> f64 {
+    ((target_rpm - rpm) / band_rpm).clamp(0.0, 1.0)
 }
 
 /// Which of a dual clutch's clutches drives `gear`: odd gears on one, even gears and
@@ -182,7 +179,12 @@ fn advance_shift(s: &mut DrivetrainState, p: &CarParams, input: &DriveInput, out
                 .is_none_or(|max| r_to * out * RPM_PER_RAD_S <= max)
     };
     match p.gearbox.kind {
-        GearboxKind::HPattern { lever_time, .. } => {
+        GearboxKind::HPattern {
+            lever_time,
+            sync_window,
+            grind_time,
+            ..
+        } => {
             // A shifter puts the lever straight into its gate; up / down requests move it
             // one gate along the sequence R, N, 1, 2, ...
             let gate = match input.selector {
@@ -206,12 +208,12 @@ fn advance_shift(s: &mut DrivetrainState, p: &CarParams, input: &DriveInput, out
                 }
             }
             if s.phase == ShiftPhase::Synchronising
-                && (s.input_speed - gear_ratio(p, s.target_gear) * out).abs() < SYNC_WINDOW
+                && (s.input_speed - gear_ratio(p, s.target_gear) * out).abs() < sync_window
             {
                 s.gear = s.target_gear;
                 begin(s, ShiftPhase::None);
             }
-            s.grinding = s.phase == ShiftPhase::Synchronising && s.phase_time > GRIND_TIME;
+            s.grinding = s.phase == ShiftPhase::Synchronising && s.phase_time > grind_time;
         }
         GearboxKind::Sequential {
             shift_time,
@@ -237,11 +239,15 @@ fn advance_shift(s: &mut DrivetrainState, p: &CarParams, input: &DriveInput, out
                 // the clutch slips until the engine matches it.
                 s.gear = s.target_gear;
                 s.input_speed = gear_ratio(p, s.gear) * out;
-                s.clutch_locked[0] = (s.engine_speed - s.input_speed).abs() < SYNC_WINDOW;
+                s.clutch_locked[0] = (s.engine_speed - s.input_speed).abs() < MESH_LOCK_WINDOW;
                 begin(s, ShiftPhase::None);
             }
         }
-        GearboxKind::DualClutch { shift_time, .. } => {
+        GearboxKind::DualClutch {
+            shift_time,
+            ref control,
+            ..
+        } => {
             if let Some(up) = request.filter(|_| s.phase == ShiftPhase::None) {
                 let to = next(s.gear, up);
                 if to != s.gear && allowed(s.gear, to) {
@@ -257,7 +263,8 @@ fn advance_shift(s: &mut DrivetrainState, p: &CarParams, input: &DriveInput, out
             // The control unit drops a gear once the car slows too much for it.
             if s.phase == ShiftPhase::None
                 && s.gear > 1
-                && gear_ratio(p, s.gear) * out * RPM_PER_RAD_S < p.engine.idle_rpm
+                && gear_ratio(p, s.gear) * out * RPM_PER_RAD_S
+                    < p.engine.idle_rpm + control.downshift_rpm
             {
                 s.target_gear = s.gear - 1;
                 begin(s, ShiftPhase::Handover);
@@ -361,23 +368,26 @@ fn dual_clutch_capacity(
     out: f64,
     creep_torque: f64,
     launch_rpm: f64,
+    control: &DualClutchControl,
 ) -> f64 {
     let e = &p.engine;
     let rpm = s.rpm();
     let gear_rpm = gear_ratio(p, s.gear) * out * RPM_PER_RAD_S;
     let locked = s.clutch_locked[clutch_of(s.gear)];
     if (locked && gear_rpm > e.idle_rpm)
-        || ((rpm - gear_rpm).abs() < 100.0 && gear_rpm > e.idle_rpm + 100.0)
+        || ((rpm - gear_rpm).abs() < control.lock_slip_rpm
+            && gear_rpm > e.idle_rpm + control.lock_rpm)
     {
         return p.clutch.max_torque;
     }
-    let bite = e.idle_rpm + 150.0 + (launch_rpm - e.idle_rpm - 150.0) * input.throttle;
+    let closed_bite = e.idle_rpm + control.bite_rpm;
+    let bite = closed_bite + (launch_rpm - closed_bite) * input.throttle;
     let creep = if input.throttle == 0.0 && input.brake > 0.0 {
         0.0
     } else {
         creep_torque
     };
-    creep + p.clutch.max_torque * ((rpm - bite) / 500.0).clamp(0.0, 1.0)
+    creep + p.clutch.max_torque * ((rpm - bite) / control.engage_band_rpm).clamp(0.0, 1.0)
 }
 
 /// Advances the engine and gearbox and returns the drive torque applied to each wheel.
@@ -407,13 +417,13 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
         && !matches!(s.phase, ShiftPhase::None | ShiftPhase::Unloading)
         && s.target_gear != 0
     {
-        throttle = throttle.max(blip_throttle(target_rpm, rpm));
+        throttle = throttle.max(blip_throttle(target_rpm, rpm, el.blip_band_rpm));
     }
     let engine_torque = if s.stalled {
         -lookup(&e.drag_curve, rpm)
     } else {
         // Idle control: opens the throttle just enough to hold idle.
-        let idle_throttle = ((e.idle_rpm - rpm) / 300.0).clamp(0.0, e.idle_authority);
+        let idle_throttle = ((e.idle_rpm - rpm) / e.idle_band_rpm).clamp(0.0, e.idle_authority);
         let mut throttle = throttle.max(idle_throttle);
         if rpm >= e.limiter_rpm {
             throttle = 0.0;
@@ -449,7 +459,7 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
             // Anti-stall opens the clutch as the gear drags the engine down.
             let dragged = (gear_ratio(p, s.gear) * out * RPM_PER_RAD_S) < rpm;
             let anti_stall = match &el.anti_stall {
-                Some(a) if dragged => ((rpm - a.rpm) / AntiStall::BAND).clamp(0.0, 1.0),
+                Some(a) if dragged => ((rpm - a.rpm) / a.band_rpm).clamp(0.0, 1.0),
                 _ => 1.0,
             };
             let capacity = friction(
@@ -462,14 +472,23 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
                 set.push(Coupling::new(ENGINE, DRIVELINE, ratio, capacity), Some(0));
             } else {
                 set.push(Coupling::new(ENGINE, INPUT, 1.0, capacity), Some(0));
-                if let (GearboxKind::HPattern { synchro_torque, .. }, ShiftPhase::Synchronising) =
-                    (&p.gearbox.kind, s.phase)
+                if let (
+                    GearboxKind::HPattern {
+                        synchro_torque,
+                        reverse_synchro,
+                        ..
+                    },
+                    ShiftPhase::Synchronising,
+                ) = (&p.gearbox.kind, s.phase)
                 {
+                    // Without a synchroniser, only the gear's teeth meet the input shaft.
+                    let torque = if s.target_gear == -1 && !reverse_synchro {
+                        0.0
+                    } else {
+                        *synchro_torque
+                    };
                     let ratio = gear_ratio(p, s.target_gear);
-                    set.push(
-                        Coupling::new(INPUT, DRIVELINE, ratio, *synchro_torque),
-                        None,
-                    );
+                    set.push(Coupling::new(INPUT, DRIVELINE, ratio, torque), None);
                 }
             }
         }
@@ -477,9 +496,11 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
             shift_time,
             creep_torque,
             launch_rpm,
+            ref control,
         } => {
             if s.gear != 0 {
-                let capacity = dual_clutch_capacity(s, p, input, out, creep_torque, launch_rpm);
+                let capacity =
+                    dual_clutch_capacity(s, p, input, out, creep_torque, launch_rpm, control);
                 let incoming = if s.phase == ShiftPhase::Handover {
                     (s.phase_time / shift_time).clamp(0.0, 1.0)
                 } else {
@@ -506,7 +527,7 @@ pub fn step(state: &mut DrivetrainState, p: &CarParams, input: &DriveInput) -> [
         Body::new(
             s.input_speed,
             input_inertia,
-            -INPUT_DRAG * (s.input_speed / 1.0).tanh(),
+            -p.gearbox.input_drag * (s.input_speed / 1.0).tanh(),
         ),
     ];
     let couplings = &mut set.list[..set.len];

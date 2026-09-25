@@ -115,6 +115,9 @@ impl ClutchAssist {
     }
 }
 
+/// How far below the incoming gear's speed the blip assist opens the throttle fully, rpm.
+const BLIP_BAND_RPM: f64 = 500.0;
+
 /// Blips the throttle on downshifts to bring the engine to the speed of the incoming gear,
 /// as heel-and-toe does, on cars whose electronics do not already.
 #[derive(Clone, Copy, Debug, Default)]
@@ -159,7 +162,9 @@ impl BlipAssist {
         if gear != 0 {
             let out = driveline_speed(p, &car.state.wheels.map(|w| w.spin));
             let target_rpm = gear_ratio(p, gear) * out * RPM_PER_RAD_S;
-            c.throttle = c.throttle.max(blip_throttle(target_rpm, d.rpm()));
+            c.throttle = c
+                .throttle
+                .max(blip_throttle(target_rpm, d.rpm(), BLIP_BAND_RPM));
         }
     }
 }
