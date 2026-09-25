@@ -149,16 +149,25 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         w = sample(slot, MASK, in.uv) * p.enabled;
     }
 
-    var tangent_space = vec3(0.0, 0.0, 1.0);
+    var normal = pbr_input.world_normal;
     if (p.flags & NORMAL_MAP) != 0u {
-        tangent_space = unpack_normal(sample(slot, NORMAL, in.uv).rgb);
+        normal = map_normal(normal, in.world_position.xyz, in.uv, unpack_normal(sample(slot, NORMAL, in.uv).rgb));
     }
     if (p.flags & DETAIL_NORMAL_MAP) != 0u {
         let bump = unpack_normal(sample(slot, DETAIL_NORMAL, detail_uv * p.detail_normal_scale).rgb);
-        tangent_space += vec3(bump.xy * (p.detail_normal_strength * w.r), 0.0);
+        // A single detail map on a base-alpha material follows the R mask. Multi-layer
+        // materials instead have one normal map over their whole world-projected surface.
+        let weight = select(w.r, 1.0, (p.flags & WORLD_UV) != 0u);
+        let detail_normal = map_normal(
+            pbr_input.world_normal,
+            in.world_position.xyz,
+            detail_uv,
+            vec3(bump.xy * p.detail_normal_strength * weight, 1.0),
+        );
+        normal = normalize(normal + detail_normal - pbr_input.world_normal);
     }
     if (p.flags & (NORMAL_MAP | DETAIL_NORMAL_MAP)) != 0u {
-        pbr_input.N = map_normal(pbr_input.world_normal, in.world_position.xyz, in.uv, tangent_space);
+        pbr_input.N = normal;
     }
 
     if (p.flags & DETAIL) != 0u {

@@ -60,14 +60,16 @@ const CONTROL_SPACING: f64 = 4.0;
 /// Largest gap between the last and first AI point of a closed circuit, in m.
 const MAX_LOOP_GAP: f64 = 40.0;
 const DEFAULT_HALF_WIDTH: f64 = 5.0;
-/// Name prefixes of the game's marker objects (grid and pit positions, timing lines),
+/// Name prefixes of the game's marker objects (grid, pit, timing, audio and reverb),
 /// which it never renders. Other `AC_` objects, such as start lights, are rendered.
-const MARKER_PREFIXES: [&str; 5] = [
+const MARKER_PREFIXES: [&str; 7] = [
     "AC_START_",
     "AC_PIT_",
     "AC_TIME_",
     "AC_HOTLAP_START_",
     "AC_AB_",
+    "AC_AUDIO_",
+    "AC_REVERB_",
 ];
 
 fn is_marker(mesh_name: &str) -> bool {
@@ -636,6 +638,8 @@ IS_VALID_TRACK=1
     fn markers_are_not_rendered() {
         assert!(is_marker("AC_PIT_12"));
         assert!(is_marker("AC_TIME_0_L"));
+        assert!(is_marker("AC_AUDIO_0"));
+        assert!(is_marker("AC_REVERB_BRIDGE"));
         assert!(!is_marker("AC_SEMAPHORE_RED_1"));
         assert!(!is_marker("1ROAD_AC_START"));
     }

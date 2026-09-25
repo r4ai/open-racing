@@ -15,6 +15,7 @@
 //! Normal maps carry over unchanged. The files store tangents that make normal × tangent
 //! point along +V, down the image, and the game's normal maps are authored for that
 //! bitangent (green down): the package's tangent frame, which follows from the UVs.
+//! Diffuse colour and opacity multipliers (`ksDiffuse`, `alpha`) also carry over.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -49,6 +50,12 @@ const MAX_F0: f32 = 0.08;
 const REFLECTIVE_F0: f32 = 0.04;
 /// Roughness of the game's cube-map reflections, which are sharp whatever the highlight.
 const MIRROR_ROUGHNESS: f32 = 0.1;
+/// AC's multilayer ground shaders use their Fresnel controls to brighten a baked
+/// environment map. Feeding those values straight into a physically based surface
+/// makes diffuse terrain look wet or white under the sky.
+const MULTILAYER_MIN_ROUGHNESS: f32 = 0.6;
+const MULTILAYER_MAX_REFLECTANCE: f32 = 0.5; // dielectric F0 <= 0.04
+const MULTILAYER_MAX_REFLECTION: f32 = 0.1;
 
 fn is_multilayer(m: &kn5::Material) -> bool {
     m.shader.starts_with("ksMultilayer")
@@ -60,6 +67,17 @@ fn alpha_mode(m: &kn5::Material) -> AlphaMode {
         (_, true) => AlphaMode::Mask(m.property("ksAlphaRef").filter(|&r| r > 0.0).unwrap_or(0.5)),
         _ => AlphaMode::Opaque,
     }
+}
+
+/// Carries AC's diffuse multiplier and, for blended materials, opacity into the package.
+fn base_color(m: &kn5::Material) -> [f32; 4] {
+    let diffuse = m.property("ksDiffuse").unwrap_or(1.0).max(0.0);
+    let alpha = if matches!(alpha_mode(m), AlphaMode::Blend) {
+        m.property("alpha").unwrap_or(1.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    [diffuse, diffuse, diffuse, alpha]
 }
 
 /// Mip levels for the diffuse texture, following how the material uses its alpha.
@@ -95,14 +113,15 @@ fn normal_map(m: &kn5::Material) -> Option<&str> {
 /// The game's highlight and reflection strengths, from which package surfaces follow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Shading {
-    /// `ksSpecular` relative to `ksDiffuse`: the package's base colour is the diffuse
-    /// texture alone, so the highlight keeps its ratio to the diffuse term.
+    /// `ksSpecular` relative to `ksDiffuse`, preserving the highlight's ratio to
+    /// the diffuse term when the base colour includes the diffuse multiplier.
     specular: f32,
     exponent: f32,
     /// `fresnelC`: reflection at normal incidence.
     fresnel: f32,
     /// `fresnelMaxLevel`: reflection at grazing angles, 0 without a reflection.
     max_level: f32,
+    multilayer: bool,
 }
 
 /// A package surface (see `Material`).
@@ -121,6 +140,7 @@ impl Shading {
             exponent: p("ksSpecularEXP"),
             fresnel: p("fresnelC"),
             max_level: p("fresnelMaxLevel"),
+            multilayer: is_multilayer(m),
         }
     }
 
@@ -145,11 +165,17 @@ impl Shading {
         // Where the reflection is present its sharpness wins over the highlight's spread.
         let sharp = if self.max_level > 0.0 { mirror } else { 0.0 };
         let roughness = roughness + (roughness.min(MIRROR_ROUGHNESS) - roughness) * sharp;
-        Surface {
+        let mut surface = Surface {
             roughness,
             reflectance: (f0 / 0.16).sqrt(),
             reflection,
+        };
+        if self.multilayer {
+            surface.roughness = surface.roughness.max(MULTILAYER_MIN_ROUGHNESS);
+            surface.reflectance = surface.reflectance.min(MULTILAYER_MAX_REFLECTANCE);
+            surface.reflection = surface.reflection.min(MULTILAYER_MAX_REFLECTION);
         }
+        surface
     }
 }
 
@@ -208,18 +234,24 @@ impl Job {
     /// Hashable form.
     fn key(self) -> JobKey {
         match self {
-            Self::Prepare(Mips::Complete) => (0, [0; 4]),
-            Self::Prepare(Mips::AlphaTest(c)) => (1, [c.to_bits(), 0, 0, 0]),
-            Self::Prepare(Mips::Source) => (2, [0; 4]),
+            Self::Prepare(Mips::Complete) => (0, [0; 5]),
+            Self::Prepare(Mips::AlphaTest(c)) => (1, [c.to_bits(), 0, 0, 0, 0]),
+            Self::Prepare(Mips::Source) => (2, [0; 5]),
             Self::Surface(s) => (
                 3,
-                [s.specular, s.exponent, s.fresnel, s.max_level].map(f32::to_bits),
+                [
+                    s.specular.to_bits(),
+                    s.exponent.to_bits(),
+                    s.fresnel.to_bits(),
+                    s.max_level.to_bits(),
+                    u32::from(s.multilayer),
+                ],
             ),
         }
     }
 }
 
-type JobKey = (u8, [u32; 4]);
+type JobKey = (u8, [u32; 5]);
 
 /// Textures a material samples, with the job preparing each.
 fn texture_uses(m: &kn5::Material) -> Vec<(&str, Job)> {
@@ -240,7 +272,9 @@ fn texture_uses(m: &kn5::Material) -> Vec<(&str, Job)> {
             .map(|t| (t, Job::Prepare(Mips::Complete))),
     );
     if is_multilayer(m) {
-        let detail = std::iter::once("txMask").chain(DETAIL_LAYERS.iter().map(|(s, _)| *s));
+        let detail = std::iter::once("txMask")
+            .chain(DETAIL_LAYERS.iter().map(|(s, _)| *s))
+            .chain((m.property("detailNMMult").unwrap_or(0.0) > 0.0).then_some("txDetailNM"));
         uses.extend(
             detail
                 .filter_map(|s| m.texture(s))
@@ -424,8 +458,10 @@ impl<'a> Materials<'a> {
         } else {
             1.0
         };
+        let mut base_color = base_color(m);
+        base_color[..3].iter_mut().for_each(|c| *c *= tint);
         let material = Material {
-            base_color: [tint, tint, tint, 1.0],
+            base_color,
             base_color_texture,
             roughness: surface.roughness,
             reflectance: surface.reflectance,
@@ -466,12 +502,22 @@ fn detail(
         })
     });
     let multiplier = m.property("magicMult").unwrap_or(1.0).max(0.0).powf(GAMMA);
+    let normal = m
+        .property("detailNMMult")
+        .filter(|&scale| scale > 0.0)
+        .and_then(|scale| {
+            texture("txDetailNM", Mips::Complete).map(|texture| DetailNormal {
+                texture,
+                scale,
+                strength: 1.0,
+            })
+        });
     Some(Detail {
         mask: DetailMask::Texture(mask),
         layers,
         multiplier,
         world_uv: true,
-        normal: None,
+        normal,
     })
 }
 
@@ -598,6 +644,49 @@ mod tests {
     }
 
     #[test]
+    fn material_colour_and_opacity_follow_kn5_properties() {
+        let mut m = shaded(&[("ksDiffuse", 0.5), ("alpha", 0.35)]);
+        let linear = 0.5f32;
+        assert_eq!(base_color(&m), [linear, linear, linear, 1.0]);
+        m.blend_mode = 1;
+        assert_eq!(base_color(&m), [linear, linear, linear, 0.35]);
+        m.properties
+            .iter_mut()
+            .find(|(name, _)| name == "alpha")
+            .unwrap()
+            .1 = 2.0;
+        assert_eq!(base_color(&m)[3], 1.0);
+    }
+
+    #[test]
+    fn multilayer_detail_normal_uses_its_own_scale() {
+        let mut m = multilayer();
+        m.samplers
+            .push(("txDetailNM".into(), "detail_nm.dds".into()));
+        m.properties.push(("detailNMMult".into(), 0.25));
+        assert!(
+            texture_uses(&m)
+                .iter()
+                .any(|(name, _)| *name == "detail_nm.dds")
+        );
+        let d = detail(&m, &mut |s, _| {
+            m.samplers
+                .iter()
+                .position(|(sampler, _)| sampler == s)
+                .map(|i| i as u32)
+        })
+        .unwrap();
+        assert_eq!(
+            d.normal,
+            Some(DetailNormal {
+                texture: 4,
+                scale: 0.25,
+                strength: 1.0,
+            })
+        );
+    }
+
+    #[test]
     fn highlights_become_roughness_and_reflectance() {
         let surface = |props: &[(&str, f32)]| Shading::of(&shaded(props)).surface([1.0; 3]);
         // No highlight, no reflection: no specular at all.
@@ -649,6 +738,43 @@ mod tests {
         assert!(
             s.roughness > 0.6 && s.reflectance == 0.0 && s.reflection == 0.0,
             "{s:?}"
+        );
+    }
+
+    #[test]
+    fn multilayer_ground_does_not_turn_into_a_mirror() {
+        let mut ground = shaded(&[
+            ("ksDiffuse", 0.7),
+            ("ksSpecularEXP", 30.0),
+            ("fresnelC", 0.5),
+            ("fresnelMaxLevel", 6.0),
+        ]);
+        ground.shader = "ksMultilayer_fresnel_nm".into();
+        let shading = Shading::of(&ground);
+        let surface = shading.surface([1.0; 3]);
+        assert_eq!(surface.roughness, MULTILAYER_MIN_ROUGHNESS);
+        assert_eq!(surface.reflectance, MULTILAYER_MAX_REFLECTANCE);
+        assert_eq!(surface.reflection, MULTILAYER_MAX_REFLECTION);
+
+        // The same limits also apply when txMaps bakes a per-pixel surface.
+        let map = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![255, 255, 255, 255],
+        };
+        let baked = bake_surface(&map, shading);
+        assert_eq!(
+            baked.pixels[0],
+            (MULTILAYER_MAX_REFLECTION * 255.0).round() as u8
+        );
+        assert_eq!(
+            baked.pixels[1],
+            (MULTILAYER_MIN_ROUGHNESS * 255.0).round() as u8
+        );
+        ground.shader.clear();
+        assert_ne!(
+            Job::Surface(shading).key(),
+            Job::Surface(Shading::of(&ground)).key()
         );
     }
 
