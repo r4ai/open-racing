@@ -1,3 +1,6 @@
 [alias]
 # Run the app with Bevy linked as a DLL: the fastest edit-build-run loop.
 dev = "run -p open-racing-app --features dev"
+# The track editor, and the command line for track projects (scripts and agents).
+editor = "run -p open-racing-editor --features dev --"
+trackctl = "run -q -p open-racing-track-project --bin open-racing-trackctl --"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/train-burn", "crates/app", "crates/track-render", "crates/track-project"]
+members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/train-burn", "crates/app", "crates/track-render", "crates/track-project", "crates/editor"]
 default-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/track-project"]
 
 [workspace.package]

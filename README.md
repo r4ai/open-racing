@@ -22,6 +22,9 @@ domain     sim        vehicle dynamics and tracks (deterministic, zero allocatio
 | `crates/ac`         | Converter from track and car folders in the Assetto Corsa format to track and car packages                                                                                                    |
 | `crates/train-burn` | PPO (GAE, clipping, observation normalisation) and `BurnPolicy`                                                                                                                              |
 | `crates/app`        | Driving, AI spectating, replay, HUD                                                                                                                                                          |
+| `crates/track-project` | Editable track projects (road splines, cross-sections, barriers, race markers) baked into track packages; `open-racing-trackctl` for scripts and agents |
+| `crates/editor`     | Track editor                                                                                                                                                                                 |
+| `crates/track-render` | Bevy rendering of track and car models, shared by the app and the editor                                                                                                                  |
 
 Physics runs at a fixed 1 kHz. Everything is in SI units, and steering input is the steering wheel angle in radians, the same physical quantity a real wheel reports.
 
@@ -45,6 +48,25 @@ cargo run --release -p open-racing-app -- --ai runs/lakeside
 ```
 
 Use `--features ndarray` or `--features flex` for a CPU backend.
+
+### Track editor
+
+Circuits are built as projects: roads laid along splines, with their width, banking and crown, and strips beside them (kerbs, run-off, gravel, grass) limited to stretches of the road. Projects also hold painted lines, barriers, the start line, sectors, the grid and a pit lane. Baking a project writes a track package with its race layout. The app starts cars on the pole slot and shows sector times.
+
+```bash
+# The editor (projects live in content/track-src/<name>/)
+cargo editor my-track
+
+# The same projects from the command line, for scripts and AI agents
+cargo trackctl guide                      # the format and the operations
+cargo trackctl info my-track --json       # facts: lengths, node distances, radii, grades, warnings
+cargo trackctl apply my-track ops.json    # edits as operations, all or nothing
+cargo trackctl preview my-track           # plan view as PNG
+cargo trackctl bake my-track              # package in content/tracks/my-track/, checked with a test lap
+cargo run --release -p open-racing-app -- --track my-track
+```
+
+Every edit in the editor is one of the operations `trackctl apply` takes, and the editor saves each one to `project.ron` straight away. When the file changes on disk, the editor reloads it, so a person and an agent can work on the same track at once. `open-racing-editor <project> --screenshot view.png` saves the 3D view and quits.
 
 ### Track evolution
 
