@@ -19,6 +19,14 @@
         pressure: 2.3,
         unsprung_mass: 40.0,
         wheel_inertia: 0.9,
+        // MacPherson strut: a lower arm and a strut through its top mount, the rack
+        // behind the axle.
+        linkage: MacPherson(
+            lower: (front: (0.02, -0.40, -0.14), rear: (-0.30, -0.38, -0.13), outer: (0.0, -0.07, -0.15)),
+            strut_top: (-0.055, -0.225, 0.60),
+            strut_bottom: (-0.02, -0.13, 0.12),
+            tie_rod: (inner: (-0.14, -0.40, -0.067), outer: (-0.14, -0.12, -0.07)),
+        ),
         spring_rate: 43000.0,
         bump_damping: 3000.0,
         rebound_damping: 4300.0,
@@ -34,6 +42,16 @@
         pressure: 2.2,
         unsprung_mass: 42.0,
         wheel_inertia: 1.0,
+        // Multi-link: two upper and two lower links and a toe link.
+        linkage: MultiLink(
+            links: (
+                (inner: (0.12, -0.42, 0.14), outer: (0.03, -0.10, 0.16)),
+                (inner: (-0.18, -0.40, 0.15), outer: (-0.03, -0.10, 0.16)),
+                (inner: (0.28, -0.40, -0.10), outer: (0.05, -0.07, -0.14)),
+                (inner: (-0.12, -0.45, -0.12), outer: (-0.05, -0.08, -0.14)),
+            ),
+            tie_rod: (inner: (-0.15, -0.42, -0.03), outer: (-0.14, -0.09, -0.04)),
+        ),
         spring_rate: 44000.0,
         bump_damping: 3000.0,
         rebound_damping: 4300.0,
@@ -47,7 +65,6 @@
     steering: (
         ratio: 13.0,
         lock: 6.28,                  // 360 deg each way
-        ackermann: 0.5,
     ),
 
     brakes: (

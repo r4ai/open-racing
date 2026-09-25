@@ -17,6 +17,14 @@
         pressure: 2.3,               // cold; ~2.6 bar hot
         unsprung_mass: 42.0,
         wheel_inertia: 0.9,
+        // MacPherson strut: a lower arm and a strut through its top mount, the rack
+        // behind the axle.
+        linkage: MacPherson(
+            lower: (front: (0.02, -0.40, -0.14), rear: (-0.30, -0.38, -0.13), outer: (0.0, -0.07, -0.15)),
+            strut_top: (-0.055, -0.225, 0.60),
+            strut_bottom: (-0.02, -0.13, 0.12),
+            tie_rod: (inner: (-0.14, -0.40, -0.067), outer: (-0.14, -0.12, -0.07)),
+        ),
         spring_rate: 38000.0,
         bump_damping: 2800.0,
         rebound_damping: 4000.0,
@@ -32,6 +40,8 @@
         pressure: 2.2,
         unsprung_mass: 35.0,
         wheel_inertia: 0.9,
+        // Twist beam, taken as trailing arms pivoting ahead of the wheels.
+        linkage: TrailingArm(pivots: ((0.48, -0.62, -0.03), (0.48, -0.30, -0.03))),
         spring_rate: 32000.0,
         bump_damping: 2400.0,
         rebound_damping: 3600.0,
@@ -45,7 +55,6 @@
     steering: (
         ratio: 14.0,
         lock: 7.33,                  // 420 deg each way
-        ackermann: 0.6,
     ),
 
     brakes: (

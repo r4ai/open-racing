@@ -37,7 +37,7 @@ fn main() {
                 s.time,
                 s.position.z,
                 car.speed(),
-                s.wheels.map(|w| w.extension),
+                s.wheels.map(|w| w.travel),
                 car.telemetry.wheels.map(|w| w.load),
                 s.drivetrain.rpm()
             );

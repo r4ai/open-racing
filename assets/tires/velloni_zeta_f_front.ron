@@ -1,0 +1,55 @@
+// Velloni Zeta F, a fictional slick for single-seaters of the Formula 3 class on 13-inch
+// rims, front size 25/57-13. Lighter and smaller than a GT slick: less load, a shorter
+// contact patch, a quicker response, and less heat stored in the carcass.
+// Units: SI (m, N, s), angles in radians, temperatures in °C, pressures in bar (gauge).
+(
+    name: "Velloni Zeta F 25/57-13 (front)",
+    radius: 0.285,
+    width: 0.255,
+    vertical_stiffness: 220000.0,    // at the optimal hot pressure
+    vertical_damping: 300.0,
+    mu_x: 1.70,
+    mu_y: 1.65,
+    nominal_load: 2000.0,
+    load_exponent_x: 0.87,          // friction force ∝ load^exponent
+    load_exponent_y: 0.87,
+    longitudinal: (peak_slip: 0.10, shape: 1.65, curvature: 0.3),
+    lateral: (peak_slip: 0.12, shape: 1.45, curvature: 0.3),
+    relaxation_x: 0.12,
+    relaxation_y: 0.28,
+    camber_thrust: 0.12,
+    optimal_camber: -0.045,
+    camber_grip_loss: 20.0,
+    pneumatic_trail: 0.030,
+    rolling_resistance: 0.012,
+
+    pressure: (
+        optimal: 1.60,                   // hot
+        window: 0.25,
+        grip_loss: 0.12,
+        stiffness_per_bar: 70000.0,
+        peak_slip_per_bar: -0.15,
+        rolling_resistance_per_bar: -0.3,
+        crown_load_per_bar: 1.0,
+    ),
+
+    thermal: (
+        // Grip against the tread surface temperature, °C.
+        grip_curve: [(-10.0, 0.85), (25.0, 0.88), (60.0, 0.955), (95.0, 1.0), (115.0, 0.955), (135.0, 0.88), (160.0, 0.85)],
+        wear_window: 35.0,
+        start_temperature: Some(70.0),         // out of the tyre blankets
+        surface_capacity: 900.0,
+        core_capacity: 9000.0,
+        core_conductance: 80.0,
+        zone_conductance: 22.0,
+        air_cooling: 4.5,
+        air_cooling_per_speed: 0.9,
+        road_cooling: 26.0,
+        slide_heat_share: 0.5,
+        rolling_heat_share: 0.5,
+        camber_load_shift: 6.0,
+        carcass_roll: 0.03,
+        wear_rate: 0.025,
+        wear_grip_loss: 0.1,
+    ),
+)

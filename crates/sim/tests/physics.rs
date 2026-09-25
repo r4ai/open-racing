@@ -1364,3 +1364,198 @@ fn a_hot_engine_bay_warms_the_intake_and_the_gearbox() {
     assert!(heat.intake > start.intake + 5.0, "{start:?} / {heat:?}");
     assert!(heat.gearbox > start.gearbox, "{start:?} / {heat:?}");
 }
+
+// ---- Suspension ------------------------------------------------------------------------
+
+/// `model` with `change` made to its front and rear axles.
+fn with_axles(
+    model: Arc<CarModel>,
+    change: impl Fn(bool, &mut params::AxleParams),
+) -> Arc<CarModel> {
+    let mut p = model.params.clone();
+    change(true, &mut p.front);
+    change(false, &mut p.rear);
+    Arc::new(CarModel::new(p, model.front_tire.p.clone(), model.rear_tire.p.clone()).unwrap())
+}
+
+/// Double wishbones whose arms pivot on horizontal axes and lie level: no anti-dive,
+/// anti-squat or anti-lift, and the roll centre on the ground.
+fn level_wishbones() -> suspension::Linkage {
+    use suspension::{Link, Linkage, Wishbone};
+    Linkage::DoubleWishbone {
+        upper: Wishbone {
+            front: [0.15, -0.45, 0.17],
+            rear: [-0.15, -0.45, 0.17],
+            outer: [-0.04, -0.11, 0.17],
+        },
+        lower: Wishbone {
+            front: [0.2, -0.58, -0.15],
+            rear: [-0.2, -0.58, -0.15],
+            outer: [0.0, -0.06, -0.15],
+        },
+        tie_rod: Link {
+            inner: [-0.13, -0.527, -0.02],
+            outer: [-0.13, -0.095, -0.02],
+        },
+    }
+}
+
+#[test]
+fn the_bundled_cars_have_sensible_suspension() {
+    for name in [
+        "gt3",
+        "formula",
+        "fr_coupe",
+        "fr_sports",
+        "mr_coupe",
+        "awd_sedan",
+        "hot_hatch",
+    ] {
+        let model = asset_car(name);
+        for front in [true, false] {
+            let f = model.axle_figures(front);
+            let k = f.kinematics;
+            let axle = format!("{name} {}: {f:?}", if front { "front" } else { "rear" });
+            // Camber gain up to ~0.4°/10 mm, a few hundredths of a degree of bump steer,
+            // the roll centre above the ground and below the wheel centres.
+            assert!((-0.8..=0.0).contains(&k.camber_gain), "{axle}");
+            assert!(k.bump_steer.abs() < 0.1f64.to_radians() * 100.0, "{axle}");
+            assert!((0.0..0.2).contains(&k.roll_centre), "{axle}");
+            assert!((0.0..1.0).contains(&f.anti_brake), "{axle}");
+            assert!((1.2..5.0).contains(&f.ride_frequency), "{axle}");
+            if front {
+                assert!(k.caster > 0.0 && k.kingpin_inclination > 0.0, "{axle}");
+                assert!((0.0..0.05).contains(&k.trail), "{axle}");
+                assert!((0.0..0.8).contains(&f.ackermann), "{axle}");
+            }
+        }
+    }
+}
+
+/// Mean travel of the front wheels, m, over the second half of a second of hard braking
+/// from 150 km/h, eased as a wheel starts to lock.
+fn front_dive(model: Arc<CarModel>) -> f64 {
+    let track = circle(5000.0);
+    let mut car = Car::new(model, &track, 0.0, 0.0, 150.0 / 3.6, 5);
+    let (mut sum, mut n) = (0.0, 0);
+    while car.state.time < 1.0 {
+        let locking = car.telemetry.wheels.iter().any(|w| w.slip_ratio < -0.1);
+        car.step(
+            &track,
+            &Controls {
+                brake: if locking { 0.5 } else { 0.9 },
+                ..Default::default()
+            },
+        );
+        if car.state.time > 0.5 {
+            sum += 0.5 * (car.state.wheels[FL].travel + car.state.wheels[FR].travel);
+            n += 1;
+        }
+    }
+    sum / n as f64
+}
+
+#[test]
+fn anti_dive_holds_the_nose_up_under_braking() {
+    let gt3 = gt3();
+    let level = with_axles(gt3.clone(), |front, a| {
+        if front {
+            a.linkage = level_wishbones();
+        }
+    });
+    let (anti, none) = (front_dive(gt3.clone()), front_dive(level));
+    eprintln!(
+        "front dive: {:.1} mm with {:.0} % anti-dive, {:.1} mm without",
+        anti * 1e3,
+        gt3.axle_figures(true).anti_brake * 100.0,
+        none * 1e3
+    );
+    // The linkage takes about a quarter of the pitch off the front springs.
+    assert!(anti > 0.0 && anti < 0.9 * none, "{anti} vs {none}");
+}
+
+/// Body roll, degrees, holding a 60 m circle at 0.9 g.
+fn body_roll(model: Arc<CarModel>) -> f64 {
+    let (_, car, _) = hold_circle(model, 60.0, 0.9);
+    (car.state.orientation * DVec3::Y)
+        .z
+        .asin()
+        .to_degrees()
+        .abs()
+}
+
+#[test]
+fn a_higher_roll_centre_rolls_the_body_less() {
+    let gt3 = gt3();
+    let level = with_axles(gt3.clone(), |_, a| a.linkage = level_wishbones());
+    let (raised, ground) = (body_roll(gt3), body_roll(level));
+    eprintln!(
+        "roll at 0.9 g: {raised:.2}° with the GT3's roll centres, {ground:.2}° on the ground"
+    );
+    // The lateral forces act nearer the roll axis, which is nearer the centre of gravity.
+    assert!(raised < 0.95 * ground, "{raised} vs {ground}");
+}
+
+/// Ride heights at the axles, m, holding `kmh` on a straight.
+fn ride_at(model: Arc<CarModel>, kmh: f64) -> [f64; 2] {
+    let track = circle(20000.0);
+    let target = kmh / 3.6;
+    let mut car = Car::new(model, &track, 0.0, 0.0, target, 6);
+    while car.state.time < 3.0 {
+        let v = car.local_velocity().x;
+        car.step(
+            &track,
+            &Controls {
+                throttle: (0.5 + 0.5 * (target - v)).clamp(0.0, 1.0),
+                ..Default::default()
+            },
+        );
+    }
+    car.telemetry.ride_height
+}
+
+#[test]
+fn formula_figures() {
+    let model = asset_car("formula");
+    // At rest the car sits at its static ride height.
+    let track = circle(5000.0);
+    let mut car = Car::new(model.clone(), &track, 0.0, 0.0, 0.0, 0);
+    for _ in 0..3000 {
+        car.step(
+            &track,
+            &Controls {
+                brake: 0.3,
+                ..Default::default()
+            },
+        );
+    }
+    let travel = car.state.wheels.map(|w| w.travel);
+    assert!(travel.iter().all(|t| t.abs() < 1e-3), "{travel:?}");
+
+    let (t100, top) = launch(model.clone(), 60.0);
+    let t100 = t100.expect("reaches 100 km/h");
+    let g = skidpad(model.clone(), 60.0);
+    let ride = ride_at(model.clone(), 250.0);
+    eprintln!(
+        "formula: 0-100 km/h {t100:.2} s, {top:.0} km/h after 60 s, skidpad {g:.3} g, \
+         ride {:.0} / {:.0} mm at 250 km/h",
+        ride[0] * 1e3,
+        ride[1] * 1e3
+    );
+    // Formula 3 cars: 0-100 in ~3-3.5 s, ~250-270 km/h without a tow, more lateral grip
+    // than a GT3 once the wings work.
+    assert!((2.6..4.0).contains(&t100), "0-100 km/h in {t100:.2} s");
+    assert!((240.0..290.0).contains(&top), "top speed {top:.0} km/h");
+    assert!((1.4..2.0).contains(&g), "max lateral {g:.2} g");
+    // The heave springs hold the floor off the road under the downforce.
+    assert!(ride.iter().all(|&h| h > 0.01), "{ride:?}");
+}
+
+#[test]
+fn heave_springs_hold_the_ride_height_under_downforce() {
+    let formula = asset_car("formula");
+    let soft = with_axles(formula.clone(), |_, a| a.heave = None);
+    let (with, without) = (ride_at(formula, 250.0), ride_at(soft, 250.0));
+    eprintln!("ride at 250 km/h: {with:?} with heave springs, {without:?} without");
+    assert!(with[0] > without[0] + 0.002 && with[1] > without[1] + 0.002);
+}

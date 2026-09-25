@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::GRAVITY;
 use crate::brakes::BrakeModel;
 use crate::engine::EngineModel;
+use crate::suspension::{Actuation, Alignment, Kinematics, Linkage, Pose, Summary};
 use crate::tire::{TireModel, TireParams};
+
+/// How far the linkage reaches beyond the bump stops, m: the hard limits of the travel.
+pub const OVERTRAVEL: f64 = 0.03;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AxleParams {
@@ -22,61 +26,69 @@ pub struct AxleParams {
     pub unsprung_mass: f64,
     /// Rotational inertia of one wheel about its spin axis in kg·m².
     pub wheel_inertia: f64,
-    /// Wheel rate of the spring in N/m.
+    /// How the upright is guided: the left wheel's hardpoints (see [`crate::suspension`]).
+    /// The steering axis, the Ackermann, bump steer, camber gain, the roll centre and the
+    /// anti-dive / anti-squat follow from it.
+    pub linkage: Linkage,
+    /// How the wheel works the springs, dampers, anti-roll bar and heave spring; at the
+    /// wheel when left out, so that their rates are wheel rates.
+    #[serde(default)]
+    pub actuation: Actuation,
+    /// Spring rate, N/m of the actuation's compression.
     pub spring_rate: f64,
-    /// Damping in compression / extension in N·s/m (wheel rate).
+    /// Damping in compression / extension below `damper_knee`, N·s/m of the actuation.
     pub bump_damping: f64,
     pub rebound_damping: f64,
-    /// Anti-roll bar rate in N/m of left-right travel difference.
+    /// Damping above `damper_knee` (the high-speed circuit); as below when left out.
+    #[serde(default)]
+    pub fast_bump_damping: Option<f64>,
+    #[serde(default)]
+    pub fast_rebound_damping: Option<f64>,
+    /// Damper speed at which the high-speed circuit takes over, m/s.
+    #[serde(default = "default_damper_knee")]
+    pub damper_knee: f64,
+    /// Anti-roll bar rate in N/m of the left-right difference of the actuations.
     pub anti_roll_rate: f64,
-    /// Travel available from static ride height, in m.
+    /// Third (heave) spring working on both wheels' mean actuation; none when left out.
+    #[serde(default)]
+    pub heave: Option<HeaveParams>,
+    /// Wheel travel from static ride height to the bump stops, m.
     pub bump_travel: f64,
     pub droop_travel: f64,
-    /// Stiffness of the progressive bump stop in N/m.
+    /// Stiffness of the bump stops at the wheel in N/m.
     pub bump_stop_rate: f64,
     /// Static camber in radians, negative = top leaning inwards.
     pub static_camber: f64,
-    /// Camber change per metre of bump travel from the static ride height, rad/m
-    /// (negative: the wheel gains negative camber as it rises, as on double wishbones
-    /// whose arms converge inboard).
+    /// Static toe in radians, positive = toe-in.
     #[serde(default)]
-    pub camber_gain: f64,
+    pub static_toe: f64,
+}
+
+fn default_damper_knee() -> f64 {
+    0.1
+}
+
+/// A third spring and damper working on the mean of an axle's two actuations: it
+/// stiffens the axle in heave (under downforce) without stiffening it in roll.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeaveParams {
+    /// N/m of the mean compression beyond `gap`.
+    pub rate: f64,
+    /// Mean compression from static before the spring (its packers) starts to act, m.
+    #[serde(default)]
+    pub gap: f64,
+    /// N·s/m of the mean compression's rate.
+    #[serde(default)]
+    pub damping: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SteeringParams {
-    /// Steering wheel angle / road wheel angle.
+    /// Steering wheel angle / road wheel angle near the centre: it sets the rack's
+    /// travel per turn of the steering wheel.
     pub ratio: f64,
     /// Steering wheel lock in radians (each direction).
     pub lock: f64,
-    /// 0 = parallel steer, 1 = full Ackermann.
-    pub ackermann: f64,
-    /// Caster angle in radians: the steering axis leans back at the top.
-    #[serde(default = "default_caster")]
-    pub caster: f64,
-    /// Kingpin inclination in radians: the steering axis leans inwards at the top.
-    #[serde(default = "default_kingpin_inclination")]
-    pub kingpin_inclination: f64,
-    /// Mechanical trail in m: how far the contact patch trails the point where the
-    /// steering axis meets the ground.
-    #[serde(default = "default_trail")]
-    pub trail: f64,
-    /// Scrub radius in m: how far the contact patch lies outboard of that point.
-    #[serde(default = "default_scrub_radius")]
-    pub scrub_radius: f64,
-}
-
-fn default_caster() -> f64 {
-    0.12
-}
-fn default_kingpin_inclination() -> f64 {
-    0.15
-}
-fn default_trail() -> f64 {
-    0.025
-}
-fn default_scrub_radius() -> f64 {
-    0.015
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -788,6 +800,30 @@ impl CarParams {
             "tyre pressure must be positive",
         )?;
         check(
+            self.steering.ratio > 0.0 && self.steering.lock > 0.0,
+            "steering ratio and lock must be positive",
+        )?;
+        check(
+            [&self.front, &self.rear].iter().all(|a| {
+                a.spring_rate > 0.0
+                    && a.bump_damping >= 0.0
+                    && a.rebound_damping >= 0.0
+                    && a.fast_bump_damping.is_none_or(|d| d >= 0.0)
+                    && a.fast_rebound_damping.is_none_or(|d| d >= 0.0)
+                    && a.damper_knee > 0.0
+                    && a.anti_roll_rate >= 0.0
+                    && a.bump_travel > 0.0
+                    && a.droop_travel > 0.0
+                    && a.bump_stop_rate >= 0.0
+                    && a.unsprung_mass > 0.0
+                    && a.heave
+                        .as_ref()
+                        .is_none_or(|h| h.rate >= 0.0 && h.damping >= 0.0)
+            }),
+            "suspension: spring rate, travels and unsprung mass must be positive, damping, \
+             bars, bump stops and heave springs not negative",
+        )?;
+        check(
             (0.0..=1.0).contains(&self.drive.front_share()),
             "drive: front_share must be in 0..1",
         )?;
@@ -854,18 +890,17 @@ impl CarParams {
 /// Per-corner constants derived from `CarParams`.
 #[derive(Clone, Debug)]
 pub struct CornerModel {
-    /// Suspension top mount in body coordinates (the strut runs along body −z from here).
-    pub hardpoint: DVec3,
+    /// Wheel centre at static ride height in body coordinates.
+    pub origin: DVec3,
     /// +1 for left wheels, −1 for right wheels.
     pub side: f64,
     pub front: bool,
     pub driven: bool,
-    /// Static extension of the wheel below the hardpoint.
-    pub static_extension: f64,
-    /// Extension at which the spring is unloaded.
-    pub spring_free_extension: f64,
-    pub min_extension: f64,
-    pub max_extension: f64,
+    /// Travel (bump positive) at which the droop and bump stops start, m.
+    pub droop_stop: f64,
+    pub bump_stop: f64,
+    /// Force of the coil-over at static ride height, N: it holds the corner's weight.
+    pub preload: f64,
     /// Tyre deflection under the static load, m.
     pub static_deflection: f64,
 }
@@ -876,6 +911,9 @@ pub struct CarModel {
     pub params: CarParams,
     pub sprung_mass: f64,
     pub corners: [CornerModel; 4],
+    /// The front and rear linkages solved over their travel (and the front's rack).
+    pub front_kinematics: Kinematics,
+    pub rear_kinematics: Kinematics,
     pub front_tire: TireModel,
     pub rear_tire: TireModel,
     pub engine: EngineModel,
@@ -909,7 +947,8 @@ impl CarModel {
         let front_x = p.wheelbase * (1.0 - p.front_weight);
         let rear_x = -p.wheelbase * p.front_weight;
 
-        let corner = |front: bool, side: f64| {
+        // Per axle: the tyre's load and deflection at rest, and the linkage solved.
+        let axle = |front: bool| -> Result<(f64, f64, Kinematics), ParamsError> {
             let axle = if front { &p.front } else { &p.rear };
             let tire = if front { &front_tire } else { &rear_tire };
             let axle_weight = if front {
@@ -917,40 +956,79 @@ impl CarModel {
             } else {
                 1.0 - p.front_weight
             };
-            // Load carried by the spring at this corner in static equilibrium.
-            let corner_sprung = 0.5 * p.mass * axle_weight - axle.unsprung_mass;
-            let spring_load = corner_sprung * GRAVITY;
-            let tire_load = spring_load + axle.unsprung_mass * GRAVITY;
-            let tire_deflection = tire_load / tire.vertical_stiffness;
-            // Hardpoints at CG height ⇒ extension = CG height − wheel-centre height.
-            let static_extension = p.cg_height - (tire.radius - tire_deflection);
+            let tire_load = 0.5 * p.mass * axle_weight * GRAVITY;
+            let deflection = tire_load / tire.vertical_stiffness;
             let track = if front { p.track_front } else { p.track_rear };
-            CornerModel {
-                hardpoint: DVec3::new(
+            let kinematics = Kinematics::new(
+                axle.linkage.clone(),
+                axle.actuation.clone(),
+                Alignment {
+                    camber: axle.static_camber,
+                    toe: axle.static_toe,
+                },
+                -(axle.droop_travel + OVERTRAVEL),
+                axle.bump_travel + OVERTRAVEL,
+                front.then_some((p.steering.ratio, p.steering.lock)),
+                tire.radius - deflection,
+                0.5 * track,
+            )?;
+            Ok((tire_load, deflection, kinematics))
+        };
+        let (front_load, front_deflection, front_kinematics) = axle(true)?;
+        let (rear_load, rear_deflection, rear_kinematics) = axle(false)?;
+
+        let mut corners = Vec::with_capacity(4);
+        for (front, side) in [(true, 1.0), (true, -1.0), (false, 1.0), (false, -1.0)] {
+            let (axle, tire, kinematics, load, deflection) = if front {
+                (
+                    &p.front,
+                    &front_tire,
+                    &front_kinematics,
+                    front_load,
+                    front_deflection,
+                )
+            } else {
+                (
+                    &p.rear,
+                    &rear_tire,
+                    &rear_kinematics,
+                    rear_load,
+                    rear_deflection,
+                )
+            };
+            // At rest the tyre's load, which does work as the contact patch rises with
+            // the travel, and the upright's weight are held by the coil-over.
+            let pose = kinematics.pose(0.0, 0.0);
+            let patch = -DVec3::Z * (tire.radius - deflection);
+            let patch_rise = (pose.centre_travel + pose.spin_travel.cross(patch)).z;
+            let held = load * patch_rise - axle.unsprung_mass * GRAVITY * pose.centre_travel.z;
+            if pose.motion_ratio < 0.05 {
+                return Err(ParamsError::Invalid(
+                    "actuation: the coil-over must compress as the wheel rises",
+                ));
+            }
+            let track = if front { p.track_front } else { p.track_rear };
+            corners.push(CornerModel {
+                origin: DVec3::new(
                     if front { front_x } else { rear_x },
                     side * 0.5 * track,
-                    0.0,
+                    tire.radius - deflection - p.cg_height,
                 ),
                 side,
                 front,
                 driven: p.drive.drives(front),
-                static_extension,
-                spring_free_extension: static_extension + spring_load / axle.spring_rate,
-                min_extension: static_extension - axle.bump_travel,
-                max_extension: static_extension + axle.droop_travel,
-                static_deflection: tire_deflection,
-            }
-        };
-
-        let corners = [
-            corner(true, 1.0),
-            corner(true, -1.0),
-            corner(false, 1.0),
-            corner(false, -1.0),
-        ];
+                droop_stop: -axle.droop_travel,
+                bump_stop: axle.bump_travel,
+                preload: held / pose.motion_ratio,
+                static_deflection: deflection,
+            });
+        }
+        let corners: [CornerModel; 4] = corners.try_into().expect("four corners");
         Ok(Self {
             sprung_mass,
             corners,
+            front_kinematics,
+            rear_kinematics,
             engine: EngineModel::new(&p.engine),
             brakes: BrakeModel::new(&p.brakes),
             front_tire: TireModel::new(front_tire),
@@ -1009,11 +1087,127 @@ impl CarModel {
     }
 
     #[inline]
+    pub fn kinematics(&self, wheel: usize) -> &Kinematics {
+        if wheel < 2 {
+            &self.front_kinematics
+        } else {
+            &self.rear_kinematics
+        }
+    }
+
+    /// The upright's pose of `wheel` at `travel` (bump positive) and `rack` (left), m,
+    /// relative to its static wheel centre (`CornerModel::origin`) in body axes.
+    #[inline]
+    pub fn pose(&self, wheel: usize, travel: f64, rack: f64) -> Pose {
+        let k = self.kinematics(wheel);
+        if self.corners[wheel].side > 0.0 {
+            k.pose(travel, rack)
+        } else {
+            k.pose(travel, -rack).mirrored()
+        }
+    }
+
+    /// Lines between the joints of `wheel`'s linkage and actuation at `travel` and
+    /// `rack`, in body coordinates, appended to `out`: for drawing.
+    pub fn linkage_segments(
+        &self,
+        wheel: usize,
+        travel: f64,
+        rack: f64,
+        out: &mut Vec<(DVec3, DVec3)>,
+    ) {
+        let c = &self.corners[wheel];
+        let from = out.len();
+        self.kinematics(wheel).segments(travel, c.side * rack, out);
+        for (a, b) in &mut out[from..] {
+            for p in [a, b] {
+                *p = c.origin + DVec3::new(p.x, c.side * p.y, p.z);
+            }
+        }
+    }
+
+    #[inline]
     pub fn tire(&self, wheel: usize) -> &TireModel {
         if wheel < 2 {
             &self.front_tire
         } else {
             &self.rear_tire
+        }
+    }
+}
+
+/// What an axle's suspension does at static ride height, for setting it up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AxleFigures {
+    pub kinematics: Summary,
+    /// Share of the pitch its linkage takes off the springs under braking (anti-dive at
+    /// the front, anti-lift at the rear) and under drive (anti-squat at the rear,
+    /// anti-lift at the front), from the brake balance and the drive's split.
+    pub anti_brake: f64,
+    pub anti_drive: f64,
+    /// Rates at the wheel, N/m: the spring's, the anti-roll bar's (per metre of left-right
+    /// difference) and the heave spring's (per wheel, both rising).
+    pub spring_rate: f64,
+    pub anti_roll_rate: f64,
+    pub heave_rate: f64,
+    /// Natural frequency of the body's corner on the spring and the tyre, Hz.
+    pub ride_frequency: f64,
+    /// How far the inner wheel turns more than the outer at 10° of mean lock, as a share
+    /// of what full Ackermann would give (negative: anti-Ackermann). Front only.
+    pub ackermann: f64,
+}
+
+impl CarModel {
+    /// The figures of the front or rear suspension.
+    pub fn axle_figures(&self, front: bool) -> AxleFigures {
+        let p = &self.params;
+        let wheel = if front { 0 } else { 2 };
+        let (axle, k, tire) = (self.axle(wheel), self.kinematics(wheel), self.tire(wheel));
+        let s = k.summary;
+        let pose = k.pose(0.0, 0.0);
+        let mr2 = pose.motion_ratio * pose.motion_ratio;
+        let lever = p.wheelbase / p.cg_height;
+        let bias = p.brakes.front_bias;
+        let drive = p.drive.front_share();
+        let (anti_brake, anti_drive) = if front {
+            (bias * s.patch_pitch * lever, drive * s.centre_pitch * lever)
+        } else {
+            (
+                (1.0 - bias) * -s.patch_pitch * lever,
+                (1.0 - drive) * -s.centre_pitch * lever,
+            )
+        };
+        let spring = axle.spring_rate * mr2;
+        let tyre = tire.p.vertical_stiffness;
+        let weight = if front {
+            p.front_weight
+        } else {
+            1.0 - p.front_weight
+        };
+        let corner = 0.5 * p.mass * weight - axle.unsprung_mass;
+        let ride = spring * tyre / (spring + tyre);
+        let ackermann = if front {
+            // Rack for 10° of mean lock to the left: the left wheel is the inner one.
+            let lock = 10f64.to_radians();
+            let rack = lock * p.steering.ratio * k.rack_gain;
+            let (inner, outer) = (
+                self.pose(0, 0.0, rack).steer() - self.pose(0, 0.0, 0.0).steer(),
+                self.pose(1, 0.0, rack).steer() - self.pose(1, 0.0, 0.0).steer(),
+            );
+            let ideal = (1.0 / (1.0 / inner.tan() + p.track_front / p.wheelbase)).atan();
+            (inner - outer) / (inner - ideal)
+        } else {
+            0.0
+        };
+        AxleFigures {
+            kinematics: s,
+            anti_brake,
+            anti_drive,
+            spring_rate: spring,
+            anti_roll_rate: axle.anti_roll_rate * mr2,
+            heave_rate: axle.heave.as_ref().map_or(0.0, |h| 0.5 * h.rate * mr2),
+            ride_frequency: (ride / corner).sqrt() / std::f64::consts::TAU,
+            ackermann,
         }
     }
 }

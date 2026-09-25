@@ -20,6 +20,12 @@
         pressure: 2.4,
         unsprung_mass: 36.0,
         wheel_inertia: 0.8,
+        // Double wishbones, the rack behind the axle.
+        linkage: DoubleWishbone(
+            upper: (front: (0.14, -0.43, 0.13), rear: (-0.14, -0.43, 0.12), outer: (-0.03, -0.12, 0.18)),
+            lower: (front: (0.20, -0.56, -0.155), rear: (-0.22, -0.56, -0.145), outer: (0.0, -0.06, -0.15)),
+            tie_rod: (inner: (-0.13, -0.51, -0.055), outer: (-0.13, -0.10, -0.03)),
+        ),
         spring_rate: 32000.0,
         bump_damping: 2400.0,
         rebound_damping: 3500.0,
@@ -35,6 +41,12 @@
         pressure: 2.4,
         unsprung_mass: 38.0,
         wheel_inertia: 0.85,
+        // Double wishbones with a toe link.
+        linkage: DoubleWishbone(
+            upper: (front: (0.14, -0.43, 0.14), rear: (-0.14, -0.43, 0.14), outer: (0.0, -0.11, 0.17)),
+            lower: (front: (0.20, -0.54, -0.11), rear: (-0.20, -0.54, -0.15), outer: (0.0, -0.06, -0.15)),
+            tie_rod: (inner: (-0.14, -0.50, -0.02), outer: (-0.14, -0.08, -0.01)),
+        ),
         spring_rate: 30000.0,
         bump_damping: 2400.0,
         rebound_damping: 3500.0,
@@ -48,7 +60,6 @@
     steering: (
         ratio: 13.1,
         lock: 7.85,                  // 450 deg each way
-        ackermann: 0.5,
     ),
 
     brakes: (
