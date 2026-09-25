@@ -286,7 +286,7 @@ fn update(
         w.regime().name(),
         crate::settings::clock(w.hour()),
         w.air_temperature(),
-        w.road_temperature(q.s, q.d),
+        sim.evolution.road_temperature_at(w, q.surface, q.s, q.d),
         wind,
         crate::settings::compass(from),
         w.cloud_cover() * 100.0

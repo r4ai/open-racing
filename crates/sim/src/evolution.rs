@@ -8,15 +8,17 @@
 //! gain little.
 //!
 //! The state is a grid in track coordinates (distance along the centreline × lateral
-//! offset) holding the rubber level of each patch: 0 is dusty ([`DUSTY_GRIP`]), 1 fully
-//! rubbered in (the tyre's nominal grip). Named starting conditions put rubber along a
+//! offset) holding separate dust and rubber levels. Clean bare asphalt has
+//! [`OFF_LINE_GRIP`]; loose dust lowers it to [`DUSTY_GRIP`], while rubber raises it
+//! towards the tyre's nominal grip. Named starting conditions put rubber along a
 //! racing line estimated from the track geometry (the minimum-curvature line, driven
 //! at an estimated speed); from there every tyre lays rubber where it actually rolls.
 //! Only asphalt carries rubber: kerbs and run-off keep their own grip.
 //!
 //! Tyres coated with grass, soil or grit off the track shed it where they rejoin, and
-//! it costs grip on the road until tyres rolling over it have swept it away, within a
-//! few dozen metres of rolling.
+//! it costs grip on the road until tyres rolling over it have swept it away. The same
+//! grid holds short-lived heat left by the tyre contact patches above the weather's
+//! slower road temperature.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -25,20 +27,22 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::track::{Surface, Track};
+use crate::weather::Weather;
 
 /// Grip of dusty asphalt relative to a fully rubbered-in surface.
 pub const DUSTY_GRIP: f64 = 0.90;
-/// Grip off the racing line once a line is rubbered in: dust collects where cars do
-/// not drive.
+/// Grip of clean asphalt without rubber, including off the racing line.
 pub const OFF_LINE_GRIP: f64 = 0.94;
 
 /// Grip lost on asphalt fully covered, per kind of coat ([`crate::Coat`] order).
 const ROAD_COAT_GRIP_LOSS: [f64; 3] = [0.3, 0.3, 0.35];
 /// Cover a cell gets per full tyre coat shed onto it.
-const DIRT_PER_COAT: f64 = 6.0;
+const DIRT_PER_COAT: f64 = 3.0;
 /// Tyre rolling over which the cover on the asphalt is mostly swept away, m, per kind
 /// of coat: grass and soil smear into the surface, grit is flung aside.
-const COAT_SWEEP_LENGTH: [f64; 3] = [25.0, 30.0, 10.0];
+const COAT_SWEEP_LENGTH: [f64; 3] = [12.0, 15.0, 5.0];
+/// Contact travel that removes 1 - 1/e of the loose starting dust, m.
+const DUST_SWEEP_LENGTH: f64 = 12.0;
 /// Share of the swept cover that sticks to the tyre sweeping it.
 const SWEEP_PICKUP: f64 = 0.5;
 /// Cover below which a cell counts as clean again.
@@ -59,8 +63,19 @@ const LINE_SPACING: f64 = 10.0;
 const LINE_MARGIN: f64 = 1.3;
 /// The rubbered band: full rubber within this distance of the line, none beyond the
 /// outer one, m. Cars do not all drive the same line, so the band is wider than a car.
-const BAND_INNER: f64 = 1.0;
-const BAND_OUTER: f64 = 2.5;
+const BAND_INNER: f64 = 0.5;
+const BAND_OUTER: f64 = 4.0;
+/// Effective top asphalt depth, m, heated over one grid cell.
+const HEATED_DEPTH: f64 = 0.002;
+/// Asphalt density and specific heat, kg/m³ and J/(kg·K), from FHWA-HRT-04-127.
+const ASPHALT_DENSITY: f64 = 2371.0;
+const ASPHALT_HEAT_CAPACITY: f64 = 921.0;
+const CELL_HEAT_CAPACITY: f64 =
+    ASPHALT_DENSITY * ASPHALT_HEAT_CAPACITY * HEATED_DEPTH * CELL_S * CELL_D;
+/// Time over which conduction into the cooler road dissipates local surface heat, s.
+const HEAT_RELAX_TIME: f64 = 30.0;
+/// Update local heat at 10 Hz, rather than sweeping the grid at the physics rate.
+const HEAT_UPDATE_PERIOD: f64 = 0.1;
 /// Share of the line's rubber on straights, where tyres do little work.
 const STRAIGHT_RUBBER: f64 = 0.35;
 /// Speed profile of the estimated line: lateral grip, braking and acceleration in
@@ -140,7 +155,11 @@ pub fn parse_grip(s: &str) -> Result<f64, String> {
 }
 
 fn rubber_of(grip: f64) -> f64 {
-    ((grip - DUSTY_GRIP) / (1.0 - DUSTY_GRIP)).clamp(0.0, 1.0)
+    ((grip - OFF_LINE_GRIP) / (1.0 - OFF_LINE_GRIP)).clamp(0.0, 1.0)
+}
+
+fn dust_of(grip: f64) -> f64 {
+    ((OFF_LINE_GRIP - grip) / (OFF_LINE_GRIP - DUSTY_GRIP)).clamp(0.0, 1.0)
 }
 
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
@@ -154,6 +173,7 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
 pub struct RubberMap {
     rows: usize,
     cols: usize,
+    length: f64,
     /// Lateral offset of the right edge of column 0, m.
     d0: f64,
     /// Rubber share of each cell when the line is rubbered in, 0..1, row-major
@@ -198,6 +218,7 @@ impl RubberMap {
         Self {
             rows,
             cols,
+            length: track.length,
             d0,
             band,
             line: offsets,
@@ -220,6 +241,14 @@ impl RubberMap {
         let x = ((d - self.d0) / CELL_D - 0.5).clamp(0.0, (self.cols - 1) as f64);
         let c = x.floor() as usize;
         (c, (c + 1).min(self.cols - 1), x - x.floor())
+    }
+
+    /// The two rows around a point for depositing and reading local heat.
+    #[inline]
+    fn heat_rows(&self, s: f64) -> (usize, usize, f64) {
+        let x = (s / self.length * self.rows as f64 - 0.5).rem_euclid(self.rows as f64);
+        let a = x.floor() as usize;
+        (a, (a + 1) % self.rows, x.fract())
     }
 }
 
@@ -356,9 +385,12 @@ type CellMap<V> = HashMap<u32, V, BuildHasherDefault<CellHasher>>;
 pub struct TrackEvolution {
     /// `None`: the whole asphalt has the tyre's nominal grip and nothing changes.
     map: Option<Arc<RubberMap>>,
-    /// Rubber level on the racing line and off it at the start.
+    /// Grip on the racing line and off it at the start.
     line: f64,
     off: f64,
+    /// Starting loose dust remaining in each cell, 1 = fully dusty. Empty when the
+    /// starting grip is at least that of clean bare asphalt.
+    dust: Vec<f32>,
     /// Rubber laid by the cars since the start, per cell (empty without evolution).
     laid: Vec<f32>,
     /// Loose material on the asphalt by kind ([`crate::Coat`] order; 1 covers the
@@ -366,6 +398,9 @@ pub struct TrackEvolution {
     cover: CellMap<[f32; 3]>,
     /// Rubber level one tyre at the grip limit adds per metre it rolls over a cell.
     rate: f64,
+    /// Local temperature difference above the weather-driven road, °C, per cell.
+    heat: Vec<f32>,
+    heat_elapsed: f64,
 }
 
 impl TrackEvolution {
@@ -377,9 +412,12 @@ impl TrackEvolution {
         map: None,
         line: 1.0,
         off: 1.0,
+        dust: Vec::new(),
         laid: Vec::new(),
         cover: HashMap::with_hasher(BuildHasherDefault::new()),
         rate: 0.0,
+        heat: Vec::new(),
+        heat_elapsed: 0.0,
     };
 
     /// Rubber on the racing line of `map` giving `line_grip` where it is worked
@@ -389,10 +427,13 @@ impl TrackEvolution {
         let mut e = Self {
             line: 0.0,
             off: 0.0,
+            dust: Vec::new(),
             laid: Vec::new(),
             cover: CellMap::default(),
             map: Some(map),
             rate: 0.0,
+            heat: Vec::new(),
+            heat_elapsed: 0.0,
         };
         e.restart(line_grip, gain_per_lap);
         e
@@ -405,18 +446,41 @@ impl TrackEvolution {
             _ => 0,
         };
         self.laid.resize(cells, 0.0);
+        // Contact heat must be ready before the first physics step. Depending on
+        // suspension settling, the first asphalt contact can occur several steps in.
+        self.heat
+            .resize(self.map.as_ref().map_or(0, |map| map.band.len()), 0.0);
+        let dusty_cells = if line_grip < OFF_LINE_GRIP {
+            self.map.as_ref().map_or(0, |map| map.band.len())
+        } else {
+            0
+        };
+        self.dust.resize(dusty_cells, 0.0);
         // Front and rear tyres each roll over a cell once a lap.
-        self.rate = gain_per_lap.max(0.0) / (1.0 - DUSTY_GRIP) / (2.0 * CELL_S) / RUBBER_LAP_MEAN;
+        self.rate =
+            gain_per_lap.max(0.0) / (1.0 - OFF_LINE_GRIP) / (2.0 * CELL_S) / RUBBER_LAP_MEAN;
         self.reset(line_grip);
     }
 
     /// Starts over from `line_grip` on the racing line, without the rubber and dirt
     /// the cars left since.
     pub fn reset(&mut self, line_grip: f64) {
-        self.line = rubber_of(line_grip);
-        self.off = rubber_of(line_grip.min(OFF_LINE_GRIP));
+        self.line = line_grip;
+        self.off = line_grip.min(OFF_LINE_GRIP);
+        // `reset` is also public, so changing from green to dusty must provision dust.
+        self.dust.resize(
+            if line_grip < OFF_LINE_GRIP {
+                self.map.as_ref().map_or(0, |map| map.band.len())
+            } else {
+                0
+            },
+            0.0,
+        );
+        self.dust.fill(dust_of(line_grip) as f32);
         self.laid.fill(0.0);
         self.cover.clear();
+        self.heat.fill(0.0);
+        self.heat_elapsed = 0.0;
     }
 
     pub fn map(&self) -> Option<&RubberMap> {
@@ -425,8 +489,7 @@ impl TrackEvolution {
 
     /// Grip on the racing line (where it is worked hardest) and off it at the start.
     pub fn start_grip(&self) -> (f64, f64) {
-        let grip = |r: f64| DUSTY_GRIP + (1.0 - DUSTY_GRIP) * r;
-        (grip(self.line), grip(self.off))
+        (self.line, self.off)
     }
 
     /// Rubber level of cell `i` of `map`.
@@ -434,7 +497,8 @@ impl TrackEvolution {
     fn cell_rubber(&self, map: &RubberMap, i: usize) -> f64 {
         let laid = self.laid.get(i).copied().unwrap_or(0.0);
         let band = f64::from(map.band[i]);
-        (self.off + (self.line - self.off) * band + f64::from(laid)).min(1.0)
+        let initial = rubber_of(self.off) + (rubber_of(self.line) - rubber_of(self.off)) * band;
+        (initial + f64::from(laid)).min(1.0)
     }
 
     /// Grip of cell `i` of `map` from its rubber and cover.
@@ -447,7 +511,9 @@ impl TrackEvolution {
                 .sum(),
             None => 0.0,
         };
-        (DUSTY_GRIP + (1.0 - DUSTY_GRIP) * rubber) * (1.0 - covered.min(0.6))
+        let dust = self.dust.get(i).copied().unwrap_or(0.0);
+        let clean = OFF_LINE_GRIP + (1.0 - OFF_LINE_GRIP) * rubber;
+        (clean - (OFF_LINE_GRIP - DUSTY_GRIP) * f64::from(dust)) * (1.0 - covered.min(0.6))
     }
 
     /// Grip multiplier the rubber and dirt give the surface at track coordinates (s, d).
@@ -457,22 +523,98 @@ impl TrackEvolution {
             return 1.0;
         }
         let Some(map) = self.map.as_deref() else {
-            return DUSTY_GRIP + (1.0 - DUSTY_GRIP) * self.line;
+            return self.line;
         };
         let base = map.row(s) * map.cols;
         let (a, b, t) = map.columns(d);
         self.cell_grip(map, base + a) * (1.0 - t) + self.cell_grip(map, base + b) * t
     }
 
-    /// Rubber level at track coordinates (s, d), 0 on dusty asphalt, 1 where it is
-    /// fully rubbered in.
+    /// Rubber level at track coordinates (s, d), 0 without rubber, 1 where it is
+    /// fully rubbered in. Loose dust is tracked separately.
     pub fn rubber_at(&self, s: f64, d: f64) -> f64 {
         let Some(map) = self.map.as_deref() else {
-            return self.line;
+            return rubber_of(self.line);
         };
         let base = map.row(s) * map.cols;
         let (a, b, t) = map.columns(d);
         self.cell_rubber(map, base + a) * (1.0 - t) + self.cell_rubber(map, base + b) * t
+    }
+
+    /// Remaining loose starting dust, 0 on clean asphalt and 1 when fully dusty.
+    pub fn dust_at(&self, s: f64, d: f64) -> f64 {
+        let Some(map) = self.map.as_deref() else {
+            return 0.0;
+        };
+        let base = map.row(s) * map.cols;
+        let (a, b, t) = map.columns(d);
+        let dust = |i: usize| f64::from(self.dust.get(i).copied().unwrap_or(0.0));
+        dust(base + a) * (1.0 - t) + dust(base + b) * t
+    }
+
+    /// Local road temperature including tyre contact heating, °C.
+    #[inline]
+    pub fn road_temperature_at(&self, weather: &Weather, surface: Surface, s: f64, d: f64) -> f64 {
+        let base = weather.road_temperature(s, d);
+        if surface != Surface::Asphalt {
+            return base;
+        }
+        if self.heat.is_empty() {
+            return base;
+        }
+        let Some(map) = self.map.as_deref() else {
+            return base;
+        };
+        let (r0, r1, u) = map.heat_rows(s);
+        let (c0, c1, v) = map.columns(d);
+        let row = |r: usize| {
+            let offset = r * map.cols;
+            f64::from(self.heat[offset + c0]) * (1.0 - v) + f64::from(self.heat[offset + c1]) * v
+        };
+        base + row(r0) * (1.0 - u) + row(r1) * u
+    }
+
+    /// Advance local heat decay by a physics step. The full grid is touched at 10 Hz.
+    #[inline]
+    pub fn advance_heat(&mut self, dt: f64) {
+        if self.heat.is_empty() {
+            return;
+        }
+        self.heat_elapsed += dt;
+        if self.heat_elapsed < HEAT_UPDATE_PERIOD {
+            return;
+        }
+        let factor = (-self.heat_elapsed / HEAT_RELAX_TIME).exp() as f32;
+        for heat in &mut self.heat {
+            *heat *= factor;
+        }
+        self.heat_elapsed = 0.0;
+    }
+
+    /// Remove transient tyre heat when the weather is restarted from a new day.
+    pub fn clear_heat(&mut self) {
+        self.heat.fill(0.0);
+        self.heat_elapsed = 0.0;
+    }
+
+    /// Deposit `energy` joules into the asphalt's thin contact-heated layer.
+    #[inline]
+    pub fn deposit_heat(&mut self, s: f64, d: f64, energy: f64) {
+        let Some(map) = self.map.as_deref() else {
+            return;
+        };
+        if !energy.is_finite() || energy == 0.0 {
+            return;
+        }
+        debug_assert_eq!(self.heat.len(), map.band.len());
+        let (r0, r1, u) = map.heat_rows(s);
+        let (c0, c1, v) = map.columns(d);
+        let rise = energy / CELL_HEAT_CAPACITY;
+        for (r, rw) in [(r0, 1.0 - u), (r1, u)] {
+            for (c, cw) in [(c0, 1.0 - v), (c1, v)] {
+                self.heat[r * map.cols + c] += (rise * rw * cw) as f32;
+            }
+        }
     }
 
     /// Loose material on the asphalt at track coordinates (s, d) by kind ([`crate::Coat`]
@@ -501,6 +643,20 @@ impl TrackEvolution {
         grip_use: f64,
         shed: [f64; 3],
     ) -> [f64; 3] {
+        self.roll_with_slip(s, d, distance, 0.0, grip_use, shed)
+    }
+
+    /// As [`Self::roll`], also using `slide` metres of scrub when a tyre spins or locks.
+    #[inline]
+    pub fn roll_with_slip(
+        &mut self,
+        s: f64,
+        d: f64,
+        distance: f64,
+        slide: f64,
+        grip_use: f64,
+        shed: [f64; 3],
+    ) -> [f64; 3] {
         let Some(map) = self.map.as_deref() else {
             return [0.0; 3];
         };
@@ -508,12 +664,16 @@ impl TrackEvolution {
         let (a, b, t) = map.columns(d);
         let mut picked = [0.0; 3];
         let shedding = shed.iter().any(|&x| x > 0.0);
+        let work_distance = distance.max(0.0) + slide.max(0.0);
         let rubber = self.rate
-            * distance
+            * work_distance
             * (RUBBER_ROLLING + (1.0 - RUBBER_ROLLING) * grip_use.min(1.0).powi(2));
         for (i, w) in [(base + a, 1.0 - t), (base + b, t)] {
             if let Some(laid) = self.laid.get_mut(i) {
-                *laid += (rubber * w) as f32;
+                *laid = (*laid + (rubber * w) as f32).min(1.0);
+            }
+            if let Some(dust) = self.dust.get_mut(i) {
+                *dust *= (-(work_distance * w) / DUST_SWEEP_LENGTH).exp() as f32;
             }
             let key = i as u32;
             if !shedding && !self.cover.contains_key(&key) {
@@ -522,7 +682,8 @@ impl TrackEvolution {
             let cover = self.cover.entry(key).or_default();
             let mut left = 0.0;
             for k in 0..3 {
-                let swept = f64::from(cover[k]) * (distance / COAT_SWEEP_LENGTH[k]).min(1.0) * w;
+                let swept =
+                    f64::from(cover[k]) * (work_distance / COAT_SWEEP_LENGTH[k]).min(1.0) * w;
                 cover[k] = (f64::from(cover[k]) - swept + shed[k] * DIRT_PER_COAT * w) as f32;
                 picked[k] += swept * SWEEP_PICKUP / DIRT_PER_COAT;
                 left += cover[k];
@@ -576,8 +737,8 @@ mod tests {
             } else {
                 corner = corner.max(on_line);
             }
-            // Far off the line: dust.
-            let off = if line > 0.0 { line - 4.0 } else { line + 4.0 };
+            // Far off the line: clean but not rubbered in.
+            let off = if line > 0.0 { line - 5.0 } else { line + 5.0 };
             assert_close(e.grip_at(Surface::Asphalt, s, off), OFF_LINE_GRIP);
             assert_close(e.grip_at(Surface::Kerb, s, off), 1.0);
             // The line cuts to the inside of corners.
@@ -588,6 +749,102 @@ mod tests {
         assert!(apexes > 0);
         assert!(corner > 0.995, "corners {corner}");
         assert!(straight < 0.97, "straights {straight}");
+    }
+
+    #[test]
+    fn starting_rubber_tapers_across_a_wide_band() {
+        let track = Track::default_circuit();
+        let map = Arc::new(RubberMap::new(&track));
+        let e = TrackEvolution::new(map.clone(), TrackCondition::Optimum.grip(), 0.0);
+        let s = 100.0;
+        let line = map.racing_line(s);
+        let levels = [0.0, 1.5, 3.0, 5.0].map(|offset| e.rubber_at(s, line + offset));
+        assert!(levels[0] > levels[1] && levels[1] > levels[2]);
+        assert!(levels[2] > levels[3] + 0.01, "{levels:?}");
+        // A narrow circuit can end inside the shoulder of this broad band.
+        assert!(levels[3] < levels[0] * 0.2, "{levels:?}");
+    }
+
+    #[test]
+    fn driving_sweeps_start_dust_before_rubber_builds() {
+        let track = Track::default_circuit();
+        let map = Arc::new(RubberMap::new(&track));
+        let d = map.d0 + (map.cols / 2) as f64 * CELL_D + 0.5 * CELL_D;
+        let mut e = TrackEvolution::new(map, TrackCondition::Dusty.grip(), 0.0);
+        let s = 102.0;
+        assert_close(e.grip_at(Surface::Asphalt, s, d), DUSTY_GRIP);
+        e.roll(s, d, DUST_SWEEP_LENGTH, 0.0, [0.0; 3]);
+        assert!((0.3..0.4).contains(&e.dust_at(s, d)));
+        assert!(e.grip_at(Surface::Asphalt, s, d) > 0.925 - 1e-3);
+        assert_close(e.rubber_at(s, d), 0.0);
+        assert_close(e.grip_at(Surface::Asphalt, s, d + 5.0), DUSTY_GRIP);
+        for _ in 0..4 {
+            e.roll(s, d, DUST_SWEEP_LENGTH, 0.0, [0.0; 3]);
+        }
+        assert!(e.grip_at(Surface::Asphalt, s, d) > OFF_LINE_GRIP - 0.001);
+    }
+
+    #[test]
+    fn wheelspin_scrubs_dust_and_lays_rubber_in_place() {
+        let track = Track::default_circuit();
+        let map = Arc::new(RubberMap::new(&track));
+        let mut e = TrackEvolution::new(map, TrackCondition::Dusty.grip(), 0.01);
+        let (s, d) = (102.0, 0.0);
+        let start = e.grip_at(Surface::Asphalt, s, d);
+        e.roll_with_slip(s, d, 0.0, 4.0, 1.0, [0.0; 3]);
+        assert!(e.dust_at(s, d) < 1.0);
+        assert!(e.rubber_at(s, d) > 0.0);
+        assert!(e.grip_at(Surface::Asphalt, s, d) > start);
+    }
+
+    #[test]
+    fn contact_heat_is_local_cools_and_survives_a_replay_clone() {
+        let track = Track::default_circuit();
+        let map = Arc::new(RubberMap::new(&track));
+        let d = map.d0 + (map.cols / 2) as f64 * CELL_D + 0.5 * CELL_D;
+        let s = (25.0 + 0.5) * map.length / map.rows as f64;
+        let mut e = TrackEvolution::new(map, 1.0, 0.0);
+        let base = Weather::STANDARD.road_temperature(s, d);
+        e.deposit_heat(s, d, 2.0 * CELL_HEAT_CAPACITY);
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+            base + 2.0,
+        );
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d + 2.0),
+            base,
+        );
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Kerb, s, d),
+            base,
+        );
+        let mut replay = e.clone();
+        e.advance_heat(HEAT_RELAX_TIME);
+        replay.advance_heat(HEAT_RELAX_TIME);
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+            replay.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+        );
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+            base + 2.0 / std::f64::consts::E,
+        );
+        replay.clear_heat();
+        assert_close(
+            replay.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+            base,
+        );
+        e.reset(1.0);
+        assert_close(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, s, d),
+            base,
+        );
+        e.deposit_heat(0.0, d, CELL_HEAT_CAPACITY);
+        assert!(e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, 0.1, d) > base);
+        assert!(
+            e.road_temperature_at(&Weather::STANDARD, Surface::Asphalt, track.length - 0.1, d,)
+                > base
+        );
     }
 
     #[test]
@@ -623,9 +880,12 @@ mod tests {
         assert_eq!(e.roll(s, d, 1.0, 0.0, [0.05, 0.0, 0.0]), [0.0; 3]);
         let dirty = e.grip_at(Surface::Asphalt, s, d);
         assert!(dirty < clean - 0.02, "{dirty} vs {clean}");
+        let initial_cover = e.cover_at(s, d)[0];
+        let early_picked: f64 = (0..5).map(|_| e.roll(s, d, CELL_S, 0.0, [0.0; 3])[0]).sum();
+        assert!(e.cover_at(s, d)[0] < initial_cover * 0.5);
         let picked: f64 = (0..3000).map(|_| e.roll(s, d, 1.0, 0.0, [0.0; 3])[0]).sum();
         assert!(
-            (picked - 0.05 * SWEEP_PICKUP).abs() < 2e-3,
+            (picked + early_picked - 0.05 * SWEEP_PICKUP).abs() < 2e-3,
             "picked {picked}"
         );
         assert!(e.grip_at(Surface::Asphalt, s, d) > clean - 1e-6);

@@ -159,6 +159,7 @@ impl Simulation {
     /// Starts the weather over from `settings`.
     pub fn restart_weather(&mut self, settings: WeatherSettings) {
         self.weather.restart(settings);
+        self.evolution.clear_heat();
         if self.mode == Mode::Replay {
             self.mode = Mode::Human;
         }

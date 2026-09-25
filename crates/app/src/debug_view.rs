@@ -338,9 +338,12 @@ fn road_color(view: RoadView, sim: &Simulation, range: (f64, f64), s: f64, d: f6
         RoadView::Dirt => {
             let cover = e.cover_at(s, d);
             let total: f64 = cover.iter().sum();
-            let t = (total / DIRT_SCALE).sqrt().min(1.0) as f32;
-            // Clean asphalt dark grey; covered, the colour of the dirt, brightened.
-            let [r, g, b] = crate::tyre_dirt::coat_color(&cover).map(|c| (c * 2.2).min(1.0));
+            let dust = e.dust_at(s, d);
+            let t = (total / DIRT_SCALE + 0.5 * dust).sqrt().min(1.0) as f32;
+            // Starting dust is grey; material dropped from tyres keeps its own colour.
+            let material = crate::tyre_dirt::coat_color(&cover).map(|c| (c * 2.2).min(1.0));
+            let mix = (total / (total + 0.15 * dust).max(1e-9)) as f32;
+            let [r, g, b] = std::array::from_fn(|i| 0.55 * (1.0 - mix) + material[i] * mix);
             let clean = 0.12;
             Color::srgb(
                 clean + (r - clean) * t,
@@ -349,7 +352,7 @@ fn road_color(view: RoadView, sim: &Simulation, range: (f64, f64), s: f64, d: f6
             )
         }
         RoadView::Temperature => {
-            let t = sim.weather.road_temperature(s, d);
+            let t = e.road_temperature_at(&sim.weather, Surface::Asphalt, s, d);
             heat((t - range.0) / (range.1 - range.0))
         }
     }
@@ -867,10 +870,10 @@ fn road_text(out: &mut String, view: RoadView, sim: &Simulation) {
             "red {:.0} % .. yellow .. green 100 % of the tyre's grip",
             GRIP_SCALE * 100.0
         ),
-        RoadView::Rubber => writeln!(out, "blue dusty .. red rubbered in"),
+        RoadView::Rubber => writeln!(out, "blue no rubber .. red rubbered in"),
         RoadView::Dirt => writeln!(
             out,
-            "grey clean .. coloured by kind (grass, earth, gravel), full at {:.0} % cover",
+            "grey clean .. pale grey dust or coloured debris (grass, earth, gravel), full at {:.0} % cover",
             DIRT_SCALE * 100.0
         ),
         RoadView::Temperature => {
@@ -881,14 +884,15 @@ fn road_text(out: &mut String, view: RoadView, sim: &Simulation) {
     let cover: f64 = e.cover_at(q.s, q.d).iter().sum();
     let _ = writeln!(
         out,
-        "here: s {:.0} m, d {:+.1} m, {:?}: grip {:.1} %, rubber {:.2}, dirt {:.3}, {:.1} C",
+        "here: s {:.0} m, d {:+.1} m, {:?}: grip {:.1} %, rubber {:.2}, dust {:.2}, debris {:.3}, {:.1} C",
         q.s,
         q.d,
         q.surface,
         e.grip_at(q.surface, q.s, q.d) * 100.0,
         e.rubber_at(q.s, q.d),
+        e.dust_at(q.s, q.d),
         cover,
-        sim.weather.road_temperature(q.s, q.d)
+        e.road_temperature_at(&sim.weather, q.surface, q.s, q.d)
     );
 }
 

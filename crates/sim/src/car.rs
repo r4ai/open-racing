@@ -413,6 +413,7 @@ impl Car {
         let st = &mut self.state;
         let tel = &mut self.telemetry;
         let dt = DT;
+        evolution.advance_heat(dt);
         let c = controls.sanitized(p.steering.lock);
 
         let rot = DMat3::from_quat(st.orientation);
@@ -545,14 +546,32 @@ impl Car {
                 if q.surface == Surface::Asphalt {
                     let grip_use =
                         (f.fx * f.fx + f.fy * f.fy).sqrt() / (tp.mu_y * mu * fz).max(1e-9);
-                    let picked = evolution.roll(q.s, q.d, speed * dt, grip_use, shed);
+                    let picked = evolution.roll_with_slip(
+                        q.s,
+                        q.d,
+                        speed * dt,
+                        slide_speed * dt,
+                        grip_use,
+                        shed,
+                    );
                     w.tire.add_coat(picked);
                 }
             }
 
             let rolling_resistance = tire.rolling_resistance(pressure);
             let slide_power = (f.fx * slip_vel - f.fy * vy).max(0.0);
-            let road = weather.road_temperature(q.s, q.d);
+            let road = evolution.road_temperature_at(weather, q.surface, q.s, q.d);
+            // The tread model already removes this conduction and assigns only its
+            // share of sliding friction to the tyre; the balance enters the asphalt.
+            let road_heat = if weather.road().is_some() && fz > 0.0 && q.surface == Surface::Asphalt
+            {
+                let thermal = &tp.thermal;
+                (1.0 - thermal.slide_heat_share) * slide_power
+                    + thermal.road_cooling
+                        * (w.tire.tread_temperature.iter().sum::<f64>() / 3.0 - road)
+            } else {
+                0.0
+            };
             let bay = if corner.front == p.engine.position.front() {
                 NEAR_BAY_AIR * (engine_bay - air.temperature)
             } else {
@@ -570,6 +589,9 @@ impl Car {
                 road,
                 dt,
             );
+            if road_heat != 0.0 {
+                evolution.deposit_heat(q.s, q.d, road_heat * dt);
+            }
 
             let rolling =
                 (rolling_resistance + q.drag) * fz * radius * (w.spin * radius / 0.5).tanh();
