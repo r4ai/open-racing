@@ -6,7 +6,8 @@
 //!   and orthographic; numpad . (or F) frames the selection, Home everything.
 //! - Selecting: left click picks a node, a handle, a road or a spline; Shift + click adds
 //!   nodes to the selection; dragging over empty space draws a box; A selects all of the
-//!   selected road's or spline's nodes, Alt + A none.
+//!   selected road's or spline's nodes (in object mode every item), Alt + A none. In
+//!   object mode, dragging an item moves it.
 //! - Changing: G grabs, R rotates, S scales what is selected, and dragging a node, handle
 //!   or marker grabs it. While transforming, X, Y and Z hold to an axis, Shift is fine,
 //!   Ctrl snaps, typed numbers give exact values; a click or Enter confirms, a right

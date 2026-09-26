@@ -412,7 +412,11 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ),
             ("Ctrl/Shift+click in the outliner", "Add an item"),
             ("Drag on empty space", "Box select nodes, or items"),
-            ("A / Alt+A", "All / none of the line's nodes"),
+            ("Tab", "Object mode / edit mode, wherever the pointer is"),
+            (
+                "A / Alt+A",
+                "All / none: the line's nodes, or every item in object mode",
+            ),
             ("Ctrl I", "Invert"),
             ("Ctrl Numpad + / -", "Select more / less"),
         ],
@@ -424,6 +428,18 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Alt S / Ctrl T", "Road width / bank at the nodes"),
             ("  X / Y (width)", "Left / right side only"),
             ("Drag a node, handle or marker", "Move it"),
+            (
+                "Drag an item (object mode)",
+                "Move it, with the rest of the selection",
+            ),
+            (
+                "Drag a painted line (edit mode)",
+                "Across the road: catches on its centre, edges and other lines",
+            ),
+            (
+                "Drag a kerb's node",
+                "Along the road and out: its width there (Z: its height)",
+            ),
             (
                 "  a single node",
                 "Snaps onto nodes, road edges, centre lines (Ctrl: free)",
@@ -451,7 +467,14 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "Edit",
         &[
             ("E", "Extrude the active node"),
-            ("Ctrl+click", "Add a node at the pointer"),
+            (
+                "Ctrl+click",
+                "Add a node at the pointer (on a kerb: a node of the kerb)",
+            ),
+            (
+                "Node menu › Lay Along Selected Nodes",
+                "Kerbs, run-off or walls along the selected nodes, inside or outside the curve",
+            ),
             ("X / Delete", "Delete"),
             ("Shift D", "Duplicate a spline or prop"),
             ("Shift A", "Add: draw a road, kerb, wall, fence"),
