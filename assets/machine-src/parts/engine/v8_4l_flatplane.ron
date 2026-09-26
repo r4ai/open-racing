@@ -205,11 +205,11 @@
                 accessories: 10000.0,
             ),
             ecu: (
-                idle_rpm: 1200.0,
+                idle_rpm: 1600.0,
                 limiter_rpm: 9000.0,
                 stall_rpm: 500.0,
                 limiter_hysteresis_rpm: 200.0,
-                idle_opening: 0.01,
+                idle_opening: 0.006,
                 idle_authority: 0.04,
                 idle_gain: 0.00005,
                 overrun_cut_rpm: Some(2000.0),
