@@ -52,9 +52,38 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
     }
     wall.style = None;
     ops.push(Op::PutSpline { spline: wall });
+    ops.push(Op::PutRow {
+        road: "circuit".into(),
+        row: open_racing_track_project::project::PropRow {
+            name: "trees".into(),
+            model: "assets/models/tree.glb".into(),
+            side: open_racing_track_project::project::Side::Left,
+            offset: 20.0,
+            spacing: 15.0,
+            ranges: vec![open_racing_track_project::project::Range { from: 1.0, to: 2.0 }],
+            at: vec![],
+            yaw: 0.0,
+            scale: 1.0,
+            jitter: Default::default(),
+            drape: true,
+            collide: false,
+        },
+    });
+    let mut terrain = e.project.terrain.clone();
+    terrain
+        .landforms
+        .push(open_racing_track_project::project::Landform {
+            name: "hill".into(),
+            center: glam::DVec2::new(200.0, 150.0),
+            to: None,
+            radius: 20.0,
+            falloff: 20.0,
+            kind: open_racing_track_project::project::LandformKind::Raise(4.0),
+        });
+    ops.push(Op::SetTerrain { terrain });
     ops.push(Op::PutProp {
         prop: Prop {
-            group: None,
+            group: Some("stands".into()),
             name: "stand".into(),
             model: "assets/models/stand.glb".into(),
             pos: DVec3::new(100.0, 40.0, 0.0),
@@ -122,6 +151,7 @@ fn every_panel_draws_for_every_selection() {
         PropTab::Strips,
         PropTab::Lines,
         PropTab::Barriers,
+        PropTab::Rows,
     ];
     let selections = [
         None,
@@ -205,5 +235,82 @@ fn panels_draw_after_the_project_shrinks_under_the_selection() {
         outliner::show(ui, &mut c, &mut os);
         sidebar::show(ui, &mut c);
     });
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn every_popup_draws() {
+    use crate::commands::{Cmd, Similar};
+    use crate::ui::Popup;
+    let (mut editor, dir) = furnished("popups");
+    let built = built_of(&editor);
+    let (mut tool, mut orbit, mut jobs, mut shell) = (
+        Tool::default(),
+        Orbit::default(),
+        Jobs::default(),
+        Shell::default(),
+    );
+    editor.selection.select(Item::Spline(0));
+    editor.selection.others = vec![Item::Prop(0)];
+    let at = Vec2::new(400.0, 300.0);
+    let popups = [
+        Popup::search(at),
+        Popup::Handles { at },
+        Popup::Pie { at },
+        Popup::Choose {
+            at,
+            of: Popup::SIMILAR,
+        },
+        Popup::Choose {
+            at,
+            of: Popup::MIRROR,
+        },
+        Popup::Collection {
+            at,
+            text: "new".into(),
+        },
+        Popup::BatchRename {
+            at,
+            find: "".into(),
+            replace: "kerb".into(),
+        },
+    ];
+    let ctx = egui::Context::default();
+    for popup in popups {
+        shell.popup = Some(popup);
+        let mut c = Ctx {
+            editor: &mut editor,
+            tool: &mut tool,
+            orbit: &mut orbit,
+            jobs: &mut jobs,
+            built: &built,
+            shell: &mut shell,
+            pointer: at,
+        };
+        draw(&ctx, |ui| crate::popups::show(ui.ctx(), &mut c));
+        assert!(
+            shell.popup.is_some(),
+            "stays open until something is chosen"
+        );
+    }
+    // The commands behind them run on this selection.
+    let mut c = Ctx {
+        editor: &mut editor,
+        tool: &mut tool,
+        orbit: &mut orbit,
+        jobs: &mut jobs,
+        built: &built,
+        shell: &mut shell,
+        pointer: at,
+    };
+    for cmd in [
+        Cmd::SelectSimilar(Similar::Kind),
+        Cmd::Mirror(true),
+        Cmd::Mirror(false),
+    ] {
+        assert!(cmd.enabled(&c), "{cmd:?}");
+        crate::commands::run(cmd, &mut c);
+    }
+    assert!(c.editor.selection.items().len() >= 2);
     std::fs::remove_dir_all(dir).unwrap();
 }
