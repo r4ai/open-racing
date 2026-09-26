@@ -425,7 +425,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         }
         Rename => {
             if let Some(item) = c.editor.selection.item {
-                let text = edit::item_name(&c.editor.project, item)
+                let text = crate::state::item_name(&c.editor.project, item)
                     .unwrap_or_default()
                     .to_string();
                 c.shell.popup = Some(Popup::Rename { at, item, text });

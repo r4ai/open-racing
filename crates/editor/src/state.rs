@@ -127,6 +127,21 @@ impl Selection {
         self.item == Some(item) || self.others.contains(&item)
     }
 
+    /// How an item is drawn: active, selected, under the pointer or none of these.
+    pub fn look(&self, item: Item, hovered: bool) -> crate::theme::Look {
+        crate::theme::Look::of(self.item == Some(item), self.has(item), hovered)
+    }
+
+    /// How a node of the active item is drawn.
+    pub fn node_look(&self, item: Item, node: usize) -> crate::theme::NodeLook {
+        let ours = self.item == Some(item);
+        crate::theme::NodeLook::of(
+            ours && self.node() == Some(node),
+            ours && self.nodes.contains(&node),
+            node == 0 && matches!(item, Item::Road(_)),
+        )
+    }
+
     /// Every selected item, the active one first.
     pub fn items(&self) -> Vec<Item> {
         self.item
@@ -158,6 +173,41 @@ pub enum Named {
     Prop(String),
 }
 
+/// The name of a road, spline or prop.
+pub fn item_name(p: &Project, item: Item) -> Option<&str> {
+    Some(match item {
+        Item::Road(r) => p.roads.get(r)?.name.as_str(),
+        Item::Spline(s) => p.splines.get(s)?.name.as_str(),
+        Item::Prop(i) => p.props.get(i)?.name.as_str(),
+    })
+}
+
+/// Every road, spline and prop of a project.
+pub fn all_items(p: &Project) -> impl Iterator<Item = Item> + use<> {
+    (0..p.roads.len())
+        .map(Item::Road)
+        .chain((0..p.splines.len()).map(Item::Spline))
+        .chain((0..p.props.len()).map(Item::Prop))
+}
+
+/// The item of `now` that `item` of `before` is: the one of the same name wherever it
+/// went (a line deleted before it, an undo, the file changed on disk), or the one in its
+/// place if it was renamed there. `None` if it is gone.
+pub fn follow(before: &Project, now: &Project, item: Item) -> Option<Item> {
+    let name = item_name(before, item)?;
+    if item_name(now, item) == Some(name) {
+        return Some(item);
+    }
+    let kind = std::mem::discriminant(&item);
+    let of_kind = |p| all_items(p).filter(move |i| std::mem::discriminant(i) == kind);
+    of_kind(now)
+        .find(|&i| item_name(now, i) == Some(name))
+        .or_else(|| {
+            let renamed = of_kind(now).count() == of_kind(before).count();
+            (renamed && item_name(now, item).is_some()).then_some(item)
+        })
+}
+
 /// What the view shows, as Blender's hiding (H), the outliner's locks and local view
 /// (numpad /). Not part of the track.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -172,6 +222,20 @@ pub struct Shown {
     pub locked_groups: HashSet<String>,
     /// Scatters hidden, by name.
     pub hidden_scatter: HashSet<String>,
+}
+
+impl Shown {
+    /// An item was renamed: it stays hidden, locked or in local view.
+    pub fn rename(&mut self, from: &Named, to: Named) {
+        let sets = [&mut self.hidden, &mut self.locked]
+            .into_iter()
+            .chain(self.local.as_mut());
+        for set in sets {
+            if set.remove(from) {
+                set.insert(to.clone());
+            }
+        }
+    }
 }
 
 /// A step of the undo history: the project to go back (or on) to, and what the step
@@ -295,6 +359,7 @@ impl Editor {
             self.status = e.to_string();
             return false;
         }
+        self.follow_selection(&before);
         match &mut self.drag {
             // A drag is named after what it does.
             Some(drag) => drag.what = describe(&ops),
@@ -309,10 +374,12 @@ impl Editor {
     /// Applies operations as part of the last undo step: what follows from an edit
     /// just made, such as the same change made to other selected items.
     pub fn apply_along(&mut self, ops: Vec<Op>) -> bool {
+        let before = self.project.clone();
         if let Err(e) = ops::apply_all(&mut self.project, &ops) {
             self.status = e.to_string();
             return false;
         }
+        self.follow_selection(&before);
         self.edited();
         true
     }
@@ -325,6 +392,38 @@ impl Editor {
             self.save();
         }
         self.clamp_selection();
+    }
+
+    /// Replaces the project with another version of it (an undo, a redo, the file
+    /// changed on disk), the selection staying on the same items.
+    fn replace(&mut self, project: Project) -> Project {
+        let before = std::mem::replace(&mut self.project, project);
+        self.follow_selection(&before);
+        before
+    }
+
+    /// Keeps the selection on the items it was on before the project changed from
+    /// `before`: the lists may have changed round them. An active item that went takes
+    /// its nodes with it.
+    fn follow_selection(&mut self, before: &Project) {
+        let s = &mut self.selection;
+        let active = s.item.and_then(|i| follow(before, &self.project, i));
+        if active != s.item {
+            let same = s.item.is_some() && active.is_some();
+            s.item = active;
+            if !same {
+                s.nodes.clear();
+            }
+        }
+        s.others = s
+            .others
+            .iter()
+            .filter_map(|&o| follow(before, &self.project, o))
+            .collect();
+        if s.item.is_none() {
+            // The next selected takes the active one's place.
+            s.item = s.others.pop();
+        }
     }
 
     /// Whether a drag is in progress.
@@ -360,7 +459,7 @@ impl Editor {
         if let Some(step) = self.drag.take()
             && step.project != self.project
         {
-            self.project = step.project;
+            self.replace(step.project);
             self.revision += 1;
             self.clamp_selection();
         }
@@ -372,7 +471,7 @@ impl Editor {
             return;
         }
         if let Some(step) = self.undo.pop_back() {
-            let now = std::mem::replace(&mut self.project, step.project);
+            let now = self.replace(step.project);
             self.status = format!("undone: {}", step.what);
             self.redo.push(Step {
                 project: now,
@@ -388,7 +487,7 @@ impl Editor {
             return;
         }
         if let Some(step) = self.redo.pop() {
-            let now = std::mem::replace(&mut self.project, step.project);
+            let now = self.replace(step.project);
             let status = format!("redone: {}", step.what);
             self.undo.push_back(Step {
                 project: now,
@@ -480,7 +579,7 @@ impl Editor {
         self.stamp = now;
         match Project::load(&self.dir) {
             Ok(p) if p != self.project => {
-                let before = std::mem::replace(&mut self.project, p);
+                let before = self.replace(p);
                 self.push_undo(before, "Reload from disk");
                 self.changed("reloaded: project.ron changed on disk");
             }
@@ -622,12 +721,7 @@ impl Editor {
 
     /// Every road, spline and prop.
     pub fn all_items(&self) -> Vec<Item> {
-        let p = &self.project;
-        (0..p.roads.len())
-            .map(Item::Road)
-            .chain((0..p.splines.len()).map(Item::Spline))
-            .chain((0..p.props.len()).map(Item::Prop))
-            .collect()
+        all_items(&self.project).collect()
     }
 
     /// H: hides what is selected.
@@ -664,6 +758,20 @@ impl Editor {
             && !self.shown.hidden.remove(&n)
         {
             self.hide(&[item]);
+        }
+    }
+
+    /// Hides or shows a collection, as its eye in the outliner. What it holds leaves the
+    /// selection as it is hidden, as hidden items do: nothing unseen is moved or deleted.
+    pub fn toggle_group_hidden(&mut self, group: &str) {
+        if self.shown.hidden_groups.remove(group) {
+            return;
+        }
+        self.shown.hidden_groups.insert(group.to_string());
+        for item in self.all_items() {
+            if !self.visible(item) {
+                self.selection.remove(item);
+            }
         }
     }
 
@@ -749,7 +857,7 @@ impl Editor {
             .and_then(|p| p.validate().map(|()| p).map_err(|e| e.to_string()));
         match project {
             Ok(p) => {
-                let before = std::mem::replace(&mut self.project, p);
+                let before = self.replace(p);
                 self.push_undo(before, "Restore backup");
                 self.changed("restored a backup (Ctrl Z undoes it)");
             }
@@ -914,11 +1022,70 @@ mod tests {
         assert_eq!(editor.groups(), vec!["T1 kerbs".to_string()]);
         assert_eq!(editor.group(Item::Spline(1)), Some("T1 kerbs"));
         assert_eq!(editor.group(Item::Spline(2)), None);
-        editor.shown.hidden_groups.insert("T1 kerbs".into());
+        editor.toggle_group_hidden("T1 kerbs");
         assert!(!editor.visible(Item::Spline(0)) && editor.visible(Item::Spline(2)));
-        editor.shown.hidden_groups.clear();
+        assert_eq!(
+            editor.selection.items(),
+            vec![Item::Road(0)],
+            "what is hidden is not selected"
+        );
+        editor.toggle_group_hidden("T1 kerbs");
+        assert!(editor.visible(Item::Spline(0)));
         editor.shown.locked_groups.insert("T1 kerbs".into());
         assert!(editor.visible(Item::Spline(0)) && !editor.pickable(Item::Spline(0)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_items_as_the_lists_change_round_them() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-follow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        for (name, y) in [("a", 0.0), ("b", 10.0), ("c", 20.0)] {
+            let spline = crate::presets::named(&editor.project, "kerb")
+                .unwrap()
+                .spline(
+                    &editor.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(9.0, y, 0.0)],
+                )
+                .unwrap();
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                ..spline
+            };
+            assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        }
+        let name = |e: &Editor, item| e.named(item).unwrap();
+        editor.selection.select_node(Item::Spline(2), 1);
+        editor.selection.others = vec![Item::Spline(1)];
+        // Another (an agent, say) takes "a" out: "b" and "c" move up the list.
+        assert!(editor.apply(vec![Op::RemoveSpline { name: "a".into() }], None));
+        assert_eq!(
+            name(&editor, editor.selection.item.unwrap()),
+            Named::Spline("c".into())
+        );
+        assert_eq!(editor.selection.nodes, vec![1], "its nodes stay selected");
+        assert_eq!(
+            name(&editor, editor.selection.others[0]),
+            Named::Spline("b".into())
+        );
+        // Undone, "a" is back before them: still "c" and "b".
+        editor.undo();
+        assert_eq!(editor.selection.item, Some(Item::Spline(2)));
+        assert_eq!(editor.selection.others, vec![Item::Spline(1)]);
+        // Renamed, an item stays selected, and hidden.
+        editor.shown.hidden.insert(Named::Spline("b".into()));
+        assert!(crate::edit::rename(&mut editor, Item::Spline(1), "b2"));
+        assert_eq!(editor.selection.others, vec![Item::Spline(1)]);
+        assert!(!editor.visible(Item::Spline(1)), "still hidden");
+        // The active one gone, the next selected takes its place.
+        assert!(editor.apply(vec![Op::RemoveSpline { name: "c".into() }], None));
+        assert_eq!(
+            name(&editor, editor.selection.item.unwrap()),
+            Named::Spline("b2".into())
+        );
+        assert!(editor.selection.others.is_empty() && editor.selection.nodes.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

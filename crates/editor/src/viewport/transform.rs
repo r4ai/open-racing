@@ -114,14 +114,15 @@ pub fn start_modal(
             }
         }
         Some(Hit::Line(road, line)) => {
-            let (Some(smp), Some(at)) = (built.roads.get(road), tool.pointer) else {
+            let Some(f) = built
+                .roads
+                .get(road)
+                .zip(tool.pointer)
+                .and_then(|(smp, at)| smp.frames.get(smp.nearest(at)))
+            else {
                 return;
             };
-            Target::Line {
-                road,
-                line,
-                s: smp.frames[smp.nearest(at)].s,
-            }
+            Target::Line { road, line, s: f.s }
         }
         Some(Hit::Reach(end)) => Target::Reach { end },
         Some(Hit::Edge(r, node, side)) => {

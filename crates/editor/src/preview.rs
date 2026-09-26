@@ -88,6 +88,74 @@ pub struct Built {
     pub revision: u64,
     /// Builds finished so far.
     pub count: u64,
+    /// The names of the lines `roads` and `splines` are of, in their order.
+    pub road_names: Vec<String>,
+    pub spline_names: Vec<String>,
+}
+
+impl Built {
+    /// The line of a road or spline as built.
+    pub fn sampled(&self, item: Item) -> Option<&Sampled> {
+        match item {
+            Item::Road(r) => self.roads.get(r),
+            Item::Spline(s) => self.splines.get(s),
+            Item::Prop(_) => None,
+        }
+    }
+
+    /// Puts the roads and splines as built in the order the project has them now. The
+    /// build is of the project as it was: until the next one is done, a line deleted
+    /// or added since would put the lines after it out of step, drawn and picked as
+    /// others. Lines new since the build (and those after them) have none until then.
+    pub fn align(&mut self, p: &Project) {
+        let same = |names: &[String], now: &mut dyn Iterator<Item = &str>| {
+            names.iter().map(String::as_str).eq(now)
+        };
+        if !same(
+            &self.road_names,
+            &mut p.roads.iter().map(|r| r.name.as_str()),
+        ) {
+            let roads: Vec<&str> = p.roads.iter().map(|r| r.name.as_str()).collect();
+            let order = realign(&mut self.road_names, &roads);
+            take_in(&mut self.roads, &order);
+            take_in(&mut self.corners, &order);
+        }
+        if !same(
+            &self.spline_names,
+            &mut p.splines.iter().map(|s| s.name.as_str()),
+        ) {
+            let splines: Vec<&str> = p.splines.iter().map(|s| s.name.as_str()).collect();
+            let order = realign(&mut self.spline_names, &splines);
+            take_in(&mut self.splines, &order);
+        }
+    }
+}
+
+/// Where each of the lines named `now` was among those named `names`, the first ones
+/// only up to one that was not there (a line new since). A line renamed in place (the
+/// lists as long as they were) keeps its place. `names` becomes the names of the lines
+/// kept.
+fn realign(names: &mut Vec<String>, now: &[&str]) -> Vec<usize> {
+    let mut order = Vec::new();
+    for (i, name) in now.iter().enumerate() {
+        match names.iter().position(|n| n == name) {
+            Some(j) => order.push(j),
+            None if names.len() == now.len() => order.push(i),
+            None => break,
+        }
+    }
+    *names = now[..order.len()].iter().map(|n| n.to_string()).collect();
+    order
+}
+
+/// Keeps the elements of `list` at the places `order` names, in that order, up to the
+/// first it has not.
+fn take_in<T>(list: &mut Vec<T>, order: &[usize]) {
+    let mut old: Vec<Option<T>> = std::mem::take(list).into_iter().map(Some).collect();
+    *list = order
+        .iter()
+        .map_while(|&j| old.get_mut(j).and_then(Option::take))
+        .collect();
 }
 
 #[derive(Default)]
@@ -110,6 +178,8 @@ struct Meshes {
     colours: Vec<Vec<Vec<[f32; 4]>>>,
     names: Vec<String>,
     revision: u64,
+    road_names: Vec<String>,
+    spline_names: Vec<String>,
     /// Models that could not be read, and why.
     failed: Vec<String>,
     /// What the build could not make as asked (elevation data), and why.
@@ -312,6 +382,8 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
         colours,
         names: project.scatter.iter().map(|s| s.name.clone()).collect(),
         revision,
+        road_names: project.roads.iter().map(|r| r.name.clone()).collect(),
+        spline_names: project.splines.iter().map(|s| s.name.clone()).collect(),
         roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
         splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
         issues,
@@ -499,8 +571,11 @@ pub fn rebuild(
         built.colours = done.colours;
         built.names = done.names;
         built.revision = done.revision;
+        built.road_names = done.road_names;
+        built.spline_names = done.spline_names;
         built.count += 1;
     }
+    built.align(&editor.project);
 
     if state.task.is_none() && state.started != editor.revision {
         let (project, revision) = (editor.project.clone(), editor.revision);
@@ -847,5 +922,34 @@ pub fn rows(
         } else {
             Visibility::Hidden
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aligned(built: &[&str], now: &[&str]) -> (Vec<usize>, Vec<String>) {
+        let mut names = built.iter().map(|n| n.to_string()).collect();
+        let order = realign(&mut names, now);
+        (order, names)
+    }
+
+    #[test]
+    fn built_lines_follow_the_project_until_the_next_build() {
+        // One deleted: those after it move up.
+        assert_eq!(aligned(&["a", "b", "c"], &["a", "c"]).0, vec![0, 2]);
+        // One renamed in place keeps its place.
+        assert_eq!(aligned(&["a", "b", "c"], &["a", "x", "c"]).0, vec![0, 1, 2]);
+        // One new before others: it and those after it wait for the build.
+        let (order, names) = aligned(&["a", "c"], &["a", "b", "c"]);
+        assert_eq!(order, vec![0]);
+        assert_eq!(names, vec!["a"]);
+        let mut list = vec!["A", "B", "C"];
+        take_in(&mut list, &[2, 0]);
+        assert_eq!(list, vec!["C", "A"]);
+        let mut list = vec!["A"];
+        take_in(&mut list, &[0, 0, 5]);
+        assert_eq!(list, vec!["A"]);
     }
 }

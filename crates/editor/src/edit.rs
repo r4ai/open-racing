@@ -8,16 +8,7 @@ use open_racing_track_project::curve::{handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Key, Road, StationCurve};
 
-use crate::state::{Editor, Item, item_line};
-
-/// The name of a road, spline or prop.
-pub fn item_name(project: &Project, item: Item) -> Option<&str> {
-    match item {
-        Item::Road(r) => project.roads.get(r).map(|r| r.name.as_str()),
-        Item::Spline(s) => project.splines.get(s).map(|s| s.name.as_str()),
-        Item::Prop(p) => project.props.get(p).map(|p| p.name.as_str()),
-    }
-}
+use crate::state::{Editor, Item, item_line, item_name};
 
 /// What kind of thing an item is, for labels.
 pub fn item_kind(item: Item) -> &'static str {
@@ -580,8 +571,16 @@ pub fn rename(editor: &mut Editor, item: Item, to: &str) -> bool {
         Item::Spline(_) => Op::RenameSpline { name, to },
         Item::Prop(_) => Op::RenameProp { name, to },
     };
-    // The renamed item keeps its place in the list, and so the selection.
-    editor.apply(vec![op], None)
+    // The renamed item keeps its place in the list, and so the selection, and stays
+    // hidden or locked.
+    let before = editor.named(item);
+    if !editor.apply(vec![op], None) {
+        return false;
+    }
+    if let (Some(from), Some(to)) = (before, editor.named(item)) {
+        editor.shown.rename(&from, to);
+    }
+    true
 }
 
 /// A road's profile: its left or right width, or its bank.

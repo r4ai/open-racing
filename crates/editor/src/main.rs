@@ -302,7 +302,11 @@ fn main() {
         }),
         ..default()
     }))
-    .add_plugins((EguiPlugin::default(), TrackModelPlugin))
+    .add_plugins((
+        EguiPlugin::default(),
+        TrackModelPlugin,
+        viewport::GizmoGroups,
+    ))
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()

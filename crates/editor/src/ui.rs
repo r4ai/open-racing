@@ -5,7 +5,6 @@
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
-use open_racing_track_project::project::Side;
 use open_racing_track_project::projects_dir;
 
 use crate::assets::{self, Library};
@@ -16,7 +15,7 @@ use crate::jobs::Jobs;
 use crate::preview::{Built, Props};
 use crate::profile::ProfileView;
 use crate::state::{Editor, Item};
-use crate::viewport::{EditorCamera, Hit, Orbit, Tool, ToolKind, View, ViewDir, ViewRect};
+use crate::viewport::{EditorCamera, Hit, Orbit, Part, Tool, ToolKind, View, ViewDir, ViewRect};
 use crate::{menus, outliner, overlay, popups, properties, sidebar};
 
 /// What the area below the 3D view shows.
@@ -63,15 +62,6 @@ impl PropTab {
         .into_iter()
         .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
     }
-}
-
-/// A part of a road the outliner asked the properties editor to open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Focus {
-    Strip(Side, usize),
-    Line(usize),
-    Barrier(usize),
-    Row(usize),
 }
 
 /// A popup over everything, taking the keys and clicks until it closes.
@@ -137,7 +127,8 @@ pub struct Shell {
     pub bottom: BottomTab,
     pub tab: PropTab,
     pub sidebar_tab: sidebar::Tab,
-    pub focus: Option<Focus>,
+    /// A part of the selected road the properties are to open.
+    pub focus: Option<Part>,
     /// The corner looked at last: its road and number.
     pub corner: Option<(usize, usize)>,
     /// The side kerbs and walls are laid along the selected nodes on.
@@ -309,6 +300,7 @@ pub fn ui(
     }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
+    c.tool.part_hover = None;
     c.tool.landforms = c.shell.tab == PropTab::Terrain && !c.shell.maximized;
     // What the panels change about the active item, the other selected items of its
     // kind take too.
@@ -817,7 +809,7 @@ fn mouse_hints(c: &Ctx) -> String {
         return t.hint.clone();
     }
     let name = |item| {
-        edit::item_name(&c.editor.project, item)
+        crate::state::item_name(&c.editor.project, item)
             .unwrap_or("")
             .to_string()
     };

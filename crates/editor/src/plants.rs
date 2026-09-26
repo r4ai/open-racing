@@ -537,7 +537,12 @@ pub fn set(editor: &mut Editor, tool: &mut Tool, built: &Built, f: impl Fn(&mut 
 }
 
 /// The selected copies, the one under the pointer, and the copy about to be planted.
-pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
+pub fn draw(
+    tool: &Tool,
+    built: &Built,
+    gizmos: &mut Gizmos,
+    bold: &mut Gizmos<crate::viewport::Bold>,
+) {
     let Some(name) = tool.brush.scatter.as_deref() else {
         return;
     };
@@ -552,16 +557,17 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
     let sizes = built.sizes.get(k).map(Vec::as_slice).unwrap_or_default();
     let ground = built.ground.as_deref();
     let size = |model: usize| sizes.get(model).copied().unwrap_or([1.0, 2.0]);
-    let ring = |gizmos: &mut Gizmos, at: DVec3, r: f64, h: f64, colour: Color| {
+    /// A ring round a copy's foot and a line up its height.
+    fn ring<G: GizmoConfigGroup>(g: &mut Gizmos<G>, at: DVec3, r: f64, h: f64, colour: Color) {
         let points: Vec<Vec3> = (0..=32)
             .map(|i| {
                 let a = i as f64 / 32.0 * std::f64::consts::TAU;
                 to_bevy(at + (DVec2::from_angle(a) * r).extend(0.15))
             })
             .collect();
-        gizmos.linestrip(points, colour);
-        gizmos.line(to_bevy(at), to_bevy(at + DVec3::Z * h), colour);
-    };
+        g.linestrip(points, colour);
+        g.line(to_bevy(at), to_bevy(at + DVec3::Z * h), colour);
+    }
     let on_ground = |p: DVec2| {
         ground
             .and_then(|g| g.raycast_down(p.extend(1e4), 2e4))
@@ -571,7 +577,7 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
         for p in &c.now {
             let [r, h] = size(p.model);
             ring(
-                gizmos,
+                bold,
                 on_ground(p.pos),
                 (r as f64 * p.scale).max(0.3),
                 h as f64 * p.scale,
@@ -593,7 +599,7 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
             theme::HOVER
         };
         ring(
-            gizmos,
+            bold,
             c.pos,
             (r as f64 * c.scale).max(0.3),
             h as f64 * c.scale,

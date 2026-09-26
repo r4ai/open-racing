@@ -16,7 +16,8 @@ use crate::assets::Library;
 use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
 use crate::state::{Editor, Item};
-use crate::ui::{Focus, PropTab};
+use crate::ui::PropTab;
+use crate::viewport::Part;
 
 mod library;
 mod nature;
@@ -173,7 +174,7 @@ pub fn show(
                 .item
                 .filter(|_| c.shell.tab >= PropTab::Object)
             {
-                let name = edit::item_name(&c.editor.project, item).unwrap_or_default();
+                let name = crate::state::item_name(&c.editor.project, item).unwrap_or_default();
                 ui.strong(name);
                 if !matches!(c.shell.tab, PropTab::Object) {
                     ui.weak("›");
@@ -347,7 +348,7 @@ fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, 
 
 /// The name field of an item: renames it when the field loses focus.
 fn name_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item) {
-    let name = edit::item_name(&c.editor.project, item)
+    let name = crate::state::item_name(&c.editor.project, item)
         .unwrap_or_default()
         .to_string();
     if !matches!(&state.rename, Some((i, _)) if *i == item) {
@@ -946,7 +947,18 @@ fn style_names(project: &Project) -> (Vec<String>, Vec<String>) {
 }
 
 /// Opens the panel the outliner pointed at, once.
-fn focused(c: &mut Ctx, focus: Focus) -> Option<bool> {
+/// A road part's header: scrolled to when the part was asked to open, and lighting the
+/// part up in the view while the pointer is over it.
+fn part_header(c: &mut Ctx, header: &egui::Response, open: Option<bool>, r: usize, part: Part) {
+    if open.is_some() {
+        header.scroll_to_me(Some(egui::Align::TOP));
+    }
+    if header.hovered() {
+        c.tool.part_hover = Some((r, part));
+    }
+}
+
+fn focused(c: &mut Ctx, focus: Part) -> Option<bool> {
     (c.shell.focus == Some(focus)).then(|| {
         c.shell.focus = None;
         true

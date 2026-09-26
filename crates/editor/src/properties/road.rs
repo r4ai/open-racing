@@ -187,7 +187,7 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                 }
                 let mut s = strip.clone();
                 let (mut changed, mut removed) = (false, false);
-                let open = focused(c, Focus::Strip(side, i));
+                let open = focused(c, Part::Strip(side, i));
                 let kind = s.style.as_deref().unwrap_or("custom");
                 let wide = if s.keys.is_empty() {
                     format!("{:.1} m", s.width)
@@ -275,9 +275,7 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                             changed |= ranges_ui(ui, &mut s.ranges, &picked, period, road.closed);
                             removed = row(ui, "", |ui| ui.button("Remove strip").clicked());
                         });
-                if open.is_some() {
-                    resp.header_response.scroll_to_me(Some(egui::Align::TOP));
-                }
+                part_header(c, &resp.header_response, open, r, Part::Strip(side, i));
                 if add_key && let Some(smp) = c.built.roads.get(r) {
                     let s_at = match node {
                         Some(n) => smp.s_at(n as f64),
@@ -372,7 +370,7 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
     for (i, line) in road.lines.iter().enumerate() {
         let mut l = line.clone();
         let (mut changed, mut removed) = (false, false);
-        let open = focused(c, Focus::Line(i));
+        let open = focused(c, Part::Line(i));
         let resp = egui::CollapsingHeader::new(&l.name)
             .id_salt(("line", r, i))
             .default_open(true)
@@ -394,9 +392,7 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                 changed |= ranges_ui(ui, &mut l.ranges, &picked, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove line").clicked());
             });
-        if open.is_some() {
-            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
-        }
+        part_header(c, &resp.header_response, open, r, Part::Line(i));
         if removed {
             c.editor.apply(
                 vec![Op::RemoveLine {
@@ -556,7 +552,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
         }
         let mut b = barrier.clone();
         let (mut changed, mut removed) = (false, false);
-        let open = focused(c, Focus::Barrier(i));
+        let open = focused(c, Part::Barrier(i));
         let kind = b.style.as_deref().unwrap_or("custom");
         let resp = egui::CollapsingHeader::new(format!("{}  ·  {kind}, {:?}", b.name, b.side))
             .id_salt(("barrier", r, i))
@@ -598,9 +594,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                 changed |= ranges_ui(ui, &mut b.ranges, &picked, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove barrier").clicked());
             });
-        if open.is_some() {
-            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
-        }
+        part_header(c, &resp.header_response, open, r, Part::Barrier(i));
         if removed {
             c.editor.apply(
                 vec![Op::RemoveBarrier {
@@ -669,7 +663,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     for (i, row_) in road.rows.iter().enumerate() {
         let mut w = row_.clone();
         let (mut changed, mut removed) = (false, false);
-        let open = focused(c, Focus::Row(i));
+        let open = focused(c, Part::Row(i));
         let count = c.built.roads.get(r).map_or(0, |smp| {
             open_racing_track_project::rows::copies(&road, smp, &w).len()
         });
@@ -737,9 +731,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
             }
             removed = row(ui, "", |ui| ui.button("Remove row").clicked());
         });
-        if open.is_some() {
-            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
-        }
+        part_header(c, &resp.header_response, open, r, Part::Row(i));
         if removed {
             c.editor.apply(
                 vec![Op::RemoveRow {

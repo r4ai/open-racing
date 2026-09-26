@@ -10,7 +10,8 @@ use open_racing_track_project::project::Side;
 use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
 use crate::state::Item;
-use crate::ui::{Focus, PropTab};
+use crate::ui::PropTab;
+use crate::viewport::Part;
 
 #[derive(Default)]
 pub struct State {
@@ -235,17 +236,18 @@ fn item_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item, icon:
     {
         c.editor.toggle_locked(item);
     }
-    let selected = c.editor.selection.item == Some(item);
-    let text = if selected {
-        egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_UI)
-    } else if c.editor.selection.has(item) {
-        egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_OTHER_UI)
+    let look = c.editor.selection.look(item, false);
+    let selected = look == crate::theme::Look::Active;
+    let text = egui::RichText::new(format!("{icon} {name}"));
+    let text = if look.selected() {
+        text.color(look.text())
     } else if hidden {
-        egui::RichText::new(format!("{icon} {name}")).weak()
+        text.weak()
     } else {
-        egui::RichText::new(format!("{icon} {name}"))
+        text
     };
-    let resp = ui.selectable_label(selected, text);
+    // Selected with the active one: lit as it is, less than the active one.
+    let resp = ui.selectable_label(look.selected(), text);
     if resp.hovered() {
         c.tool.outliner_hover = Some(item);
     }
@@ -301,7 +303,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
     let Some(road) = c.editor.project.roads.get(r) else {
         return;
     };
-    let mut parts: Vec<(Option<Focus>, PropTab, String)> = Vec::new();
+    let mut parts: Vec<(Option<Part>, PropTab, String)> = Vec::new();
     // What was laid round corners is one entry: on a long track there are dozens.
     let cornered = road
         .left
@@ -331,7 +333,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
                 continue;
             }
             parts.push((
-                Some(Focus::Strip(side, i)),
+                Some(Part::Strip(side, i)),
                 PropTab::Strips,
                 format!("☰ {} ({s})", strip.name),
             ));
@@ -339,7 +341,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
     }
     for (i, line) in road.lines.iter().enumerate() {
         parts.push((
-            Some(Focus::Line(i)),
+            Some(Part::Line(i)),
             PropTab::Lines,
             format!("✏ {}", line.name),
         ));
@@ -349,13 +351,13 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
             continue;
         }
         parts.push((
-            Some(Focus::Barrier(i)),
+            Some(Part::Barrier(i)),
             PropTab::Barriers,
             format!("🚧 {}", b.name),
         ));
     }
     for (i, w) in road.rows.iter().enumerate() {
-        parts.push((Some(Focus::Row(i)), PropTab::Rows, format!("🌲 {}", w.name)));
+        parts.push((Some(Part::Row(i)), PropTab::Rows, format!("🌲 {}", w.name)));
     }
     if parts.is_empty() {
         ui.weak("no strips, lines or barriers");
@@ -364,6 +366,7 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
         let resp = ui.selectable_label(false, egui::RichText::new(label).weak());
         if resp.hovered() {
             c.tool.outliner_hover = Some(Item::Road(r));
+            c.tool.part_hover = focus.map(|part| (r, part));
         }
         if resp.clicked() {
             if c.editor.selection.item != Some(Item::Road(r)) {
@@ -411,16 +414,15 @@ fn collection(
     let id = ui.make_persistent_id(("outliner collection", group));
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
         .show_header(ui, |ui| {
-            let sh = &mut c.editor.shown;
-            let hidden = sh.hidden_groups.contains(group);
+            let hidden = c.editor.shown.hidden_groups.contains(group);
             if ui
                 .add(egui::Button::new(if hidden { "◌" } else { "👁" }).frame(false))
                 .on_hover_text("Hide or show the whole collection")
                 .clicked()
-                && !sh.hidden_groups.remove(group)
             {
-                sh.hidden_groups.insert(group.to_string());
+                c.editor.toggle_group_hidden(group);
             }
+            let sh = &mut c.editor.shown;
             let locked = sh.locked_groups.contains(group);
             if ui
                 .add(egui::Button::new(if locked { "🔒" } else { "🔓" }).frame(false))

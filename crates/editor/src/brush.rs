@@ -676,12 +676,17 @@ pub fn live(
 
 /// The brush on the ground under the pointer: its reach, and the half it acts fully
 /// in; and the stroke's scatter.
-pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
+pub fn draw(
+    tool: &Tool,
+    built: &Built,
+    gizmos: &mut Gizmos,
+    bold: &mut Gizmos<crate::viewport::Bold>,
+) {
     if !tool.active.is_brush() || tool.modal.is_some() {
         return;
     }
     if tool.active == ToolKind::Scatter && tool.brush.mode != ScatterMode::Paint {
-        crate::plants::draw(tool, built, gizmos);
+        crate::plants::draw(tool, built, gizmos, bold);
         return;
     }
     let ground = built.ground.as_deref();

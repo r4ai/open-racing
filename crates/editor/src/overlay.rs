@@ -39,7 +39,8 @@ fn outlined(
     for d in [
         egui::vec2(1.0, 1.0),
         egui::vec2(-1.0, 1.0),
-        egui::vec2(0.0, -1.0),
+        egui::vec2(1.0, -1.0),
+        egui::vec2(-1.0, -1.0),
     ] {
         painter.text(
             at + d,
@@ -50,6 +51,45 @@ fn outlined(
         );
     }
     painter.text(at, align, text, font, color);
+}
+
+/// Text on a dark tag, for what is selected: it reads over anything, and stands out
+/// from the outlined labels round it.
+fn tagged(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+) {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), color);
+    let rect = align.anchor_size(at, galley.size());
+    painter.rect(
+        rect.expand2(egui::vec2(4.0, 1.0)),
+        3.0,
+        egui::Color32::from_black_alpha(200),
+        egui::Stroke::new(1.0, color.gamma_multiply(0.6)),
+        egui::StrokeKind::Outside,
+    );
+    painter.galley(rect.min, galley, color);
+}
+
+/// A label drawn as what it names stands: tagged when selected.
+fn label(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    selected: bool,
+) {
+    if selected {
+        tagged(painter, at, align, text, size, color);
+    } else {
+        outlined(painter, at, align, text, size, color);
+    }
 }
 
 /// The view's name and the selection, top left, as Blender's text info.
@@ -82,14 +122,18 @@ fn info(ctx: &egui::Context, r: egui::Rect, c: &Ctx) {
     let sel = &c.editor.selection;
     let what = match sel.item {
         Some(item) => {
-            let name = edit::item_name(&c.editor.project, item).unwrap_or_default();
+            let name = crate::state::item_name(&c.editor.project, item).unwrap_or_default();
             let nodes = match (sel.nodes.len(), sel.node()) {
                 (0, _) => String::new(),
                 (1, Some(n)) => format!(" › node {n}"),
                 (k, Some(n)) => format!(" › {k} nodes, active {n}"),
                 _ => String::new(),
             };
-            format!("({}) {name}{nodes}", edit::item_kind(item))
+            let more = match sel.others.len() {
+                0 => String::new(),
+                n => format!(" and {n} more ({} selected)", n + 1),
+            };
+            format!("({}) {name}{nodes}{more}", edit::item_kind(item))
         }
         None => "Nothing selected".into(),
     };
@@ -143,9 +187,12 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
     };
     let sel = &c.editor.selection;
     if o.names {
-        let lines = (0..p.roads.len())
+        // What is selected last, over the rest.
+        let mut lines: Vec<Item> = (0..p.roads.len())
             .map(Item::Road)
-            .chain((0..p.splines.len()).map(Item::Spline));
+            .chain((0..p.splines.len()).map(Item::Spline))
+            .collect();
+        lines.sort_by_key(|&i| (sel.has(i), sel.item == Some(i)));
         for item in lines {
             let Some((name, nodes, _)) = item_line(p, item) else {
                 continue;
@@ -153,42 +200,43 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             let Some(node) = nodes.get(nodes.len() / 2) else {
                 continue;
             };
-            let selected = sel.item == Some(item);
-            if (!o.lines && !selected) || !c.editor.visible(item) {
+            let look = sel.look(item, c.tool.outliner_hover == Some(item));
+            if (!o.lines && !look.selected()) || !c.editor.visible(item) {
                 continue;
             }
             if let Some(at) = screen(shown_pos(c.editor, c.built, item, node.pos)) {
-                let color = if selected {
-                    theme::SELECTED_UI
-                } else {
-                    theme::UNSELECTED_UI
-                };
-                outlined(
+                label(
                     &painter,
                     at + egui::vec2(0.0, -14.0),
                     egui::Align2::CENTER_BOTTOM,
                     name,
                     12.0,
-                    color,
+                    look.text(),
+                    look.selected(),
                 );
             }
         }
-        if o.props {
-            for (i, prop) in p.props.iter().enumerate() {
-                if !c.editor.visible(Item::Prop(i)) {
-                    continue;
-                }
-                let at = Placement::of(prop, c.built.ground.as_deref());
-                if let Some(s) = screen(at.pos) {
-                    outlined(
-                        &painter,
-                        s + egui::vec2(0.0, -16.0),
-                        egui::Align2::CENTER_BOTTOM,
-                        &prop.name,
-                        11.0,
-                        egui::Color32::from_rgb(190, 240, 150),
-                    );
-                }
+        for (i, prop) in p.props.iter().enumerate() {
+            let item = Item::Prop(i);
+            let look = sel.look(item, c.tool.outliner_hover == Some(item));
+            if (!o.props && !look.selected()) || !c.editor.visible(item) {
+                continue;
+            }
+            let at = Placement::of(prop, c.built.ground.as_deref());
+            if let Some(s) = screen(at.pos) {
+                let color = match look {
+                    theme::Look::Normal => egui::Color32::from_rgb(190, 240, 150),
+                    _ => look.text(),
+                };
+                label(
+                    &painter,
+                    s + egui::vec2(0.0, -16.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    &prop.name,
+                    11.0,
+                    color,
+                    look.selected(),
+                );
             }
         }
     }
@@ -220,28 +268,28 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             .copied()
             .filter(|&i| i < nodes.len())
             .chain((0..nodes.len()).filter(|i| !sel.nodes.contains(i)));
-        let mut drawn: Vec<egui::Pos2> = Vec::new();
+        let mut drawn: Vec<(egui::Pos2, usize)> = Vec::new();
         for i in order {
-            let chosen = sel.nodes.contains(&i);
+            let look = sel.node_look(item, i);
             let Some(at) = screen(shown_pos(c.editor, c.built, item, nodes[i].pos)) else {
                 continue;
             };
-            if !chosen && drawn.iter().any(|d| d.distance(at) < LABEL_GAP) {
+            if !look.selected() && drawn.iter().any(|d| d.0.distance(at) < LABEL_GAP) {
                 continue;
             }
-            drawn.push(at);
-            let color = if chosen {
-                theme::SELECTED_NODE_UI
-            } else {
-                theme::UNSELECTED_UI
-            };
-            outlined(
+            drawn.push((at, i));
+        }
+        // Drawn in reverse, so that the selected ones (first) are drawn over the rest.
+        for &(at, i) in drawn.iter().rev() {
+            let look = sel.node_look(item, i);
+            label(
                 &painter,
                 at + egui::vec2(9.0, -9.0),
                 egui::Align2::LEFT_BOTTOM,
                 &i.to_string(),
-                11.0,
-                color,
+                if look.selected() { 12.0 } else { 11.0 },
+                look.text(),
+                look.selected(),
             );
         }
     }

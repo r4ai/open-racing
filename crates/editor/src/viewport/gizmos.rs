@@ -1,14 +1,112 @@
 //! Drawing lines, nodes, handles, markers and what the tools are doing.
 
+use bevy::ecs::system::SystemParam;
+use bevy::gizmos::config::{GizmoConfig, GizmoLineConfig, GizmoLineJoint};
+use theme::{Look, NodeLook};
+
 use super::*;
+
+/// Gizmos drawn with bold lines: what is selected, and what the pointer is over.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct Bold;
+
+/// Dots of nodes and handles.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct Dots;
+
+/// How far in front of the ground bold lines and dots are drawn, as a gizmo's depth
+/// bias: a dot on the road would sink half into it, and a selected line into a banked
+/// or crowned road. Dots come further, over the lines through them.
+const FORWARD: f32 = -0.02;
+const DOTS_FORWARD: f32 = -0.03;
+
+/// The view's gizmo groups beside the default one.
+pub struct GizmoGroups;
+
+impl Plugin for GizmoGroups {
+    fn build(&self, app: &mut App) {
+        add_gizmo_groups(app);
+    }
+}
+
+fn add_gizmo_groups(app: &mut App) {
+    let bold = GizmoConfig {
+        line: GizmoLineConfig {
+            width: 4.0,
+            joints: GizmoLineJoint::Round(4),
+            ..default()
+        },
+        depth_bias: FORWARD,
+        ..default()
+    };
+    let dots = GizmoConfig {
+        depth_bias: DOTS_FORWARD,
+        ..default()
+    };
+    app.insert_gizmo_config(Bold, bold)
+        .insert_gizmo_config(Dots, dots);
+}
 
 /// X-ray (Alt Z): what the view draws over the track shows through the ground.
 pub fn xray(tool: Res<Tool>, mut store: ResMut<GizmoConfigStore>) {
-    let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
-    let bias = if tool.overlays.xray { -1.0 } else { 0.0 };
-    if config.depth_bias != bias {
-        config.depth_bias = bias;
+    let set = |config: &mut GizmoConfig, forward: f32| {
+        let bias = if tool.overlays.xray { -1.0 } else { forward };
+        if config.depth_bias != bias {
+            config.depth_bias = bias;
+        }
+    };
+    set(store.config_mut::<DefaultGizmoConfigGroup>().0, 0.0);
+    set(store.config_mut::<Bold>().0, FORWARD);
+    set(store.config_mut::<Dots>().0, DOTS_FORWARD);
+}
+
+/// A plane at `at` facing the camera.
+fn facing(eye: Vec3, at: Vec3) -> Isometry3d {
+    Isometry3d::new(
+        at,
+        Quat::from_rotation_arc(Vec3::Z, (eye - at).normalize_or(Vec3::Y)),
+    )
+}
+
+/// A dot facing the camera, filled with `fill` and ringed with `rim`, as Blender draws
+/// vertices: seen at a glance on asphalt, grass or sky.
+fn dot(dots: &mut Gizmos<Dots>, eye: Vec3, at: Vec3, r: f32, (fill, rim): (Color, Color)) {
+    let plane = facing(eye, at);
+    for k in [0.12, 0.26, 0.4, 0.54, 0.68, 0.8] {
+        dots.circle(plane, r * k, fill).resolution(10);
     }
+    dots.circle(plane, r, rim).resolution(16);
+}
+
+/// A ring round what the pointer is over, whatever colour that is drawn in.
+fn hover_ring(dots: &mut Gizmos<Dots>, eye: Vec3, at: Vec3, r: f32) {
+    let plane = facing(eye, at);
+    for k in [1.45, 1.55, 1.65] {
+        dots.circle(plane, k * r, theme::HOVER).resolution(20);
+    }
+}
+
+/// The view's gizmos: thin lines, bold ones and dots.
+#[derive(SystemParam)]
+pub struct Pens<'w, 's> {
+    thin: Gizmos<'w, 's>,
+    bold: Gizmos<'w, 's, Bold>,
+    dots: Gizmos<'w, 's, Dots>,
+}
+
+/// Points along a stretch of a road's part, where the view draws it.
+fn stretch(road: &Road, smp: &Sampled, part: Part, rg: &Range) -> Vec<Vec3> {
+    let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
+    if b < a && smp.closed {
+        b += smp.length;
+    }
+    let steps = ((b - a) / 3.0).ceil().max(1.0) as usize;
+    (0..=steps)
+        .map(|k| {
+            let f = smp.frame_at(a + (b - a) * k as f64 / steps as f64);
+            to_bevy(f.pos + f.lateral * part_offset(road, smp, part, &f) + DVec3::Z * LIFT)
+        })
+        .collect()
 }
 
 /// Lines, nodes, handles, markers, and what the tools are doing.
@@ -19,8 +117,13 @@ pub fn gizmos(
     jobs: Res<crate::jobs::Jobs>,
     orbit: Res<Orbit>,
     camera: Single<&GlobalTransform, With<EditorCamera>>,
-    mut gizmos: Gizmos,
+    pens: Pens,
 ) {
+    let Pens {
+        thin: mut gizmos,
+        mut bold,
+        mut dots,
+    } = pens;
     let eye = camera.translation();
     let editor = &*editor;
     let p = &editor.project;
@@ -32,40 +135,32 @@ pub fn gizmos(
         let Some((_, nodes, closed)) = item_line(p, item) else {
             continue;
         };
-        let selected = sel.item == Some(item);
-        if (!overlays.lines && !sel.has(item)) || !editor.visible(item) {
+        let look = sel.look(
+            item,
+            hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item),
+        );
+        if (!overlays.lines && !look.selected()) || !editor.visible(item) {
             continue;
         }
-        let hovered_body = hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item);
-        let line = if selected {
-            theme::SELECTED
-        } else if sel.has(item) {
-            theme::SELECTED_OTHER
-        } else if hovered_body {
-            theme::HOVER
-        } else {
-            theme::UNSELECTED
-        };
         let shown: Vec<DVec3> = nodes
             .iter()
             .map(|n| shown_pos(editor, &built, item, n.pos))
             .collect();
         // The spline itself, from the last build.
-        let sampled = match item {
-            Item::Road(r) => built.roads.get(r),
-            Item::Spline(s) => built.splines.get(s),
-            Item::Prop(_) => None,
-        };
-        if let Some(smp) = sampled.filter(|s| s.frames.len() > 1) {
+        if let Some(smp) = built.sampled(item).filter(|s| s.frames.len() > 1) {
             let pts = smp
                 .frames
                 .iter()
                 .map(|f| lift(f.pos))
                 .chain(closed.then(|| lift(smp.frames[0].pos)));
-            gizmos.linestrip(pts, line);
+            if look.bold() {
+                bold.linestrip(pts, look.line());
+            } else {
+                gizmos.linestrip(pts, look.line());
+            }
         }
         // Only the line being edited shows its nodes.
-        if !(selected && tool.edit) {
+        if !(look == Look::Active && tool.edit) {
             continue;
         }
         let n = nodes.len();
@@ -77,41 +172,50 @@ pub fn gizmos(
                 theme::UNSELECTED.with_alpha(0.3),
             );
         }
-        for (i, &pos) in shown.iter().enumerate() {
-            let chosen = sel.nodes.contains(&i);
-            let active = sel.node() == Some(i);
-            let color = if active {
-                theme::ACTIVE_NODE
-            } else if chosen {
-                theme::SELECTED_NODE
-            } else if hover == Some(Hit::Node(item, i)) {
-                theme::HOVER
-            } else if i == 0 && matches!(item, Item::Road(_)) {
-                theme::START
-            } else {
-                theme::NODE
-            };
-            let size = if chosen { 1.0 } else { 0.8 };
-            let radius = size * node_size(eye, pos);
-            gizmos.sphere(Isometry3d::from_translation(lift(pos)), radius, color);
-            if active {
+        // The selected nodes last, over the others.
+        let mut order: Vec<usize> = (0..shown.len()).collect();
+        order.sort_by_key(|&i| sel.node_look(item, i).selected());
+        for i in order {
+            let pos = shown[i];
+            let look = sel.node_look(item, i);
+            let radius = look.size() * node_size(eye, pos);
+            dot(&mut dots, eye, lift(pos), radius, look.colours());
+            if hover == Some(Hit::Node(item, i)) {
+                hover_ring(&mut dots, eye, lift(pos), radius);
+            }
+            if look == NodeLook::Active {
                 for (h, o) in visible_handles(nodes, closed, i) {
-                    let hovered = hover == Some(Hit::Handle(item, i, o));
-                    let c = if hovered {
-                        theme::HOVER
-                    } else {
-                        theme::SELECTED_NODE
-                    };
-                    gizmos.line(lift(pos), lift(pos + h), c);
-                    gizmos.sphere(Isometry3d::from_translation(lift(pos + h)), 0.6 * radius, c);
+                    let r = 0.65 * radius;
+                    bold.line(lift(pos), lift(pos + h), theme::SELECTED_NODE);
+                    dot(
+                        &mut dots,
+                        eye,
+                        lift(pos + h),
+                        r,
+                        (theme::SELECTED_NODE, theme::RIM_DARK),
+                    );
+                    if hover == Some(Hit::Handle(item, i, o)) {
+                        hover_ring(&mut dots, eye, lift(pos + h), r);
+                    }
                 }
             }
         }
     }
 
-    // Stretches of the selected road's strips (orange) and barriers (grey), with their
-    // ends to drag.
-    if let Some(r) = sel.road().filter(|_| overlays.stretches)
+    // The part of a road the pointer is over, in the view, the outliner or the
+    // properties: lit all along its stretches.
+    let hot = tool.part_hover.or(match hover {
+        Some(Hit::Range(e) | Hit::Reach(e)) => Some((e.road, e.part)),
+        Some(Hit::Line(r, i)) => Some((r, Part::Line(i))),
+        Some(Hit::Strip(r, side, i)) => Some((r, Part::Strip(side, i))),
+        Some(Hit::StripKey(k)) => Some((k.road, Part::Strip(k.side, k.strip))),
+        _ => None,
+    });
+
+    // Stretches of the selected road's strips, barriers, rows and painted lines, each
+    // kind in a colour of its own, with their ends to drag.
+    let stretches = sel.road().filter(|_| overlays.stretches);
+    if let Some(r) = stretches
         && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
         && smp.frames.len() > 1
     {
@@ -123,16 +227,12 @@ pub fn gizmos(
                 Part::Line(_) => theme::PAINT,
             };
             for (range, rg) in ranges.iter().enumerate() {
-                let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
-                if b < a && smp.closed {
-                    b += smp.length;
+                let pts = stretch(road, smp, part, rg);
+                if hot == Some((r, part)) {
+                    bold.linestrip(pts, theme::HOVER);
+                } else {
+                    gizmos.linestrip(pts, color);
                 }
-                let steps = ((b - a) / 3.0).ceil().max(1.0) as usize;
-                let pts = (0..=steps).map(|k| {
-                    let f = smp.frame_at(a + (b - a) * k as f64 / steps as f64);
-                    lift(f.pos + f.lateral * part_offset(road, smp, part, &f))
-                });
-                gizmos.linestrip(pts, color);
                 for (to, u) in [(false, rg.from), (true, rg.to)] {
                     let end = RangeEnd {
                         road: r,
@@ -141,35 +241,24 @@ pub fn gizmos(
                         to,
                     };
                     let at = range_end_pos(road, smp, part, u);
-                    let c = if hover == Some(Hit::Range(end)) {
-                        Color::WHITE
-                    } else {
-                        color
-                    };
-                    gizmos.sphere(
-                        Isometry3d::from_translation(lift(at)),
-                        0.7 * node_size(eye, at),
-                        c,
-                    );
+                    let r = 0.7 * node_size(eye, at);
+                    dot(&mut dots, eye, lift(at), r, (color, theme::RIM_DARK));
+                    if hover == Some(Hit::Range(end)) {
+                        hover_ring(&mut dots, eye, lift(at), r);
+                    }
                 }
             }
         }
     }
-
-    // The painted line under the pointer, all along it.
-    if let Some(Hit::Line(r, i)) = hover
+    // A part of another road, from the outliner.
+    if let Some((r, part)) = hot.filter(|&(r, _)| Some(r) != stretches)
         && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
-        && let Some(l) = road.lines.get(i)
+        && smp.frames.len() > 1
+        && let Some((_, ranges)) = parts(road).find(|&(q, _)| q == part)
     {
-        let mut run: Vec<Vec3> = Vec::new();
-        for f in &smp.frames {
-            if smp.presence(&l.ranges, 0.0, f.s) > 0.5 {
-                run.push(lift(f.pos + flat_left(f) * l.offset));
-            } else if !run.is_empty() {
-                gizmos.linestrip(std::mem::take(&mut run), theme::HOVER);
-            }
+        for rg in ranges {
+            bold.linestrip(stretch(road, smp, part, rg), theme::HOVER);
         }
-        gizmos.linestrip(run, theme::HOVER);
     }
 
     // Handles for widths: the outer edge of each stretch (a strip's width, a barrier's
@@ -178,7 +267,6 @@ pub fn gizmos(
         && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
         && smp.frames.len() > 1
     {
-        let lit = |hit: Hit, c: Color| if hover == Some(hit) { Color::WHITE } else { c };
         if overlays.stretches {
             for (part, ranges) in parts(road) {
                 for (range, rg) in ranges.iter().enumerate() {
@@ -192,8 +280,11 @@ pub fn gizmos(
                     let size = 0.6 * node_size(eye, at);
                     gizmos.cube(
                         Transform::from_translation(lift(at)).with_scale(Vec3::splat(size * 1.6)),
-                        lit(Hit::Reach(end), theme::STRIP),
+                        theme::STRIP,
                     );
+                    if hover == Some(Hit::Reach(end)) {
+                        hover_ring(&mut dots, eye, lift(at), size);
+                    }
                 }
             }
         }
@@ -206,26 +297,37 @@ pub fn gizmos(
                 let f = smp.frame_at(smp.s_at(road.strips(key.side)[key.strip].keys[key.key].u));
                 let inner = key.side.sign()
                     * (edge_of(&f, key.side) + inner_width(road, smp, key.side, key.strip, &f));
-                let color = lit(Hit::StripKey(key), theme::STRIP_KEY);
-                gizmos.line(lift(f.pos + flat_left(&f) * inner), lift(at), color);
-                gizmos.sphere(
-                    Isometry3d::from_translation(lift(at)),
-                    0.8 * node_size(eye, at),
-                    color,
+                gizmos.line(
+                    lift(f.pos + flat_left(&f) * inner),
+                    lift(at),
+                    theme::STRIP_KEY,
                 );
+                let r = 0.8 * node_size(eye, at);
+                dot(
+                    &mut dots,
+                    eye,
+                    lift(at),
+                    r,
+                    (theme::STRIP_KEY, theme::RIM_DARK),
+                );
+                if hover == Some(Hit::StripKey(key)) {
+                    hover_ring(&mut dots, eye, lift(at), r);
+                }
             }
         }
         for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
             let centre = smp.frame_at(smp.s_at(n as f64)).pos;
             for side in [Side::Left, Side::Right] {
                 let at = edge_pos(smp, n, side);
-                let color = lit(Hit::Edge(r, n, side), theme::STRIP);
-                gizmos.line(lift(centre), lift(at), color.with_alpha(0.4));
+                gizmos.line(lift(centre), lift(at), theme::STRIP.with_alpha(0.4));
+                let size = node_size(eye, at);
                 gizmos.cube(
-                    Transform::from_translation(lift(at))
-                        .with_scale(Vec3::splat(node_size(eye, at) * 1.2)),
-                    color,
+                    Transform::from_translation(lift(at)).with_scale(Vec3::splat(size * 1.2)),
+                    theme::STRIP,
                 );
+                if hover == Some(Hit::Edge(r, n, side)) {
+                    hover_ring(&mut dots, eye, lift(at), size);
+                }
             }
         }
     }
@@ -234,27 +336,25 @@ pub fn gizmos(
     for (i, prop) in p.props.iter().enumerate() {
         let at = Placement::of(prop, built.ground.as_deref());
         let item = Item::Prop(i);
-        if (!overlays.props && sel.item != Some(item)) || !editor.visible(item) {
+        let look = sel.look(
+            item,
+            hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item),
+        );
+        if (!overlays.props && !look.selected()) || !editor.visible(item) {
             continue;
         }
-        let color = if sel.item == Some(item) {
-            theme::SELECTED
-        } else if sel.has(item) {
-            theme::SELECTED_OTHER
-        } else if hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item) {
-            theme::HOVER
-        } else {
-            theme::UNSELECTED
-        };
         let r = 1.5 * node_size(eye, at.pos);
         let base = lift(at.pos);
-        gizmos.circle(
-            Isometry3d::new(base, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-            r,
-            color,
-        );
+        let ring = Isometry3d::new(base, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
         let facing = DVec3::new(at.yaw.cos(), at.yaw.sin(), 0.0);
-        gizmos.line(base, lift(at.pos + facing * (2.0 * r as f64)), color);
+        let tip = lift(at.pos + facing * (2.0 * r as f64));
+        if look.bold() {
+            bold.circle(ring, r, look.line());
+            bold.line(base, tip, look.line());
+        } else {
+            gizmos.circle(ring, r, look.line());
+            gizmos.line(base, tip, look.line());
+        }
     }
 
     // Markers on the main road, from the last build.
@@ -416,7 +516,7 @@ pub fn gizmos(
         }
     }
 
-    crate::brush::draw(&tool, &built, &mut gizmos);
+    crate::brush::draw(&tool, &built, &mut gizmos, &mut bold);
 
     // The last test lap: where the car went, coloured by its speed (blue slow, yellow
     // fast; darker where it brakes), red where it was off the track, and the car itself
@@ -485,12 +585,11 @@ pub fn gizmos(
                     continue;
                 }
                 let at = landform_handle(l, &built, h);
-                let hovered = hover == Some(Hit::Landform(i, h));
-                gizmos.sphere(
-                    Isometry3d::from_translation(lift(at)),
-                    node_size(eye, at),
-                    if hovered { theme::HOVER } else { color },
-                );
+                let r = node_size(eye, at);
+                dot(&mut dots, eye, lift(at), r, (color, theme::RIM_DARK));
+                if hover == Some(Hit::Landform(i, h)) {
+                    hover_ring(&mut dots, eye, lift(at), r);
+                }
             }
         }
     }

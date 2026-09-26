@@ -440,12 +440,9 @@ pub(super) fn circle_select(
     let mut hits: Vec<Item> = items(editor)
         .filter(|&i| editor.pickable(i))
         .filter(|&i| {
-            let smp = match i {
-                Item::Road(r) => built.roads.get(r),
-                Item::Spline(s) => built.splines.get(s),
-                Item::Prop(_) => None,
-            };
-            smp.is_some_and(|s| s.frames.iter().any(|f| within(f.pos)))
+            built
+                .sampled(i)
+                .is_some_and(|s| s.frames.iter().any(|f| within(f.pos)))
         })
         .collect();
     for (i, prop) in editor.project.props.iter().enumerate() {
@@ -673,13 +670,9 @@ pub fn delete(editor: &mut Editor) {
             })
             .collect()
     };
-    let whole = editor.selection.nodes.is_empty();
+    // A line deleted leaves the selection by itself.
     if editor.apply(ops, None) {
         editor.selection.nodes.clear();
-        // After removing the whole item its index names the next one in the list.
-        if whole || editor.line().is_none() {
-            editor.selection = Default::default();
-        }
     }
 }
 
