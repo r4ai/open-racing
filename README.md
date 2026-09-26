@@ -368,7 +368,10 @@ A policy that laps well can still fail a race stint. Trained with the recipe abo
 # Cars from the start line for 10 laps: the first as the policy drives, the others with a little action noise.
 # Per lap: time, hottest tread, grip left by the tyres' condition, wear, hot pressure, damage, steps off track
 # and off course (3+ wheels off); then how many cars finished, where the others crashed, and the total times.
-cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-3 --laps 10 --cars 32 --trace stint.csv
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-4 --laps 10 --cars 32 --trace stint.csv
+# The same in drawn weather: each car in its own air and road temperature and wind.
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-4 --laps 10 --cars 32 \
+  --air-temperature 5..40 --road-heat 0..30 --wind 0..9
 ```
 
 A policy holds up over a stint when it trains on the states a stint goes through and can see them:
@@ -376,6 +379,7 @@ A policy holds up over a stint when it trains on the states a stint goes through
 - `--max-episode-seconds 600` (then 1400) with random starts: episodes run for several laps, so tyres warm and wear as in a stint.
 - `--worn-start-fraction 0.5 --worn-start-max-wear 0.35`: half the random starts put the car on tyres as a stint leaves them (worn by up to 0.35, carcasses between 60 and 105 °C with the treads a little either side).
 - `--replay-start-fraction 0.25`: a quarter of the episodes restart from the state 3 s before an earlier crash, so training dwells on where the policy fails.
+- `--air-temperature 5..40 --road-heat 0..30 --wind 0..9`: each episode draws its weather: the air temperature (°C), how much warmer the road is (K), and a gusting wind (m/s) from any direction, with the air's pressure and so its density. Without them training keeps the standard conditions (25 °C air and road, no wind), and a policy trained only in those went off on lap 1 in the app's weather on a June afternoon (33 °C air, 60 °C road).
 - `--tyre-obs --stint-obs --privileged`: tread temperatures and pressures, wear, carcass and brake temperatures, damage, slip angles and ratios and loads, all of which sims report in their telemetry.
 - `--grip-loss-penalty 0.4 --wear-penalty 200`: a price on the grip the tyres lose to heat, pressure and wear, and on the tread worn. Overheating costs lap time for minutes, far beyond the discount horizon.
 - `--speed-scaled-steering`: the steering action spans what the car can use at its speed (full lock at walking pace, about 5° at the wheels at top speed), so the same resolution serves a hairpin and a fast sweeper.
@@ -383,17 +387,29 @@ A policy holds up over a stint when it trains on the states a stint goes through
 - `--lap-position-obs`, `--abs --traction-control` (as GT3 cars have), `--gamma 0.997`.
 - Progress earns nothing while three or more wheels are off the track. Without this, a policy learned to drive straight across a chicane with all four wheels on the grass.
 
-In three stages of 150, 85 and 20 minutes on an RX 9070:
+In four stages of 150, 85, 20 and 60 minutes on an RX 9070:
 
 ```bash
-T="train --track <track> --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --tyre-obs --privileged --stint-obs   --lap-position-obs --speed-scaled-steering --lookahead-points 24 --lookahead-spacing 6 --lookahead-growth 1.1   --abs --traction-control --gamma 0.997 --crash-penalty 50 --steer-change-penalty 0.5 --grip-loss-penalty 0.4   --wear-penalty 200 --replay-start-fraction 0.25 --start-speed-max 60 --safe-start --iterations 100000"
-cargo run --release -p open-racing-train-burn -- $T --hidden 512,512 --entropy 0.002 --final-std 0.08 --worn-start-fraction 0.5   --max-episode-seconds 600 --duration-seconds 9000 --seed 1 --out runs/longrun-1
-cargo run --release -p open-racing-train-burn -- $T --lr 1.5e-4 --entropy 0 --init-std 0.08 --final-std 0.05 --worn-start-fraction 0.4   --max-episode-seconds 1400 --duration-seconds 5100 --seed 3 --init runs/longrun-1 --out runs/longrun-2
+T="train --track <track> --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --tyre-obs --privileged --stint-obs \
+  --lap-position-obs --speed-scaled-steering --lookahead-points 24 --lookahead-spacing 6 --lookahead-growth 1.1 \
+  --abs --traction-control --gamma 0.997 --crash-penalty 50 --steer-change-penalty 0.5 --grip-loss-penalty 0.4 \
+  --wear-penalty 200 --replay-start-fraction 0.25 --start-speed-max 60 --safe-start --iterations 100000"
+cargo run --release -p open-racing-train-burn -- $T --hidden 512,512 --entropy 0.002 --final-std 0.08 \
+  --worn-start-fraction 0.5 --max-episode-seconds 600 --duration-seconds 9000 --seed 1 --out runs/longrun-1
+cargo run --release -p open-racing-train-burn -- $T --lr 1.5e-4 --entropy 0 --init-std 0.08 --final-std 0.05 \
+  --worn-start-fraction 0.4 --max-episode-seconds 1400 --duration-seconds 5100 --seed 3 \
+  --init runs/longrun-1 --out runs/longrun-2
 # Stopped after 20 of 55 minutes: that checkpoint drove 10 laps 2 s faster than the last.
-cargo run --release -p open-racing-train-burn -- $T --lr 1e-4 --entropy 0 --init-std 0.05 --final-std 0.04 --worn-start-fraction 0.4   --max-episode-seconds 1400 --duration-seconds 3300 --seed 5 --init runs/longrun-2 --out runs/longrun-3
+cargo run --release -p open-racing-train-burn -- $T --lr 1e-4 --entropy 0 --init-std 0.05 --final-std 0.04 \
+  --worn-start-fraction 0.4 --max-episode-seconds 1400 --duration-seconds 3300 --seed 5 \
+  --init runs/longrun-2 --out runs/longrun-3
+# Stopped after 60 of 90 minutes: the last checkpoint went off in some of the app's weather.
+cargo run --release -p open-racing-train-burn -- $T --lr 1.5e-4 --entropy 0 --init-std 0.08 --final-std 0.04 \
+  --worn-start-fraction 0.4 --max-episode-seconds 1400 --air-temperature 5..40 --road-heat 0..30 --wind 0..9 \
+  --duration-seconds 5400 --seed 7 --init runs/longrun-3 --out runs/longrun-4
 ```
 
-10 laps from a standing start, 32 cars each:
+10 laps from a standing start, 32 cars each, in the standard conditions:
 
 | policy | finished | crashes | off course, steps per lap | 10 laps, first car | mean |
 | --- | --- | --- | --- | --- | --- |
@@ -401,8 +417,16 @@ cargo run --release -p open-racing-train-burn -- $T --lr 1e-4 --entropy 0 --init
 | stage 1 | 32 / 32 | 0 in 320 laps | 0.00 | 1223.4 s | 1228.9 s |
 | stage 2 | 32 / 32 | 0 in 320 laps | 0.08 | 1213.5 s | 1218.4 s |
 | stage 3 | 32 / 32 | 0 in 320 laps | 0.00 | 1208.2 s | 1213.1 s |
+| stage 4 | 32 / 32 | 0 in 320 laps | 0.00 | 1223.7 s | 1228.5 s |
 
-Stage 3 laps in 119.5 s on lap 2 and 120.8 s on lap 10 as the tread wears, with the treads at 103–105 °C. Stage 1 with the old states (180 s episodes, fresh tyres, no replays) lapped in 114.4 s by cutting a chicane, and none of 16 cars finished 10 laps. [docs/long-run-rl.md](docs/long-run-rl.md) describes the method and the experiments in full.
+and in drawn weather (5–40 °C air, the road up to 30 K warmer, wind up to 9 m/s), and in the hot case (33 °C air, 60 °C road, 3 m/s wind):
+
+| policy | drawn weather: finished | crashes | mean | hot: finished | 10 laps, first car |
+| --- | --- | --- | --- | --- | --- |
+| stage 3 | 7 / 32 | 25 in 95 laps | 1225.7 s | 0 / 8 | – |
+| stage 4 | 29 / 32 | 3 in 292 laps | 1246.2 s | 32 / 32 | 1275.0 s |
+
+Stage 3 laps in 119.5 s on lap 2 and 120.8 s on lap 10 as the tread wears, with the treads at 103–105 °C. Stage 4 gives up 15 s over 10 laps in the standard conditions for driving in any of the others, and it drives in the app's own weather (road temperatures that vary with sun and shade, passing clouds) from cold mornings to hot afternoons. Stage 1 with the old states (180 s episodes, fresh tyres, no replays) lapped in 114.4 s by cutting a chicane, and none of 16 cars finished 10 laps. [docs/long-run-rl.md](docs/long-run-rl.md) describes the method and the experiments in full.
 
 ## License
 

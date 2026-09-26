@@ -15,7 +15,7 @@ use std::sync::Arc;
 use glam::DVec3;
 use open_racing_sim::{
     AutoShift, BlipAssist, Car, CarModel, CarState, ClutchAssist, Controls, DT, GRAVITY, RubberMap,
-    Shift, Telemetry, Track, TrackEvolution,
+    Shift, Telemetry, Track, TrackEvolution, Weather,
 };
 use rayon::prelude::*;
 
@@ -100,6 +100,13 @@ pub struct EnvConfig {
     /// Share of resets from states recorded [`REPLAY_LEAD`] s before an earlier episode
     /// crashed (once any were recorded), so training dwells on the places it fails.
     pub replay_start_fraction: f64,
+    /// Weather of each episode, drawn uniformly from these ranges: the air temperature,
+    /// °C, how much warmer the road is than the air, K, and the wind speed at 10 m,
+    /// m/s, blowing from any direction with gusts. The defaults keep the fixed
+    /// standard conditions (25 °C air and road, 1.225 kg/m³, no wind).
+    pub air_temperature: (f64, f64),
+    pub road_heat: (f64, f64),
+    pub wind_speed: (f64, f64),
     pub seed: u64,
 }
 
@@ -131,12 +138,26 @@ impl Default for EnvConfig {
             worn_start_fraction: 0.0,
             worn_start_max_wear: 0.0,
             replay_start_fraction: 0.0,
+            air_temperature: STANDARD_WEATHER.0,
+            road_heat: STANDARD_WEATHER.1,
+            wind_speed: STANDARD_WEATHER.2,
             seed: 0,
         }
     }
 }
 
+/// The air temperature, road heat and wind ranges of the standard conditions.
+const STANDARD_WEATHER: ((f64, f64), (f64, f64), (f64, f64)) =
+    ((25.0, 25.0), (0.0, 0.0), (0.0, 0.0));
+/// Range of the sea-level pressure of drawn weather, hPa.
+const PRESSURE_RANGE: (f64, f64) = (995.0, 1030.0);
+
 impl EnvConfig {
+    /// Whether episodes run in [`Weather::STANDARD`] rather than drawn weather.
+    pub fn standard_weather(&self) -> bool {
+        (self.air_temperature, self.road_heat, self.wind_speed) == STANDARD_WEATHER
+    }
+
     pub fn substeps(&self) -> usize {
         ((1.0 / DT) / self.control_hz).round().max(1.0) as usize
     }
@@ -203,6 +224,8 @@ pub struct EpisodeStats {
 
 pub struct Env {
     pub car: Car,
+    /// Weather of this episode.
+    pub weather: Weather,
     /// Rubber on this episode's track.
     pub evolution: TrackEvolution,
     rng: Rng,
@@ -242,6 +265,7 @@ impl Env {
         let car = Car::new(shared.car.clone(), &shared.track, 0.0, 0.0, 0.0, 1);
         let mut env = Self {
             car,
+            weather: Weather::STANDARD,
             evolution: TrackEvolution::UNIFORM,
             rng: Rng::new(seed),
             lap: LapTimer::default(),
@@ -266,6 +290,9 @@ impl Env {
     pub fn reset_from(&mut self, shared: &EnvShared, replay: &[Snapshot]) {
         let cfg = &shared.config;
         let track = &*shared.track;
+        if !cfg.standard_weather() {
+            self.weather = self.draw_weather(cfg);
+        }
         if !replay.is_empty()
             && cfg.replay_start_fraction > 0.0
             && self.rng.uniform(0.0, 1.0) < cfg.replay_start_fraction
@@ -302,11 +329,28 @@ impl Env {
         };
         let speed = self.rng.uniform(cfg.start_speed.0.min(top), top);
         let gear = gear_for_speed(&shared.car, speed);
-        self.car.reset(track, s, d, speed, gear);
+        self.car.reset_in(track, &self.weather, s, d, speed, gear);
         if cfg.worn_start_fraction > 0.0 && self.rng.uniform(0.0, 1.0) < cfg.worn_start_fraction {
             self.age_tyres(cfg.worn_start_max_wear);
         }
         self.reset_episode(shared);
+    }
+
+    fn draw_weather(&mut self, cfg: &EnvConfig) -> Weather {
+        let mut draw = |(lo, hi): (f64, f64)| {
+            if hi > lo {
+                self.rng.uniform(lo, hi)
+            } else {
+                lo
+            }
+        };
+        let air = draw(cfg.air_temperature);
+        let road = air + draw(cfg.road_heat);
+        let wind = draw(cfg.wind_speed);
+        let pressure = draw(PRESSURE_RANGE);
+        let heading = draw((0.0, std::f64::consts::TAU));
+        let seed = self.rng.uniform(0.0, 1.0).to_bits();
+        Weather::steady(air, road, pressure, wind, heading, seed)
     }
 
     /// Tyres as a stint leaves them: worn alike (within ±30 %) and at a common heat,
@@ -406,8 +450,9 @@ impl Env {
         let mut barrier_impact: f64 = 0.0;
         for _ in 0..substeps {
             let controls = self.actuator.controls(cfg, &self.car, action);
+            self.weather.step(DT);
             self.car
-                .step_evolving(track, &mut self.evolution, &controls);
+                .step_in(track, &mut self.evolution, &self.weather, &controls);
             let st = &self.car.state;
             if self.car.telemetry.invalid
                 || !st.position.is_finite()
@@ -1018,6 +1063,35 @@ mod tests {
         assert_eq!(restarted.position, batch.replay[0].state.position);
         assert!(batch.replay[0].state.time <= crash_time - REPLAY_LEAD);
         assert!(batch.replay[0].state.time > crash_time - REPLAY_LEAD - 2.0 * SNAPSHOT_INTERVAL);
+    }
+
+    #[test]
+    fn episodes_draw_their_weather_from_the_ranges() {
+        let shared = EnvShared::new(
+            EnvConfig {
+                air_temperature: (10.0, 35.0),
+                road_heat: (0.0, 20.0),
+                wind_speed: (0.0, 8.0),
+                ..EnvConfig::default()
+            },
+            Arc::new(Track::default_circuit()),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut env = Env::new(&shared, 5);
+        let mut airs = Vec::new();
+        for _ in 0..20 {
+            env.reset(&shared);
+            let p = env.car.state.position;
+            let air = env.weather.air_at(p).temperature;
+            let road = env.weather.road_temperature(0.0, 0.0);
+            assert!((10.0..=35.0).contains(&air) && (air..=air + 20.0).contains(&road));
+            assert!(env.weather.wind().0 <= 8.0);
+            // The tyres are inflated in the air they start in.
+            assert_eq!(env.car.state.wheels[0].tire.inflated_at, air);
+            airs.push(air);
+        }
+        assert!(airs.iter().any(|&a| a < 20.0) && airs.iter().any(|&a| a > 25.0));
+        assert!(EnvConfig::default().standard_weather());
     }
 
     #[test]

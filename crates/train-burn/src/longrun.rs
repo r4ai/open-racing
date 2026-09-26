@@ -90,6 +90,7 @@ pub fn run(
     laps: u32,
     cars: usize,
     noise: f32,
+    weather: &EnvConfig,
     trace: Option<&Path>,
     trace_car: usize,
 ) {
@@ -98,6 +99,9 @@ pub fn run(
         random_start: false,
         start_speed: (0.0, 0.0),
         start_offset: (-0.3, 0.3),
+        air_temperature: weather.air_temperature,
+        road_heat: weather.road_heat,
+        wind_speed: weather.wind_speed,
         ..policy.meta.env_config()
     };
     let mut spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config.clone())

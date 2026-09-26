@@ -151,6 +151,15 @@ enum Command {
         /// Share of resets from states shortly before earlier crashes.
         #[arg(long, default_value_t = 0.0)]
         replay_start_fraction: f64,
+        /// Air temperature of each episode, °C: a value or a range such as 10..38.
+        #[arg(long, value_parser = parse_range, default_value = "25")]
+        air_temperature: (f64, f64),
+        /// How much warmer the road is than the air, K: a value or a range.
+        #[arg(long, value_parser = parse_range, default_value = "0")]
+        road_heat: (f64, f64),
+        /// Wind speed at 10 m, m/s, from any direction: a value or a range.
+        #[arg(long, value_parser = parse_range, default_value = "0")]
+        wind: (f64, f64),
         /// Reward lost per unit of tread worn (summed over the four tyres).
         #[arg(long, default_value_t = DefaultReward::default().wear_weight)]
         wear_penalty: f64,
@@ -211,6 +220,15 @@ enum Command {
         /// Standard deviation of the noise added to every car's actions but the first.
         #[arg(long, default_value_t = 0.02)]
         noise: f32,
+        /// Air temperature of each episode, °C: a value or a range such as 10..38.
+        #[arg(long, value_parser = parse_range, default_value = "25")]
+        air_temperature: (f64, f64),
+        /// How much warmer the road is than the air, K: a value or a range.
+        #[arg(long, value_parser = parse_range, default_value = "0")]
+        road_heat: (f64, f64),
+        /// Wind speed at 10 m, m/s, from any direction: a value or a range.
+        #[arg(long, value_parser = parse_range, default_value = "0")]
+        wind: (f64, f64),
         /// Write one car's stint step by step to this CSV file.
         #[arg(long)]
         trace: Option<PathBuf>,
@@ -382,6 +400,9 @@ fn main() {
             worn_start_max_wear,
             replay_start_fraction,
             wear_penalty,
+            air_temperature,
+            road_heat,
+            wind,
             safe_start,
             start_speed_max,
             start_offset_meters,
@@ -414,6 +435,9 @@ fn main() {
                 worn_start_fraction,
                 worn_start_max_wear,
                 replay_start_fraction,
+                air_temperature,
+                road_heat,
+                wind_speed: wind,
                 safe_start,
                 start_speed: (0.0, start_speed_max),
                 start_offset: (-start_offset_meters, start_offset_meters),
@@ -499,12 +523,29 @@ fn main() {
             laps,
             cars,
             noise,
+            air_temperature,
+            road_heat,
+            wind,
             trace,
             trace_car,
         } => {
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
-            longrun::run(&mut policy, laps, cars, noise, trace.as_deref(), trace_car);
+            let weather = open_racing_api::EnvConfig {
+                air_temperature,
+                road_heat,
+                wind_speed: wind,
+                ..Default::default()
+            };
+            longrun::run(
+                &mut policy,
+                laps,
+                cars,
+                noise,
+                &weather,
+                trace.as_deref(),
+                trace_car,
+            );
         }
         Command::Eval {
             model,
@@ -549,6 +590,20 @@ fn main() {
                 );
             }
         }
+    }
+}
+
+/// A value, or a range written `low..high`.
+fn parse_range(s: &str) -> Result<(f64, f64), String> {
+    let number = |x: &str| x.trim().parse::<f64>().map_err(|e| format!("{x}: {e}"));
+    let (lo, hi) = match s.split_once("..") {
+        Some((lo, hi)) => (number(lo)?, number(hi)?),
+        None => (number(s)?, number(s)?),
+    };
+    if lo <= hi {
+        Ok((lo, hi))
+    } else {
+        Err(format!("{s}: the low end is above the high end"))
     }
 }
 
