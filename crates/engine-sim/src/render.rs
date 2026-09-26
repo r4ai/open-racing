@@ -68,7 +68,7 @@ impl Script {
                 load: free,
                 rpm: vec![(0.0, idle)],
                 throttle: vec![(0.0, 0.0)],
-                warmup: 0.5,
+                warmup: 1.5,
             },
             "blips" => {
                 let mut t = vec![(0.0, 0.0)];
@@ -81,7 +81,7 @@ impl Script {
                     load: free,
                     rpm: vec![(0.0, idle)],
                     throttle: t,
-                    warmup: 0.5,
+                    warmup: 1.5,
                 }
             }
             "rev" => Self {
@@ -89,7 +89,7 @@ impl Script {
                 load: free,
                 rpm: vec![(0.0, idle)],
                 throttle: vec![(0.0, 0.0), (0.5, 0.0), (0.6, 1.0), (3.5, 1.0), (3.6, 0.0)],
-                warmup: 0.5,
+                warmup: 1.5,
             },
             "overrun" => Self {
                 duration: 6.0,
