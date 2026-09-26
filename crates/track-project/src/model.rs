@@ -7,7 +7,7 @@ use std::path::Path;
 use glam::{DMat3, DVec3, Mat3, Mat4, Vec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track::texture::{self, Image};
-use open_racing_track::{AlphaMode, Material, Mesh, Varies, Texture, Visual, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, Texture, Varies, Visual, VisualBuilder};
 
 use crate::Error;
 use crate::project::Prop;
@@ -177,9 +177,11 @@ pub fn load(path: &Path) -> Result<Model, Error> {
 fn leaves(m: &gltf::Material) -> bool {
     let name = m.name().unwrap_or_default().to_lowercase();
     m.alpha_mode() != gltf::material::AlphaMode::Opaque
-        || ["leaf", "leav", "foliage", "needle", "grass", "canopy", "frond", "twig"]
-            .iter()
-            .any(|w| name.contains(w))
+        || [
+            "leaf", "leav", "foliage", "needle", "grass", "canopy", "frond", "twig",
+        ]
+        .iter()
+        .any(|w| name.contains(w))
 }
 
 /// Vertex normals averaged from the faces round each vertex.

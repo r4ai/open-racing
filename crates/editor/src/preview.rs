@@ -14,6 +14,7 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use open_racing_sim::GroundMesh;
+use open_racing_track::{Instance, Level};
 use open_racing_track_project::corners::{self, Corner};
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::inspect::{self, Issue};
@@ -22,7 +23,6 @@ use open_racing_track_project::project::{Kind, MaterialDef};
 use open_racing_track_project::road::MeshData;
 use open_racing_track_project::terrain::{PaintMask, TerrainBuild};
 use open_racing_track_project::{Cache, Project, bake};
-use open_racing_track::{Instance, Level};
 use open_racing_track_render::{self as render, ShapePart, TrackMaterial, to_bevy};
 
 use crate::assets::Library;
@@ -1091,7 +1091,10 @@ pub fn show_items(
     mut meshes: Query<&mut Visibility, (Without<PreviewProp>, Without<PreviewScatter>)>,
     items: Query<(Entity, &PreviewMesh)>,
     mut scatters: Query<(&PreviewScatter, &mut Visibility), Without<PreviewMesh>>,
-    mut props: Query<(&PreviewProp, &mut Visibility), (Without<PreviewMesh>, Without<PreviewScatter>)>,
+    mut props: Query<
+        (&PreviewProp, &mut Visibility),
+        (Without<PreviewMesh>, Without<PreviewScatter>),
+    >,
 ) {
     let want = |shown: bool| {
         if shown {

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use open_racing_track::texture::{self, Image, Mips};
-use open_racing_track::{AlphaMode, Material, Mesh, Varies, Texture, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, Texture, Varies, VisualBuilder};
 
 use crate::model::Model;
 
@@ -395,7 +395,13 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
             indices.extend(quad.map(|k| base + k));
         }
     }
-    let used = |leaves: bool| canvas.leaves.iter().zip(&canvas.colour).any(|(l, c)| *l == leaves && c[3] > 0.0);
+    let used = |leaves: bool| {
+        canvas
+            .leaves
+            .iter()
+            .zip(&canvas.colour)
+            .any(|(l, c)| *l == leaves && c[3] > 0.0)
+    };
     let layers: Vec<bool> = [false, true].into_iter().filter(|&l| used(l)).collect();
     let mut look = VisualBuilder::new();
     let mut meshes = Vec::new();

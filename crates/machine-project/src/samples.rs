@@ -166,7 +166,8 @@ mod tests {
             } else {
                 crate::library::part_text(&crate::library::parse_part(text).unwrap())
             };
-            assert_eq!(&again, text, "{path}");
+            // A Windows checkout may turn the files' line endings to CRLF.
+            assert_eq!(again, text.replace("\r\n", "\n"), "{path}");
         }
     }
 }

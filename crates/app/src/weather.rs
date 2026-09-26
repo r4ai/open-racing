@@ -123,7 +123,6 @@ pub fn parse_sky(s: &str) -> Result<String, String> {
     })
 }
 
-
 impl WeatherSource for Simulation {
     fn weather(&self) -> &Weather {
         &self.weather
