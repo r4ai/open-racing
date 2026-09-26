@@ -263,7 +263,7 @@ fn init(
         min_filter: FilterMode::Linear,
         ..default()
     });
-    let shader = server.load("embedded://open_racing_app/clouds.wgsl");
+    let shader = server.load("embedded://open_racing_sky/clouds.wgsl");
     let pipeline =
         |label: &'static str, layout: &BindGroupLayoutDescriptor, define: &'static str| {
             cache.queue_render_pipeline(RenderPipelineDescriptor {

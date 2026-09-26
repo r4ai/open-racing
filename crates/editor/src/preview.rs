@@ -91,6 +91,8 @@ pub struct Built {
     pub names: Vec<String>,
     /// Where the roads' edges run, for scatters laid in rows along them.
     pub edges: Arc<open_racing_track_project::scatter::Edges>,
+    /// The main road's centreline, as the game's track follows it.
+    pub centreline: Option<open_racing_sim::TrackDef>,
     /// The editor's revision it was built from.
     pub revision: u64,
     /// Builds finished so far.
@@ -185,6 +187,7 @@ struct Meshes {
     colours: Vec<Vec<Vec<[f32; 4]>>>,
     names: Vec<String>,
     edges: Arc<open_racing_track_project::scatter::Edges>,
+    centreline: Option<open_racing_sim::TrackDef>,
     revision: u64,
     road_names: Vec<String>,
     spline_names: Vec<String>,
@@ -396,6 +399,10 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
         colours,
         names: project.scatter.iter().map(|s| s.name.clone()).collect(),
         edges: Arc::new(keepout.edges.clone()),
+        centreline: project
+            .road_index(&project.main_road)
+            .and_then(|i| scene.roads.get(i))
+            .map(|main| bake::centreline(&project, main)),
         revision,
         road_names: project.roads.iter().map(|r| r.name.clone()).collect(),
         spline_names: project.splines.iter().map(|s| s.name.clone()).collect(),
@@ -596,6 +603,7 @@ pub fn rebuild(
         built.colours = done.colours;
         built.names = done.names;
         built.edges = done.edges;
+        built.centreline = done.centreline;
         built.revision = done.revision;
         built.road_names = done.road_names;
         built.spline_names = done.spline_names;

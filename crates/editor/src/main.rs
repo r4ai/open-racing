@@ -126,13 +126,16 @@ fn auto_screenshot(
     mut commands: Commands,
     shot: Option<ResMut<AutoScreenshot>>,
     built: Res<preview::Built>,
+    weather: Res<sky::ProjectWeather>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut shot) = shot else { return };
-    // Wait for the first build, then for its meshes and textures to reach the GPU.
-    if built.count == 0 {
+    // Wait for the first build and the sky, then for their meshes and textures to reach
+    // the GPU.
+    if built.count == 0 || !weather.ready() {
         return;
     }
+
     if shot.wait > 0 {
         shot.wait -= 1;
         return;
@@ -337,8 +340,10 @@ fn main() {
     .add_plugins((
         EguiPlugin::default(),
         TrackModelPlugin,
+        open_racing_sky::SkyPlugin::<sky::ProjectWeather>::default(),
         viewport::GizmoGroups,
     ))
+    .init_resource::<sky::ProjectWeather>()
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
@@ -379,8 +384,9 @@ fn main() {
             viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
-            sky::light,
+            sky::weather,
             sky::wind,
+            sky::look,
             auto_screenshot,
         )
             .chain(),

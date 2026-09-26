@@ -835,7 +835,7 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
 }
 
 /// The main road's centre, starting at the start/finish line.
-fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
+pub fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
     let road = &project.roads[project.main_index()];
     let sampled = &main.sampled;
     let start = sampled.s_at(project.markers.start);

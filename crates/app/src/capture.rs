@@ -19,13 +19,7 @@ use std::sync::{
 const CAPTURE_AT: f32 = 8.0;
 const EXIT_AT: f32 = 10.0;
 
-/// Populated only during capture runs; values are total CPU work in one frame.
-#[derive(Resource, Default)]
-pub struct CloudCpuTimings {
-    pub weather_ms: f64,
-    pub upload_ms: f64,
-    pub shadow_ms: f64,
-}
+pub use open_racing_sky::CloudCpuTimings;
 
 #[derive(Resource, Clone, Default)]
 struct CaptureReady(Arc<AtomicBool>);
@@ -135,7 +129,7 @@ fn setup_target(
     mut images: ResMut<Assets<Image>>,
     mut cap: ResMut<Capture>,
     cameras: Query<Entity, With<crate::camera::MainCamera>>,
-    sky: Res<crate::weather::SkyLight>,
+    sky: Res<open_racing_sky::SkyLight>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -173,7 +167,7 @@ fn setup_target(
                 CameraOffset(Vec3::X * side),
                 Transform::default(),
                 bevy::camera::RenderTarget::Image(target.clone().into()),
-                crate::weather::additional_camera_components(&sky),
+                open_racing_sky::additional_camera_components(&sky),
             ));
             cap.eyes.push(target);
         }

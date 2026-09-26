@@ -30,7 +30,11 @@ pub fn toggle_walk(editor: &Editor, built: &Built, orbit: &mut Orbit) {
     };
 }
 
-pub fn setup(mut commands: Commands, mut egui: ResMut<EguiGlobalSettings>) {
+pub fn setup(
+    mut commands: Commands,
+    mut egui: ResMut<EguiGlobalSettings>,
+    sky: Res<open_racing_sky::SkyLight>,
+) {
     // The UI gets a camera of its own over the whole window; the 3D camera's viewport
     // is what the panels leave free.
     egui.auto_create_primary_context = false;
@@ -48,26 +52,16 @@ pub fn setup(mut commands: Commands, mut egui: ResMut<EguiGlobalSettings>) {
             ..default()
         },
     ));
+    // Lit as the game is: the sky's light replaces ambient light (see `sky`).
     commands.spawn((
         EditorCamera,
         Camera3d::default(),
         perspective(),
         Transform::default(),
+        open_racing_sky::camera_components(&sky),
+        DistanceFog::default(),
     ));
-    commands.spawn((
-        crate::sky::Sun,
-        DirectionalLight {
-            illuminance: 20_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(0.0, 1.0, 0.0).looking_at(Vec3::new(-0.4, 0.0, 0.5), Vec3::Y),
-    ));
-    commands.insert_resource(GlobalAmbientLight {
-        brightness: 2500.0,
-        ..default()
-    });
-    commands.insert_resource(ClearColor(Color::srgb(0.55, 0.7, 0.88)));
+    commands.insert_resource(GlobalAmbientLight::NONE);
 }
 
 pub(super) fn perspective() -> Projection {
