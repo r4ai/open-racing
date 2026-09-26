@@ -26,14 +26,14 @@ pub const RAD_PER_RPM: f64 = PI / 30.0;
 /// How finely the engine is simulated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Quality {
-    /// 24 kHz, ≈ 50 mm cells, first order: for playing in real time.
+    /// 24 kHz, ≈ 60 mm cells: for playing in real time.
     Draft,
-    /// 48 kHz, ≈ 25 mm cells: for the dyno and baking.
+    /// 48 kHz, ≈ 30 mm cells: for the dyno and baking.
     #[default]
     Normal,
-    /// 96 kHz, ≈ 13 mm cells: for recordings.
+    /// 96 kHz, ≈ 15 mm cells: for recordings.
     High,
-    /// 192 kHz, ≈ 6.5 mm cells.
+    /// 192 kHz, ≈ 7.5 mm cells.
     Ultra,
 }
 
@@ -53,9 +53,6 @@ impl Quality {
         1300.0 / self.rate() as f64 / 0.9
     }
 
-    pub fn second_order(self) -> bool {
-        self != Quality::Draft
-    }
 }
 
 /// The air round the engine.

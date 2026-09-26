@@ -182,8 +182,6 @@ pub struct Pipe {
     pub friction_scale: f64,
     /// Multiplier on the wall heat transfer.
     pub heat_scale: f64,
-    /// Second-order reconstruction (off: first order, cheaper and more diffusive).
-    pub second_order: bool,
     /// Conserved quantities per unit length: ρA, ρuA, EA, ρyA.
     pub q: Vec<[f64; 4]>,
     /// Cell states, kept consistent with `q`.
@@ -210,7 +208,6 @@ pub struct PipeGeometry {
     pub roughness: f64,
     pub friction_scale: f64,
     pub heat_scale: f64,
-    pub second_order: bool,
 }
 
 impl Pipe {
@@ -236,7 +233,6 @@ impl Pipe {
             rough_friction: fanning_rough(g.roughness),
             friction_scale: g.friction_scale,
             heat_scale: g.heat_scale,
-            second_order: g.second_order,
             q: vec![[0.0; 4]; n],
             s: vec![st; n],
             flux: vec![[0.0; 4]; n + 1],
@@ -315,7 +311,7 @@ impl Pipe {
         let h = 0.5 * dt / self.dx;
         for i in 0..n {
             let w = self.s[i].w;
-            if self.second_order && i > 0 && i < n - 1 {
+            if i > 0 && i < n - 1 {
                 let (a, b) = (self.s[i - 1].w, self.s[i + 1].w);
                 let d = Prim {
                     rho: limit(w.rho - a.rho, b.rho - w.rho),
@@ -462,7 +458,7 @@ pub fn primitive_near(gas: &Gas, q: &[f64; 4], a: f64, t_guess: f64) -> State {
 mod tests {
     use super::*;
 
-    fn tube(n_len: f64, cell: f64, second_order: bool) -> (Gas, Pipe) {
+    fn tube(n_len: f64, cell: f64) -> (Gas, Pipe) {
         let gas = Gas::new();
         let g = PipeGeometry {
             name: "tube".into(),
@@ -473,7 +469,6 @@ mod tests {
             roughness: 0.0,
             friction_scale: 0.0,
             heat_scale: 0.0,
-            second_order,
         };
         let pipe = Pipe::new(
             &g,
@@ -503,7 +498,7 @@ mod tests {
     /// the contact and the shock matches the exact solution for γ = 1.4.
     #[test]
     fn sod_shock_tube() {
-        let (gas, mut pipe) = tube(1.0, 0.0025, true);
+        let (gas, mut pipe) = tube(1.0, 0.0025);
         let n = pipe.cells();
         for i in 0..n {
             let w = if i < n / 2 {
@@ -553,7 +548,7 @@ mod tests {
 
     #[test]
     fn closed_tube_conserves_mass_and_energy() {
-        let (gas, mut pipe) = tube(0.5, 0.01, true);
+        let (gas, mut pipe) = tube(0.5, 0.01);
         // A pressure pulse.
         for i in 10..15 {
             let st = State::of(

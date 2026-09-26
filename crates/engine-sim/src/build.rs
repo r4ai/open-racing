@@ -114,7 +114,6 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
         y: 0.0,
     };
     let cell = b.quality.cell_length();
-    let second = b.quality.second_order();
     let geometry =
         |name: String, length: f64, d: &[(f64, f64)], wall: f64, rough: f64, friction: f64| {
             PipeGeometry {
@@ -126,7 +125,6 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                 roughness: rough,
                 friction_scale: friction,
                 heat_scale: 1.0,
-                second_order: second,
             }
         };
     // Terminal name → pipe end.
