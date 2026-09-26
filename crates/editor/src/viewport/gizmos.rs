@@ -361,15 +361,20 @@ pub fn gizmos(
         }
     }
 
-    // The last test lap: where the car went, red where it was off the track, and the
-    // car itself while it is replayed.
+    // The last test lap: where the car went, coloured by its speed (blue slow, yellow
+    // fast; darker where it brakes), red where it was off the track, and the car itself
+    // while it is replayed.
     if overlays.markers && jobs.lap.len() > 1 {
         let lift_car = |p: DVec3| to_bevy(p + DVec3::Z * 0.6);
+        let top = jobs.lap.iter().map(|s| s.speed).fold(1.0, f64::max);
         for w in jobs.lap.windows(2) {
             let color = if w[0].off {
                 theme::OFF_TRACK
             } else {
-                theme::LAP
+                let k = (w[0].speed / top) as f32;
+                let braking = w[1].speed < w[0].speed - 0.5;
+                let c = Color::srgb(0.2 + 0.8 * k, 0.4 + 0.5 * k, 1.0 - 0.8 * k);
+                if braking { c.darker(0.25) } else { c }
             };
             gizmos.line(lift_car(w[0].pos), lift_car(w[1].pos), color);
         }

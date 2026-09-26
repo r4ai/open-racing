@@ -317,7 +317,13 @@ Pit lane.
 
 1. Run `trackctl info` for the facts and `trackctl preview` for the picture.
 2. Change the project with `trackctl apply`, or edit `project.ron` directly.
-3. Run `trackctl check --lap` to confirm the track still drives.
+3. Run `trackctl check --lap` to confirm the track still drives. Once the steady test
+   lap gets round, a GT3 drives a lap at race pace round the racing line (85 % of the
+   speeds it allows): the report gives its lap time and top speed, and where it went off
+   or left the ground (a crest or kerb too sharp). The editor's bake shows that lap's
+   path coloured by speed, and View › Replay Test Lap replays it;
+   `cargo run -p open-racing-track-project --example pace_lap -- <project>` prints it
+   second by second.
 
 Warnings point out a radius under 10 m, a grade over 20 %, a road crossing itself or
 another road on the level, and roads whose surfaces overlap away from where one starts

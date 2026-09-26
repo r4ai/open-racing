@@ -263,17 +263,34 @@ impl RubberMap {
     }
 }
 
-/// Minimum-curvature line through a track and how hard a car driving it works its
-/// tyres, at points spaced about [`LINE_SPACING`] apart.
-struct RacingLine {
-    /// Lateral offset from the centreline, m.
-    offset: Vec<f64>,
+/// Minimum-curvature line through a track, the speed a GT3 can carry along it and how
+/// hard it works its tyres there, at points spaced about [`LINE_SPACING`] apart from
+/// the centreline's start.
+#[derive(Clone, Debug)]
+pub struct RacingLine {
+    /// Distance between the points along the centreline, m.
+    pub spacing: f64,
+    /// Lateral offset from the centreline, m, positive to the left.
+    pub offset: Vec<f64>,
+    /// Speed the line allows, m/s: cornering, then braking into and accelerating out
+    /// of each corner.
+    pub speed: Vec<f64>,
     /// Share of the tyres' grip used, squared, 0..1.
-    work: Vec<f64>,
+    pub work: Vec<f64>,
 }
 
 impl RacingLine {
-    fn new(track: &Track) -> Self {
+    /// The line's offset and speed at `s` along the centreline, between its points.
+    pub fn at(&self, track: &Track, s: f64) -> (f64, f64) {
+        let n = self.offset.len();
+        let x = track.wrap_s(s) / self.spacing;
+        let i = (x.floor() as usize) % n;
+        let (j, t) = ((i + 1) % n, x - x.floor());
+        let lerp = |v: &[f64]| v[i] + (v[j] - v[i]) * t;
+        (lerp(&self.offset), lerp(&self.speed))
+    }
+
+    pub fn new(track: &Track) -> Self {
         let n = ((track.length / LINE_SPACING).round() as usize).max(8);
         let ds = track.length / n as f64;
         let points: Vec<_> = (0..n).map(|i| track.sample_at(i as f64 * ds)).collect();
@@ -327,7 +344,12 @@ impl RacingLine {
         let work = (0..n)
             .map(|i| (raw[(i + n - 1) % n] + 2.0 * raw[i] + raw[(i + 1) % n]) / 4.0)
             .collect();
-        Self { offset, work }
+        Self {
+            spacing: ds,
+            offset,
+            speed: v,
+            work,
+        }
     }
 
     /// Projected gradient descent on the squared second differences of the line, kept

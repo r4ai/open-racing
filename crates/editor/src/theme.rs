@@ -29,8 +29,6 @@ pub const STRIP: Color = Color::srgb(0.2, 0.85, 0.75);
 pub const BARRIER: Color = Color::srgb(0.7, 0.7, 0.95);
 /// A road's first node, showing which way it runs.
 pub const START: Color = Color::srgb(0.25, 0.9, 0.4);
-/// The test lap's path, and where it left the track.
-pub const LAP: Color = Color::srgb(0.3, 0.75, 1.0);
 pub const OFF_TRACK: Color = Color::srgb(1.0, 0.2, 0.2);
 /// What a grabbed node or end has caught on.
 pub const SNAP: Color = Color::srgb(1.0, 0.2, 0.85);

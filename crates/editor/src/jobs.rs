@@ -51,7 +51,13 @@ impl Jobs {
                 dir: out,
                 report: report.to_string(),
                 ok: report.ok(),
-                lap: report.drive.map(|d| d.path).unwrap_or_default(),
+                // The race-pace lap when there was one: where the car brakes, how
+                // fast it goes and where it runs wide say most about the track.
+                lap: report
+                    .pace
+                    .or(report.drive)
+                    .map(|d| d.path)
+                    .unwrap_or_default(),
             })
         });
         self.bake = Some((task, play));
