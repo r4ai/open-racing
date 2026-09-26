@@ -25,6 +25,7 @@ const CHUNK: usize = 32;
 /// Edge of the buckets that frames are looked up in, m.
 const BUCKET: f64 = 25.0;
 
+#[derive(Clone)]
 pub struct TerrainBuild {
     /// Rendered chunks.
     pub chunks: Vec<MeshData>,

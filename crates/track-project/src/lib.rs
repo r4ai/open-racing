@@ -34,7 +34,7 @@ pub mod validate;
 
 use std::path::PathBuf;
 
-pub use bake::{Cache, Scene, bake};
+pub use bake::{BuildCache, Cache, Scene, bake};
 pub use project::*;
 
 #[derive(Debug)]

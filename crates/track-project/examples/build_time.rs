@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use open_racing_track_project::{Project, bake, inspect, overlap, road, terrain};
+use open_racing_track_project::{BuildCache, Project, bake, inspect, overlap, road, terrain};
 
 fn main() {
     let dir = std::env::args().nth(1).expect("a project directory");
@@ -34,4 +34,10 @@ fn main() {
         let _ = inspect::issues(&p, &scene);
         time("  checks", t);
     }
+    // An edit that leaves the roads and terrain alone (a kerb, a prop, a marker).
+    let mut cache = BuildCache::default();
+    let _ = bake::build_with(&p, &mut cache);
+    let t = Instant::now();
+    let _ = bake::build_with(&p, &mut cache);
+    time("whole build, roads and terrain unchanged", t);
 }

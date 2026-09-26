@@ -60,15 +60,69 @@ fn add_solids<'a>(ground: &mut Ground, parts: impl IntoIterator<Item = &'a Solid
     }
 }
 
+/// What the last build made, so that the next builds only what changed: the editor
+/// rebuilds on every edit, and most edits leave most roads and the terrain as they
+/// were.
+#[derive(Default)]
+pub struct BuildCache {
+    /// The surfaces and materials the roads were built with.
+    lists: Option<(Vec<crate::project::NamedSurface>, Vec<MaterialDef>)>,
+    /// Each road as it was, and its build before overlaps were resolved.
+    roads: Vec<(crate::project::Road, RoadBuild)>,
+    /// The terrain's settings and the roads it was built round, and the terrain.
+    terrain: Option<(
+        crate::project::Terrain,
+        Vec<crate::project::Road>,
+        Option<TerrainBuild>,
+    )>,
+}
+
 /// Builds the roads, then the terrain under them, then the splines over both.
 pub fn build(project: &Project) -> Scene {
+    build_with(project, &mut BuildCache::default())
+}
+
+/// `build`, keeping what is the same as last time from `cache`.
+pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
     use rayon::prelude::*;
-    let mut roads: Vec<RoadBuild> = (0..project.roads.len())
+    let lists = (project.surfaces.clone(), project.materials.clone());
+    if cache.lists.as_ref() != Some(&lists) {
+        *cache = BuildCache {
+            lists: Some(lists),
+            ..Default::default()
+        };
+    }
+    let old = std::mem::take(&mut cache.roads);
+    let fresh: Vec<RoadBuild> = (0..project.roads.len())
         .into_par_iter()
-        .map(|i| road::build(project, i))
+        .map(|i| {
+            let road = &project.roads[i];
+            match old.iter().find(|(r, _)| r == road) {
+                Some((_, b)) => b.clone(),
+                None => road::build(project, i),
+            }
+        })
         .collect();
+    cache.roads = project
+        .roads
+        .iter()
+        .cloned()
+        .zip(fresh.iter().cloned())
+        .collect();
+    let mut roads = fresh;
     crate::overlap::resolve(&mut roads);
-    let terrain = terrain::build(project, &roads);
+    let terrain = match &cache.terrain {
+        Some((t, r, built)) if *t == project.terrain && *r == project.roads => built.clone(),
+        _ => {
+            let built = terrain::build(project, &roads);
+            cache.terrain = Some((
+                project.terrain.clone(),
+                project.roads.clone(),
+                built.clone(),
+            ));
+            built
+        }
+    };
 
     let mut ground = Ground::default();
     add_solids(&mut ground, roads.iter().flat_map(|b| &b.solid));
@@ -455,4 +509,58 @@ fn layout(project: &Project, scene: &Scene, centreline: &TrackDef) -> Result<Lay
 /// A sampled road's frame at spline parameter `u`, for the editor's markers.
 pub fn frame_at_u(sampled: &Sampled, u: f64) -> crate::curve::Frame {
     sampled.frame_at(sampled.s_at(u))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::ops::{Op, apply_all};
+
+    fn meshes(s: &Scene) -> Vec<Vec<[f32; 3]>> {
+        s.visual_parts()
+            .map(|p| p.mesh.positions.clone())
+            .chain(
+                s.terrain
+                    .iter()
+                    .flat_map(|t| t.chunks.iter().map(|c| c.positions.clone())),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn a_cached_build_is_the_same_as_a_fresh_one() {
+        let mut p = Project::new("t");
+        apply_all(
+            &mut p,
+            &[Op::AddRoad {
+                name: "pit".into(),
+                closed: false,
+                nodes: vec![DVec3::new(0.0, -40.0, 0.0), DVec3::new(200.0, -40.0, 0.0)],
+                like: Some("circuit".into()),
+            }],
+        )
+        .unwrap();
+        let mut cache = BuildCache::default();
+        let _ = build_with(&p, &mut cache);
+        // One road changes, the other does not; then only the terrain's settings.
+        let edits = [
+            Op::MoveNode {
+                line: "pit".into(),
+                index: 1,
+                pos: DVec3::new(210.0, -45.0, 1.0),
+            },
+            Op::SetTerrain {
+                terrain: crate::project::Terrain {
+                    margin: 120.0,
+                    ..p.terrain.clone()
+                },
+            },
+        ];
+        for op in edits {
+            apply_all(&mut p, std::slice::from_ref(&op)).unwrap();
+            let cached = build_with(&p, &mut cache);
+            let fresh = build(&p);
+            assert_eq!(meshes(&cached), meshes(&fresh), "after {op:?}");
+        }
+    }
 }

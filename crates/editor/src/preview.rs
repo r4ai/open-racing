@@ -32,9 +32,13 @@ pub struct PreviewMesh(Option<Item>);
 #[derive(Component)]
 pub struct PreviewProp(usize, PathBuf);
 
-/// Textures and models, shared by the builds in the background and the main thread.
+/// Textures and models, shared by the builds in the background and the main thread,
+/// and what the last build made, for the next to build only what changed.
 #[derive(Resource, Clone, Default)]
-pub struct SharedCache(pub Arc<Mutex<Cache>>);
+pub struct SharedCache(
+    pub Arc<Mutex<Cache>>,
+    pub Arc<Mutex<open_racing_track_project::BuildCache>>,
+);
 
 /// What the last finished build knows, for gizmos and picking.
 #[derive(Resource, Default)]
@@ -90,8 +94,9 @@ fn to_mesh(m: MeshData) -> Mesh {
     })
 }
 
-fn build(project: Project, cache: Arc<Mutex<Cache>>, dir: PathBuf) -> Meshes {
-    let scene = bake::build(&project);
+fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
+    let scene = bake::build_with(&project, &mut cache.1.lock().expect("build cache"));
+    let cache = cache.0;
     let (mut walls, mut failed) = (Vec::new(), Vec::new());
     let lines = scene
         .roads
@@ -268,7 +273,7 @@ pub fn rebuild(
 
     if state.task.is_none() && state.started != editor.revision {
         let (project, revision) = (editor.project.clone(), editor.revision);
-        let (cache, dir) = (cache.0.clone(), editor.dir.clone());
+        let (cache, dir) = (cache.clone(), editor.dir.clone());
         state.started = revision;
         state.task =
             Some(AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir) }));
