@@ -273,14 +273,47 @@ pub struct Ecu {
     /// part; the proportional part is half a second of it).
     #[serde(default = "default_idle_gain")]
     pub idle_gain: f64,
+    /// What the limiter cuts. Cutting the spark leaves the fuel to go down the exhaust
+    /// unburned, where it bangs.
+    #[serde(default)]
+    pub limiter_cut: Cut,
     /// Fuel is cut with the throttle shut above this speed (overrun), rpm.
     #[serde(default)]
     pub overrun_cut_rpm: Option<f64>,
+    /// A pop map: on overrun, instead of cutting the fuel, keep fuelling and fire late,
+    /// so the flame is still burning when the exhaust valve opens and the charge goes on
+    /// burning, and banging, in the exhaust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pops: Option<Pops>,
     /// Spark advance before the firing TDC, crank degrees, against rpm and load (the
     /// throttle, 0..1).
     pub spark_deg: Map2,
     /// Excess-air ratio λ against rpm and load.
     pub lambda: Map2,
+}
+
+/// What an ECU cuts to hold a speed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cut {
+    #[default]
+    Fuel,
+    Spark,
+}
+
+/// Overrun fuelling with late spark.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pops {
+    /// Above this speed, rpm.
+    pub above_rpm: f64,
+    /// Spark advance, crank degrees before the firing TDC (negative: after it).
+    pub spark_deg: f64,
+    /// Excess-air ratio.
+    pub lambda: f64,
+    /// Throttle the ECU opens meanwhile, 0..1: behind a shut plate the charge is so
+    /// diluted with residual gas that the flame will not light, and the unburned mixture
+    /// burns steadily in the hot manifold instead of popping.
+    #[serde(default)]
+    pub throttle: f64,
 }
 
 fn default_hysteresis() -> f64 {

@@ -115,7 +115,9 @@ pub fn i4() -> EngineSpec {
             idle_opening: 0.009,
             idle_authority: 0.04,
             idle_gain: 0.00005,
+            limiter_cut: Cut::Fuel,
             overrun_cut_rpm: Some(1500.0),
+            pops: None,
             spark_deg: Map2 {
                 rpm: vec![1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0],
                 load: vec![0.0, 0.5, 1.0],
@@ -425,7 +427,9 @@ pub fn v8() -> EngineSpec {
             idle_opening: 0.006,
             idle_authority: 0.04,
             idle_gain: 0.00005,
+            limiter_cut: Cut::Fuel,
             overrun_cut_rpm: Some(2000.0),
+            pops: None,
             spark_deg: Map2 {
                 rpm: vec![1000.0, 3000.0, 5000.0, 7000.0, 9000.0],
                 load: vec![0.0, 0.5, 1.0],

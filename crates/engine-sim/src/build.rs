@@ -112,6 +112,7 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
         u: 0.0,
         p: amb.pressure,
         y: 0.0,
+        f: 0.0,
     };
     let cell = b.quality.cell_length();
     let geometry =

@@ -15,6 +15,7 @@ pub mod analysis;
 pub mod boundary;
 pub mod build;
 pub mod cam;
+pub mod chem;
 pub mod combustion;
 pub mod crank;
 pub mod dsp;

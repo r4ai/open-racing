@@ -1,13 +1,17 @@
 //! One-dimensional unsteady flow in a duct of varying cross-section: the quasi-1D Euler
 //! equations with wall friction and heat transfer, and a burned-gas fraction carried with
-//! the flow.
+//! the flow, and the unburned fuel it carries, which burns where the gas is hot and has
+//! oxygen for it (see [`crate::chem`]).
 //!
 //! ```text
 //! ∂(ρA)/∂t   + ∂(ρuA)/∂x          = 0
 //! ∂(ρuA)/∂t  + ∂((ρu² + p)A)/∂x   = p dA/dx − τ_w πD
 //! ∂(EA)/∂t   + ∂(u(E + p)A)/∂x    = q̇_w πD
-//! ∂(ρyA)/∂t  + ∂(ρuyA)/∂x         = 0
+//! ∂(ρyA)/∂t  + ∂(ρuyA)/∂x         = (1 + AFR)·ω̇
+//! ∂(ρfA)/∂t  + ∂(ρufA)/∂x         = −ω̇
 //! ```
+//!
+//! with ω̇ the rate the fuel burns per length, whose heat goes into E.
 //!
 //! Finite volumes, second order in space and time: MUSCL–Hancock (limited linear
 //! reconstruction of the primitive variables, half-step predictor) with the HLLC
@@ -20,6 +24,7 @@
 //! Wall shear uses the Fanning friction factor (laminar 16/Re, Haaland's turbulent fit)
 //! and the wall heat flux the Reynolds–Colburn analogy.
 
+use crate::chem::Chemistry;
 use crate::gas::Gas;
 
 /// Primitive state of a cell or face.
@@ -30,6 +35,8 @@ pub struct Prim {
     pub p: f64,
     /// Burned-gas mass fraction.
     pub y: f64,
+    /// Unburned fuel's mass fraction (a part of the fresh charge, 1 − y).
+    pub f: f64,
 }
 
 /// Primitive state with its derived thermodynamic quantities.
@@ -71,8 +78,8 @@ impl State {
     }
 }
 
-/// Fluxes per unit area: mass, momentum, energy, burned mass.
-pub type Flux = [f64; 4];
+/// Fluxes per unit area: mass, momentum, energy, burned mass, unburned fuel.
+pub type Flux = [f64; 5];
 
 /// HLLC flux between left and right states (velocities along the common axis).
 pub fn hllc(l: &State, r: &State) -> Flux {
@@ -82,8 +89,20 @@ pub fn hllc(l: &State, r: &State) -> Flux {
     // Einfeldt/Davis wave speed estimates.
     let sl = (ul - l.c).min(ur - r.c);
     let sr = (ul + l.c).max(ur + r.c);
-    let fl = [rl * ul, rl * ul * ul + pl, ul * (el + pl), rl * ul * l.w.y];
-    let fr = [rr * ur, rr * ur * ur + pr, ur * (er + pr), rr * ur * r.w.y];
+    let fl = [
+        rl * ul,
+        rl * ul * ul + pl,
+        ul * (el + pl),
+        rl * ul * l.w.y,
+        rl * ul * l.w.f,
+    ];
+    let fr = [
+        rr * ur,
+        rr * ur * ur + pr,
+        ur * (er + pr),
+        rr * ur * r.w.y,
+        rr * ur * r.w.f,
+    ];
     if sl >= 0.0 {
         return fl;
     }
@@ -92,22 +111,23 @@ pub fn hllc(l: &State, r: &State) -> Flux {
     }
     let s_star =
         (pr - pl + rl * ul * (sl - ul) - rr * ur * (sr - ur)) / (rl * (sl - ul) - rr * (sr - ur));
-    let star = |rho: f64, u: f64, p: f64, e: f64, y: f64, s: f64| {
+    let star = |rho: f64, u: f64, p: f64, e: f64, w: &Prim, s: f64| {
         let k = rho * (s - u) / (s - s_star);
         [
             k,
             k * s_star,
             k * (e / rho + (s_star - u) * (s_star + p / (rho * (s - u)))),
-            k * y,
+            k * w.y,
+            k * w.f,
         ]
     };
     if s_star >= 0.0 {
-        let q = [rl, rl * ul, el, rl * l.w.y];
-        let qs = star(rl, ul, pl, el, l.w.y, sl);
+        let q = [rl, rl * ul, el, rl * l.w.y, rl * l.w.f];
+        let qs = star(rl, ul, pl, el, &l.w, sl);
         std::array::from_fn(|k| fl[k] + sl * (qs[k] - q[k]))
     } else {
-        let q = [rr, rr * ur, er, rr * r.w.y];
-        let qs = star(rr, ur, pr, er, r.w.y, sr);
+        let q = [rr, rr * ur, er, rr * r.w.y, rr * r.w.f];
+        let qs = star(rr, ur, pr, er, &r.w, sr);
         std::array::from_fn(|k| fr[k] + sr * (qs[k] - q[k]))
     }
 }
@@ -183,8 +203,8 @@ pub struct Pipe {
     pub friction_scale: f64,
     /// Multiplier on the wall heat transfer.
     pub heat_scale: f64,
-    /// Conserved quantities per unit length: ρA, ρuA, EA, ρyA.
-    pub q: Vec<[f64; 4]>,
+    /// Conserved quantities per unit length: ρA, ρuA, EA, ρyA, ρfA.
+    pub q: Vec<[f64; 5]>,
     /// Cell states, kept consistent with `q`.
     pub s: Vec<State>,
     /// Face fluxes (already multiplied by the face area), `n + 1` of them. The network
@@ -192,6 +212,8 @@ pub struct Pipe {
     pub flux: Vec<Flux>,
     /// Predicted states at the pipe's two end faces, for the boundaries.
     pub end_state: [State; 2],
+    /// Heat released by fuel burning inside since it was built, J.
+    pub heat_released: f64,
     /// Temperature hint for each cell's energy inversion.
     scratch_l: Vec<State>,
     scratch_r: Vec<State>,
@@ -234,10 +256,11 @@ impl Pipe {
             rough_friction: fanning_rough(g.roughness),
             friction_scale: g.friction_scale,
             heat_scale: g.heat_scale,
-            q: vec![[0.0; 4]; n],
+            q: vec![[0.0; 5]; n],
             s: vec![st; n],
-            flux: vec![[0.0; 4]; n + 1],
+            flux: vec![[0.0; 5]; n + 1],
             end_state: [st; 2],
+            heat_released: 0.0,
             scratch_l: vec![st; n],
             scratch_r: vec![st; n],
         };
@@ -283,10 +306,10 @@ impl Pipe {
     }
 
     /// Sets the flux through an end face from the outward flux `out` (mass, outward
-    /// momentum incl. pressure, energy, burned mass) — the form the boundaries give.
+    /// momentum incl. pressure, energy, burned mass, fuel) — the form the boundaries give.
     pub fn set_end_flux(&mut self, end: End, out: Flux) {
         let s = end.sign();
-        let f = [s * out[0], out[1], s * out[2], s * out[3]];
+        let f = [s * out[0], out[1], s * out[2], s * out[3], s * out[4]];
         match end {
             End::Start => self.flux[0] = f,
             End::End => {
@@ -319,6 +342,7 @@ impl Pipe {
                     u: limit(w.u - a.u, b.u - w.u),
                     p: limit(w.p - a.p, b.p - w.p),
                     y: limit(w.y - a.y, b.y - w.y),
+                    f: limit(w.f - a.f, b.f - w.f),
                 };
                 // Half-step evolution of the primitive equations.
                 let g = self.s[i].gamma;
@@ -327,18 +351,21 @@ impl Pipe {
                     u: -h * (w.u * d.u + d.p / w.rho),
                     p: -h * (g * w.p * d.u + w.u * d.p),
                     y: -h * w.u * d.y,
+                    f: -h * w.u * d.f,
                 };
                 let mut wl = Prim {
                     rho: w.rho - 0.5 * d.rho + dt_w.rho,
                     u: w.u - 0.5 * d.u + dt_w.u,
                     p: w.p - 0.5 * d.p + dt_w.p,
                     y: w.y - 0.5 * d.y + dt_w.y,
+                    f: w.f - 0.5 * d.f + dt_w.f,
                 };
                 let mut wr = Prim {
                     rho: w.rho + 0.5 * d.rho + dt_w.rho,
                     u: w.u + 0.5 * d.u + dt_w.u,
                     p: w.p + 0.5 * d.p + dt_w.p,
                     y: w.y + 0.5 * d.y + dt_w.y,
+                    f: w.f + 0.5 * d.f + dt_w.f,
                 };
                 if wl.rho <= 0.0 || wr.rho <= 0.0 || wl.p <= 0.0 || wr.p <= 0.0 {
                     wl = w;
@@ -346,6 +373,8 @@ impl Pipe {
                 }
                 wl.y = wl.y.clamp(0.0, 1.0);
                 wr.y = wr.y.clamp(0.0, 1.0);
+                wl.f = wl.f.clamp(0.0, 1.0 - wl.y);
+                wr.f = wr.f.clamp(0.0, 1.0 - wr.y);
                 self.scratch_l[i] = State::of(gas, wl);
                 self.scratch_r[i] = State::of(gas, wr);
             } else {
@@ -356,7 +385,7 @@ impl Pipe {
         for i in 1..n {
             let f = hllc(&self.scratch_r[i - 1], &self.scratch_l[i]);
             let a = self.face_area[i];
-            self.flux[i] = [f[0] * a, f[1] * a, f[2] * a, f[3] * a];
+            self.flux[i] = f.map(|v| v * a);
         }
         self.end_state = [self.scratch_l[0], self.scratch_r[n - 1]];
     }
@@ -364,13 +393,26 @@ impl Pipe {
     /// Advances the cells by `dt` with the fluxes (the ends set by the network) and the
     /// source terms, and updates the cell states.
     pub fn update(&mut self, gas: &Gas, dt: f64) {
+        self.advance(gas, None, dt);
+    }
+
+    /// As `update`, burning the unburned fuel of the cells hot enough, and with the
+    /// oxygen, for it; returns the heat released, J.
+    pub fn update_reacting(&mut self, gas: &Gas, chem: &Chemistry, dt: f64) -> f64 {
+        let heat = self.advance(gas, Some(chem), dt);
+        self.heat_released += heat;
+        heat
+    }
+
+    fn advance(&mut self, gas: &Gas, chem: Option<&Chemistry>, dt: f64) -> f64 {
+        let mut heat = 0.0;
         let n = self.cells();
         let k = dt / self.dx;
         for i in 0..n {
             let (fl, fr) = (self.flux[i], self.flux[i + 1]);
             let st = self.s[i];
             let q = &mut self.q[i];
-            for j in 0..4 {
+            for j in 0..5 {
                 q[j] += k * (fl[j] - fr[j]);
             }
             // Pressure on the walls of a changing section.
@@ -382,6 +424,11 @@ impl Pipe {
             if self.friction_scale == 0.0 && self.heat_scale == 0.0 {
                 if q[0] <= 0.0 {
                     q[0] = 1e-9 * self.area[i];
+                }
+                q[3] = q[3].clamp(0.0, q[0]);
+                q[4] = q[4].clamp(0.0, q[0] - q[3]);
+                if let Some(c) = chem {
+                    heat += burn(q, &st, c, dt) * self.dx;
                 }
                 self.s[i] = primitive_near(gas, q, self.area[i], st.t);
                 continue;
@@ -399,9 +446,37 @@ impl Pipe {
                 q[0] = 1e-9 * self.area[i];
             }
             q[3] = q[3].clamp(0.0, q[0]);
+            q[4] = q[4].clamp(0.0, q[0] - q[3]);
+            if let Some(c) = chem {
+                heat += burn(q, &st, c, dt) * self.dx;
+            }
             self.s[i] = primitive_near(gas, q, self.area[i], st.t);
         }
+        heat
     }
+
+    /// Unburned fuel inside, kg.
+    pub fn fuel(&self) -> f64 {
+        self.q.iter().map(|q| q[4]).sum::<f64>() * self.dx
+    }
+}
+
+/// Burns a cell's unburned fuel over `dt` as the chemistry lets it at the state `st` it
+/// had; returns the heat released per length, J/m.
+#[inline]
+fn burn(q: &mut [f64; 5], st: &State, chem: &Chemistry, dt: f64) -> f64 {
+    // Traces (a flame's last 0.02 %) would warm the gas by a kelvin or less.
+    if q[4] <= 1e-4 * q[0] || st.t < crate::chem::T_MIN {
+        return 0.0;
+    }
+    let dm = chem.burn(st.w.rho, st.t, st.w.y, st.w.f, dt) * q[0];
+    if dm <= 0.0 {
+        return 0.0;
+    }
+    q[4] -= dm;
+    q[3] = (q[3] + dm * (1.0 + chem.afr)).min(q[0]);
+    q[2] += dm * chem.heat;
+    dm * chem.heat
 }
 
 /// Minmod-limited slope from backward and forward differences (van Leer's MC limiter).
@@ -416,27 +491,29 @@ fn limit(a: f64, b: f64) -> f64 {
 }
 
 /// Conserved quantities per length of a state in a section of area `a`.
-pub fn conserved(s: &State, a: f64) -> [f64; 4] {
+pub fn conserved(s: &State, a: f64) -> [f64; 5] {
     let rho = s.w.rho;
     [
         rho * a,
         rho * s.w.u * a,
         s.total_energy() * a,
         rho * s.w.y * a,
+        rho * s.w.f * a,
     ]
 }
 
 /// State of conserved quantities per length `q` in a section of area `a`.
-pub fn primitive(gas: &Gas, q: &[f64; 4], a: f64) -> State {
+pub fn primitive(gas: &Gas, q: &[f64; 5], a: f64) -> State {
     primitive_near(gas, q, a, 300.0)
 }
 
 /// As `primitive`, with a guess of the temperature.
 #[inline]
-pub fn primitive_near(gas: &Gas, q: &[f64; 4], a: f64, t_guess: f64) -> State {
+pub fn primitive_near(gas: &Gas, q: &[f64; 5], a: f64, t_guess: f64) -> State {
     let rho = q[0] / a;
     let u = q[1] / q[0];
     let y = (q[3] / q[0]).clamp(0.0, 1.0);
+    let f = (q[4] / q[0]).clamp(0.0, 1.0 - y);
     let e = (q[2] / q[0] - 0.5 * u * u).max(gas.floor_energy(y));
     let (t, cp) = gas.temperature_cp_near(e, y, t_guess);
     let r = gas.r(y);
@@ -447,6 +524,7 @@ pub fn primitive_near(gas: &Gas, q: &[f64; 4], a: f64, t_guess: f64) -> State {
             u,
             p: rho * r * t,
             y,
+            f,
         },
         t,
         c: (gamma * r * t).sqrt(),
@@ -479,6 +557,7 @@ mod tests {
                 u: 0.0,
                 p: 1e5,
                 y: 0.0,
+                f: 0.0,
             },
         );
         (gas, pipe)
@@ -490,7 +569,7 @@ mod tests {
             let s = *pipe.end(end);
             let v = s.w.u * end.sign();
             let p = s.w.p + s.w.rho * s.c * v;
-            pipe.set_end_flux(end, [0.0, p * pipe.end_area(end), 0.0, 0.0]);
+            pipe.set_end_flux(end, [0.0, p * pipe.end_area(end), 0.0, 0.0, 0.0]);
         }
         let _ = n;
     }
@@ -508,6 +587,7 @@ mod tests {
                     u: 0.0,
                     p: 1e5,
                     y: 0.0,
+                    f: 0.0,
                 }
             } else {
                 Prim {
@@ -515,6 +595,7 @@ mod tests {
                     u: 0.0,
                     p: 1e4,
                     y: 0.0,
+                    f: 0.0,
                 }
             };
             let st = State::of(&gas, w);
@@ -559,6 +640,7 @@ mod tests {
                     u: 0.0,
                     p: 1.4e5,
                     y: 0.5,
+                    f: 0.0,
                 },
             );
             pipe.q[i] = conserved(&st, pipe.area[i]);

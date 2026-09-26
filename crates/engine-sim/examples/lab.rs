@@ -1,7 +1,8 @@
 //! Sound lab: renders a preset of a sample engine and writes the WAV, a spectrogram PNG
 //! (log frequency, 20 Hz – 16 kHz, 70 dB) and the figures of `analysis` along it:
 //! `cargo run -p open-racing-engine-sim --example lab -- i4|v8 sweep out-prefix [draft|normal|high]`.
-//! `FS=<Pa>` writes the WAV at a fixed full scale, for comparing recordings' levels.
+//! `FS=<Pa>` writes the WAV at a fixed full scale, for comparing recordings' levels;
+//! `POPS=spark,lambda,throttle,above` fits a pop map and `CUT=spark` a spark-cut limiter.
 use std::f64::consts::PI;
 
 use open_racing_engine_sim::*;
@@ -16,11 +17,24 @@ fn main() {
         Some("high") => Quality::High,
         _ => Quality::Normal,
     };
-    let (e, i, x) = if engine == "v8" {
+    let (mut e, i, x) = if engine == "v8" {
         (samples::v8(), samples::v8_intake(), samples::v8_exhaust())
     } else {
         (samples::i4(), samples::i4_intake(), samples::i4_exhaust())
     };
+    // `POPS=spark,lambda,throttle,above` fits a pop map; `CUT=spark` a spark-cut limiter.
+    if let Ok(v) = std::env::var("POPS") {
+        let v: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect();
+        e.ecu.pops = Some(spec::Pops {
+            spark_deg: v[0],
+            lambda: v[1],
+            throttle: v[2],
+            above_rpm: v[3],
+        });
+    }
+    if std::env::var("CUT").is_ok_and(|v| v == "spark") {
+        e.ecu.limiter_cut = spec::Cut::Spark;
+    }
     let b = Build::new(&e)
         .system("intake", &i)
         .system("exhaust", &x)

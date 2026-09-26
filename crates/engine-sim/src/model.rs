@@ -12,11 +12,12 @@ use crate::boundary::{
     reservoir_to_reservoir,
 };
 use crate::cam::Valvetrain;
+use crate::chem::Chemistry;
 use crate::combustion::{self, Phase, Rng};
 use crate::crank::{SliderCrank, firing_angles};
 use crate::gas::Gas;
 use crate::pipe::{End, Pipe};
-use crate::spec::{EngineSpec, throttle_area};
+use crate::spec::{Cut, EngineSpec, throttle_area};
 
 /// Most parts a step is split into for the CFL condition.
 const MAX_SPLIT: usize = 16;
@@ -117,9 +118,17 @@ pub struct Lump {
     pub energy: f64,
     /// Burned-gas mass, kg.
     pub burned: f64,
+    /// Unburned fuel, kg (a part of the fresh charge).
+    pub fuel: f64,
+    /// Heat released by fuel burning outside a flame since it was built, J.
+    pub heat_released: f64,
     pub wall_temperature: f64,
     /// Whether it is a cylinder's (advanced with the crank, not with the volumes).
     pub cylinder: bool,
+    /// A flame crossing it (a volume's afterfire), and whether gas hot enough to light
+    /// one came in over the step.
+    flame: Option<Flame>,
+    hot_inflow: bool,
     // Derived.
     pub p: f64,
     pub t: f64,
@@ -128,6 +137,7 @@ pub struct Lump {
     dm: f64,
     de: f64,
     dmy: f64,
+    dmf: f64,
 }
 
 impl Lump {
@@ -139,14 +149,19 @@ impl Lump {
             mass,
             energy: mass * gas.energy(t, y),
             burned: mass * y,
+            fuel: 0.0,
+            heat_released: 0.0,
             wall_temperature: wall,
             cylinder: false,
+            flame: None,
+            hot_inflow: false,
             p,
             t,
             y,
             dm: 0.0,
             de: 0.0,
             dmy: 0.0,
+            dmf: 0.0,
         };
         l.derive(gas);
         l
@@ -155,6 +170,7 @@ impl Lump {
     pub fn derive(&mut self, gas: &Gas) {
         self.mass = self.mass.max(1e-12);
         self.burned = self.burned.clamp(0.0, self.mass);
+        self.fuel = self.fuel.clamp(0.0, self.mass - self.burned);
         self.y = self.burned / self.mass;
         self.t = gas
             .temperature_near(self.energy / self.mass, self.y, self.t)
@@ -163,16 +179,90 @@ impl Lump {
     }
 
     fn reservoir(&self, gas: &Gas) -> Reservoir {
-        Reservoir::new(gas, self.p, self.t, self.y)
+        Reservoir {
+            f: self.fuel / self.mass,
+            ..Reservoir::new(gas, self.p, self.t, self.y)
+        }
     }
 
     fn apply(&mut self, dt: f64) {
         self.mass += self.dm * dt;
         self.energy += self.de * dt;
         self.burned += self.dmy * dt;
+        self.fuel += self.dmf * dt;
         self.dm = 0.0;
         self.de = 0.0;
         self.dmy = 0.0;
+        self.dmf = 0.0;
+    }
+
+    /// Burns its unburned fuel as a flame crossing it would, over `dt` (call `derive`
+    /// after); returns the heat released, J.
+    ///
+    /// A volume full of unburned mixture — fuel from misfires, late burns and rich
+    /// running collected in a collector or a silencer, too cool to ignite by itself — is
+    /// lit when gas hotter than `IGNITION` comes in (a burning or freshly burned slug of
+    /// exhaust), if it is flammable: its laminar flame speed (Metghalchi & Keck, at the
+    /// mixture's λ, burned-gas dilution and its temperature compressed isentropically
+    /// since it was lit) above the quench speed. The turbulent flame then crosses it at
+    /// S_T = S_L + √(S_L·u′) (the thin-flame limit, u′ the exhaust's turbulence) in the
+    /// time the volume's size takes, burning along a Wiebe curve. A deflagration in a
+    /// closed box, vented through its pipes: the afterfire's bang.
+    fn deflagrate(&mut self, chem: &Chemistry, dt: f64) -> f64 {
+        let hot = std::mem::take(&mut self.hot_inflow);
+        let air = (self.mass - self.burned - self.fuel).max(0.0);
+        if self.fuel <= 1e-5 * self.mass || air <= 0.0 {
+            self.flame = None;
+            return 0.0;
+        }
+        let lambda = air / (chem.afr * self.fuel);
+        let mut flame = match self.flame.take() {
+            Some(f) => f,
+            None if hot => Flame {
+                p0: self.p,
+                t0: self.t,
+                residual: self.y,
+                progress: 0.0,
+                done: 0.0,
+            },
+            None => return 0.0,
+        };
+        let t_u = flame.t0 * (self.p / flame.p0).max(0.1).powf(0.25);
+        let s_l = combustion::laminar_flame_speed(t_u, self.p, lambda, flame.residual);
+        if s_l < combustion::QUENCH_SPEED {
+            return 0.0;
+        }
+        let size = 2.0 * (3.0 * self.volume / (4.0 * PI)).cbrt();
+        let s_t = s_l + (s_l * TURBULENCE).sqrt();
+        flame.progress += dt * s_t / size;
+        let x = combustion::wiebe(5.0, 2.0, flame.progress);
+        let share = ((x - flame.done) / (1.0 - flame.done).max(1e-9)).clamp(0.0, 1.0);
+        flame.done = flame.done.max(x);
+        let dm = share * self.fuel.min(air / chem.afr);
+        self.fuel -= dm;
+        self.burned += dm * (1.0 + chem.afr);
+        self.energy += dm * chem.heat;
+        self.heat_released += dm * chem.heat;
+        if flame.progress < 1.2 {
+            self.flame = Some(flame);
+        }
+        dm * chem.heat
+    }
+
+    /// Burns its unburned fuel as the chemistry lets it over `dt` (call `derive` after);
+    /// returns the heat released, J.
+    fn react(&mut self, chem: &Chemistry, dt: f64) -> f64 {
+        if self.fuel <= 1e-4 * self.mass {
+            return 0.0;
+        }
+        let rho = self.mass / self.volume;
+        let f = self.fuel / self.mass;
+        let dm = chem.burn(rho, self.t, self.y, f, dt) * self.mass;
+        self.fuel -= dm;
+        self.burned += dm * (1.0 + chem.afr);
+        self.energy += dm * chem.heat;
+        self.heat_released += dm * chem.heat;
+        dm * chem.heat
     }
 }
 
@@ -233,6 +323,19 @@ pub struct Mouth {
     pub radiation: Radiation,
 }
 
+impl Cylinder {
+    /// Laminar flame speed in the unburned charge at cylinder pressure `p`, m/s: its
+    /// temperature is the trapped charge's, compressed isentropically since the inlet
+    /// valve shut.
+    fn flame_speed(&self, p: f64, lambda: f64, residual: f64) -> f64 {
+        let Some((pr, _, tr)) = self.ivc else {
+            return 1.0;
+        };
+        let t_u = tr * (p / pr).powf(0.25);
+        combustion::laminar_flame_speed(t_u, p, lambda, residual)
+    }
+}
+
 impl Mouth {
     pub fn new(name: String, link: usize, position: [f64; 3], area: f64) -> Self {
         Self {
@@ -260,6 +363,8 @@ pub struct Cylinder {
     burn: Option<Burn>,
     /// State at inlet valve closing, for Woschni's motored pressure.
     ivc: Option<(f64, f64, f64)>,
+    /// Burned-gas share of the charge trapped then.
+    residual: f64,
     knock: f64,
     /// Accumulators over the current cycle.
     acc: CycleAcc,
@@ -273,14 +378,41 @@ pub struct Cylinder {
     pub dpdt: f64,
 }
 
+/// Gas coming into a volume hotter than this lights the unburned mixture there, K: the
+/// temperature at which the fuel burns within a fraction of a millisecond (see
+/// [`crate::chem`]), so that the gas is itself burning.
+const IGNITION: f64 = 1200.0;
+
+/// Turbulence intensity u′ in the exhaust's volumes, m/s: a tenth or so of the gas's
+/// speed in the pipes feeding them.
+const TURBULENCE: f64 = 5.0;
+
+/// A flame crossing a volume.
+#[derive(Clone, Debug)]
+struct Flame {
+    /// Pressure and temperature of the mixture when it was lit, and its burned share.
+    p0: f64,
+    t0: f64,
+    residual: f64,
+    /// Share of the crossing done, and of the fuel burned.
+    progress: f64,
+    done: f64,
+}
+
+/// A flame, burning the cylinder's fuel along its Wiebe function.
 #[derive(Clone, Debug)]
 struct Burn {
     start_deg: f64,
     duration_deg: f64,
-    heat: f64,
-    /// Fresh mass that burns.
-    fresh: f64,
+    /// Share of the duration run, which the flame speed paces.
+    progress: f64,
+    /// Share of the charge burned so far.
     done: f64,
+    /// Excess-air ratio of the charge and its residual gas round the flame (which varies
+    /// from cycle to cycle), and its laminar flame speed at the spark, m/s.
+    lambda: f64,
+    residual: f64,
+    speed0: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -329,6 +461,16 @@ struct EcuState {
     limiter_cut: bool,
 }
 
+/// What the ECU does to the cylinders this step.
+#[derive(Clone, Copy, Debug)]
+struct Firing {
+    fuel: bool,
+    spark: bool,
+    /// Advance before the firing TDC, crank degrees.
+    spark_deg: f64,
+    lambda: f64,
+}
+
 /// The engine model.
 pub struct Model {
     pub spec: EngineSpec,
@@ -341,6 +483,11 @@ pub struct Model {
     pub links: Vec<Link>,
     pub cylinders: Vec<Cylinder>,
     pub mouths: Vec<Mouth>,
+    /// The fuel's burning outside the flame.
+    pub chem: Chemistry,
+    /// Heat released by fuel burning outside the cylinders' flames (in the pipes and
+    /// volumes) over the last step, J: the afterfire.
+    pub afterfire: f64,
     pub kinematics: SliderCrank,
     pub intake_valves: Valvetrain,
     pub exhaust_valves: Valvetrain,
@@ -392,6 +539,8 @@ impl Model {
             intake_valves: Valvetrain::new(&spec.intake, true),
             exhaust_valves: Valvetrain::new(&spec.exhaust, false),
             rng: Rng::new(spec.combustion.seed),
+            chem: Chemistry::new(&spec.combustion),
+            afterfire: 0.0,
             stall: spec.ecu.stall_rpm * RAD_PER_RPM,
             spec,
             gas,
@@ -440,6 +589,7 @@ impl Model {
                 cycle_prev: 0.0,
                 burn: None,
                 ivc: None,
+                residual: 0.0,
                 knock: 0.0,
                 acc: CycleAcc::default(),
                 last: CycleStats::default(),
@@ -535,6 +685,7 @@ impl Model {
             c.seated = 0.0;
             c.dpdt = 0.0;
         }
+        self.afterfire = 0.0;
         for _ in 0..n {
             self.advance(h, c);
         }
@@ -559,6 +710,12 @@ impl Model {
         }
         let idle = e.idle_opening + (self.ecu.idle + 0.5 * e.idle_gain * err).clamp(lo, hi);
         self.throttle = c.pedal.clamp(0.0, 1.0).max(idle);
+        if let Some(pops) = &e.pops
+            && c.pedal < 0.01
+            && rpm > pops.above_rpm
+        {
+            self.throttle = self.throttle.max(pops.throttle);
+        }
         if rpm > e.limiter_rpm {
             self.ecu.limiter_cut = true;
         } else if rpm < e.limiter_rpm - e.limiter_hysteresis_rpm {
@@ -566,14 +723,34 @@ impl Model {
         }
     }
 
-    fn fuel_cut(&self, c: &Controls) -> bool {
+    /// Fuel, spark, advance and mixture this step: the maps, the limiter's cut, and on
+    /// overrun either a fuel cut or a pop map's late spark.
+    fn firing(&self, c: &Controls) -> Firing {
         let e = &self.spec.ecu;
         let rpm = self.rpm();
-        !c.ignition
-            || self.omega < self.stall
-            || self.ecu.limiter_cut
-            || e.overrun_cut_rpm
-                .is_some_and(|cut| rpm > cut && c.pedal < 0.01)
+        let mut f = Firing {
+            fuel: c.ignition && self.omega >= self.stall,
+            spark: c.ignition && self.omega >= self.stall,
+            spark_deg: e.spark_deg.at(rpm, self.throttle),
+            lambda: e.lambda.at(rpm, self.throttle).max(0.5),
+        };
+        if self.ecu.limiter_cut {
+            match e.limiter_cut {
+                Cut::Fuel => f.fuel = false,
+                Cut::Spark => f.spark = false,
+            }
+        }
+        if c.pedal < 0.01 {
+            if let Some(pops) = &e.pops
+                && rpm > pops.above_rpm
+            {
+                f.spark_deg = pops.spark_deg;
+                f.lambda = pops.lambda;
+            } else if e.overrun_cut_rpm.is_some_and(|cut| rpm > cut) {
+                f.fuel = false;
+            }
+        }
+        f
     }
 
     fn reservoir(&self, port: Port) -> Reservoir {
@@ -664,6 +841,8 @@ impl Model {
                         lump.dm += f[0];
                         lump.de += f[2];
                         lump.dmy += f[3];
+                        lump.dmf += f[4];
+                        lump.hot_inflow |= f[0] > 0.0 && s.t > IGNITION;
                     }
                     if let Some(k) = mouth {
                         let m = &mut self.mouths[k];
@@ -683,12 +862,15 @@ impl Model {
                     let cda = self.cda(&opening, f64::INFINITY);
                     let (rx, ry) = (self.reservoir(x), self.reservoir(y));
                     let f = reservoir_to_reservoir(cda, &rx, &ry);
+                    let hot = if f[0] >= 0.0 { rx.t } else { ry.t } > IGNITION;
                     for (port, sign) in [(x, -1.0), (y, 1.0)] {
                         if let Some(l) = self.lump_of(port) {
                             let lump = &mut self.lumps[l];
                             lump.dm += sign * f[0];
                             lump.de += sign * f[1];
                             lump.dmy += sign * f[2];
+                            lump.dmf += sign * f[3];
+                            lump.hot_inflow |= hot && sign * f[0] > 0.0;
                         }
                     }
                     f[0]
@@ -711,7 +893,7 @@ impl Model {
             }
         }
         for p in &mut self.pipes {
-            p.update(&self.gas, h);
+            self.afterfire += p.update_reacting(&self.gas, &self.chem, h);
         }
         // Volumes (cylinders follow with the crank).
         for l in &mut self.lumps {
@@ -720,13 +902,18 @@ impl Model {
             }
             l.apply(h);
             l.derive(&self.gas);
+            let q = l.react(&self.chem, h) + l.deflagrate(&self.chem, h);
+            if q > 0.0 {
+                self.afterfire += q;
+                l.derive(&self.gas);
+            }
         }
         self.advance_cylinders(h, c);
     }
 
     fn advance_cylinders(&mut self, h: f64, c: &Controls) {
         let rpm = self.rpm();
-        let cut = self.fuel_cut(c);
+        let fire = self.firing(c);
         let dtheta = self.omega * h;
         let new_angle = self.angle + dtheta;
         let sp = self.mean_piston_speed();
@@ -734,7 +921,7 @@ impl Model {
         let kin = self.kinematics;
         let ht = self.spec.heat_transfer.clone();
         let comb = self.spec.combustion.clone();
-        let (lhv, afr) = comb.fuel.properties();
+        let afr = self.chem.afr;
         let ivc_deg = self.intake_valves.close_deg();
         let m_rec = self.spec.crank.reciprocating_mass;
         let mut gas_torque = 0.0;
@@ -750,8 +937,7 @@ impl Model {
             let piston = kin.at(deg1.to_radians());
             let v1 = piston.volume;
             // Spark: the ECU's advance before the firing TDC.
-            let advance = self.spec.ecu.spark_deg.at(rpm, self.throttle);
-            let spark = 720.0 - advance;
+            let spark = (720.0 - fire.spark_deg).rem_euclid(720.0);
             let crossed = |at: f64| -> bool {
                 let at = at.rem_euclid(720.0);
                 if wrapped {
@@ -760,55 +946,92 @@ impl Model {
                     at > deg0 && at <= deg1
                 }
             };
-            // Inlet valve closing: the charge is trapped.
+            // Inlet valve closing: the charge is trapped, and (port injection) the
+            // fresh part of it is air and fuel at the ECU's λ.
             if crossed(ivc_deg) {
-                let l = &self.lumps[self.cylinders[ci].gas];
+                let gi = self.cylinders[ci].gas;
+                let l = &mut self.lumps[gi];
+                let added = if fire.fuel {
+                    let fresh = l.mass - l.burned;
+                    let fuel = fresh / (1.0 + afr * fire.lambda);
+                    let added = (fuel - l.fuel).max(0.0);
+                    l.fuel = l.fuel.max(fuel);
+                    added
+                } else {
+                    0.0
+                };
                 let (m, y, p, t, v) = (l.mass, l.y, l.p, l.t, l.volume);
                 let cyl = &mut self.cylinders[ci];
                 cyl.ivc = Some((p, v, t));
+                cyl.residual = y;
                 cyl.knock = 0.0;
                 cyl.acc.trapped = m;
                 cyl.acc.residual = y;
+                cyl.acc.fuel += added;
             }
-            if crossed(spark) {
-                let lambda = self.spec.ecu.lambda.at(rpm, self.throttle).max(0.5);
+            if crossed(spark) && fire.spark {
                 let l = &self.lumps[self.cylinders[ci].gas];
-                let fresh = l.mass - l.burned;
-                if !cut && fresh > 0.0 {
-                    // Port-injected: the fresh charge is air and fuel at this λ.
-                    let fuel = fresh / (1.0 + afr * lambda);
+                if l.fuel > 1e-4 * l.mass {
+                    let lambda = (l.mass - l.burned - l.fuel) / (afr * l.fuel);
                     let dur = combustion::duration_deg(&comb, rpm, lambda) * (1.0 + 1.5 * l.y);
                     let slow = combustion::cycle_variation(&comb, l.y, self.rng.normal());
-                    let heat = comb.efficiency * combustion::burnable(lambda) * fuel * lhv;
-                    let cyl = &mut self.cylinders[ci];
-                    cyl.burn = Some(Burn {
-                        start_deg: spark + 0.5 * slow * dur,
-                        duration_deg: dur * (1.0 + slow),
-                        heat,
-                        fresh,
-                        done: 0.0,
-                    });
-                    cyl.acc.fuel += fuel;
+                    let cyl = &self.cylinders[ci];
+                    // The kernel that grows slowly is the one in more residual gas.
+                    let residual = cyl.residual * (1.0 + slow);
+                    let speed0 = cyl.flame_speed(l.p, lambda, residual);
+                    // Too dilute or too lean to light: a misfire.
+                    if speed0 >= combustion::QUENCH_SPEED {
+                        self.cylinders[ci].burn = Some(Burn {
+                            start_deg: spark + 0.5 * slow * dur,
+                            duration_deg: dur * (1.0 + slow),
+                            progress: 0.0,
+                            done: 0.0,
+                            lambda,
+                            residual,
+                            speed0,
+                        });
+                    }
                 }
             }
-            // Heat released this step.
+            // Heat released this step: the flame takes its share of the charge still
+            // unburned, of the fuel still in the cylinder (some may have left with the
+            // exhaust) and that its oxygen can burn.
             let mut dq = 0.0;
             let mut dburned = 0.0;
+            let mut dfuel = 0.0;
             let mut burning = false;
-            if let Some(b) = &mut self.cylinders[ci].burn {
-                // Negative until a late flame kernel starts to burn.
+            let gi = self.cylinders[ci].gas;
+            if let Some(mut b) = self.cylinders[ci].burn.take() {
+                // Negative until a late flame kernel starts to burn. From then the
+                // turbulent flame runs at √S_L (Damköhler's thin-flame limit, as in
+                // Gülder's correlation): as the expansion cools the unburned gas, a late
+                // flame slows, and it goes out when S_L falls below the quench speed,
+                // leaving the rest of the charge to the exhaust.
                 let since = (deg1 - b.start_deg + 360.0).rem_euclid(720.0) - 360.0;
-                let f = since / b.duration_deg;
+                let l = &self.lumps[gi];
+                let speed = self.cylinders[ci].flame_speed(l.p, b.lambda, b.residual);
+                let quenched = since > 0.0 && speed < combustion::QUENCH_SPEED;
+                if since > 0.0 {
+                    let step = (dtheta.to_degrees()).min(since);
+                    b.progress += step / b.duration_deg * (speed / b.speed0).sqrt();
+                }
+                let f = b.progress;
                 let x = combustion::wiebe(comb.wiebe_a, comb.wiebe_m, f);
-                let dx = (x - b.done).max(0.0);
-                b.done = x;
-                dq = dx * b.heat;
-                dburned = dx * b.fresh;
-                burning = f < 1.0;
-                if f >= 1.2 {
-                    self.cylinders[ci].burn = None;
+                let share = ((x - b.done) / (1.0 - b.done).max(1e-9)).clamp(0.0, 1.0);
+                b.done = b.done.max(x);
+                let l = &self.lumps[gi];
+                let burnable = l.fuel.min((l.mass - l.burned - l.fuel).max(0.0) / afr);
+                dfuel = share * burnable;
+                dq = dfuel * self.chem.heat;
+                dburned = dfuel * (1.0 + afr);
+                burning = f < 1.0 && !quenched;
+                if f < 1.2 && !quenched {
+                    self.cylinders[ci].burn = Some(b);
                 }
             }
+            // A charge no flame burned (unlit, quenched) is left to the exhaust: the global
+            // kinetics are fitted to flames, not to the low-temperature chemistry of
+            // autoignition in a cylinder.
             // Woschni.
             let (p, t) = {
                 let l = &self.lumps[self.cylinders[ci].gas];
@@ -848,6 +1071,7 @@ impl Model {
                 l.apply(h);
                 l.energy += dq - q_wall - work;
                 l.burned += dburned;
+                l.fuel -= dfuel;
                 l.derive(g);
             }
             let p1 = self.lumps[self.cylinders[ci].gas].p;

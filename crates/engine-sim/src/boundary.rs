@@ -7,7 +7,7 @@
 //! whatever makes the pipe's mass flow equal the quasi-steady flow through the restriction.
 //! A shut valve (zero area) reflects the wave from a closed end; a pipe opening into the
 //! air reflects it inverted. The one mass, energy and burned-gas flux found this way is
-//! given to both the pipe and the reservoir, so both conserve exactly.
+//! given to both the pipe and the reservoir (with the unburned fuel), so both conserve exactly.
 //!
 //! A pipe's mouth to the open air is not quite a pressure release: the air it pushes
 //! out has mass (the end correction) and carries energy away as sound (the radiation
@@ -29,6 +29,8 @@ pub struct Reservoir {
     pub p: f64,
     pub t: f64,
     pub y: f64,
+    /// Unburned fuel's mass fraction.
+    pub f: f64,
     pub gamma: f64,
     pub r: f64,
     /// Specific enthalpy (at rest: also the stagnation enthalpy), J/kg.
@@ -41,6 +43,7 @@ impl Reservoir {
             p,
             t,
             y,
+            f: 0.0,
             gamma: gas.gamma(t, y),
             r: gas.r(y),
             h: gas.enthalpy(t, y),
@@ -107,7 +110,7 @@ pub fn pipe_to_reservoir(
     let cda = cda.min(area);
     let p_min = 0.02 * s.w.p;
     if cda <= 0.0 {
-        return [0.0, face_pressure(s, v, p_min) * area, 0.0, 0.0];
+        return [0.0, face_pressure(s, v, p_min) * area, 0.0, 0.0, 0.0];
     }
     if v + s.c < 0.0 {
         return supersonic_inflow(s, area, cda, res);
@@ -186,9 +189,9 @@ pub fn pipe_to_reservoir(
     if q >= 0.0 {
         let tf = pf / (rf * r);
         let h0 = gas.enthalpy(tf, s.w.y) + 0.5 * vf * vf;
-        [q, pf * area + q * vf, q * h0, q * s.w.y]
+        [q, pf * area + q * vf, q * h0, q * s.w.y, q * s.w.f]
     } else {
-        [q, pf * area + q * vf, q * res.h, q * res.y]
+        [q, pf * area + q * vf, q * res.h, q * res.y, q * res.f]
     }
 }
 
@@ -204,14 +207,14 @@ fn supersonic_inflow(s: &State, area: f64, cda: f64, res: &Reservoir) -> Flux {
     let pf = s.w.p.max(exit);
     let q = orifice_flow(cda, res.p, res.t, pf, res.gamma, res.r).0;
     if q <= 0.0 {
-        return [0.0, pf * area, 0.0, 0.0];
+        return [0.0, pf * area, 0.0, 0.0, 0.0];
     }
     // cp·(T0 − T) = ½·u², u = q·R·T/(pf·A).
     let cp = res.gamma * res.r / (res.gamma - 1.0);
     let k = (q * res.r / (pf * area)).powi(2);
     let t = (-cp + (cp * cp + 2.0 * k * cp * res.t).sqrt()) / k;
     let vf = -q * res.r * t / (pf * area);
-    [-q, pf * area - q * vf, -q * res.h, -q * res.y]
+    [-q, pf * area - q * vf, -q * res.h, -q * res.y, -q * res.f]
 }
 
 /// Mach number (≥ 1) at which an isentropic nozzle's section is `ratio` times its throat's.
@@ -312,7 +315,7 @@ pub fn pipe_open_to_reservoir(gas: &Gas, s: &State, sign: f64, area: f64, res: &
         let q = rf * vf * area;
         let tf = pf / (rf * gas.r(s.w.y));
         let h0 = gas.enthalpy(tf, s.w.y) + 0.5 * vf * vf;
-        [q, pf * area + q * vf, q * h0, q * s.w.y]
+        [q, pf * area + q * vf, q * h0, q * s.w.y, q * s.w.f]
     } else {
         let rho_r = res.density();
         let k = res.p - s.w.p - z * v;
@@ -323,7 +326,7 @@ pub fn pipe_open_to_reservoir(gas: &Gas, s: &State, sign: f64, area: f64, res: &
         let vf = -(2.0 * drop / rho_r).sqrt();
         let rf = rho_r * (pf / res.p).powf(1.0 / res.gamma);
         let q = rf * vf * area;
-        [q, pf * area + q * vf, q * res.h, q * res.y]
+        [q, pf * area + q * vf, q * res.h, q * res.y, q * res.f]
     }
 }
 
@@ -349,25 +352,27 @@ pub fn pipe_to_pipe(
         f[1] * af + a.w.p * (area_a - af),
         f[2] * af,
         f[3] * af,
+        f[4] * af,
     ];
     let out_b = [
         -f[0] * af,
         f[1] * af + b.w.p * (area_b - af),
         -f[2] * af,
         -f[3] * af,
+        -f[4] * af,
     ];
     (out_a, out_b)
 }
 
-/// Flow from reservoir `a` to reservoir `b` through `cda`: mass, energy and burned mass
-/// leaving `a` (negative when the flow is the other way).
-pub fn reservoir_to_reservoir(cda: f64, a: &Reservoir, b: &Reservoir) -> [f64; 3] {
+/// Flow from reservoir `a` to reservoir `b` through `cda`: mass, energy, burned mass and
+/// fuel leaving `a` (negative when the flow is the other way).
+pub fn reservoir_to_reservoir(cda: f64, a: &Reservoir, b: &Reservoir) -> [f64; 4] {
     if a.p >= b.p {
         let q = orifice_flow(cda, a.p, a.t, b.p, a.gamma, a.r).0;
-        [q, q * a.h, q * a.y]
+        [q, q * a.h, q * a.y, q * a.f]
     } else {
         let q = orifice_flow(cda, b.p, b.t, a.p, b.gamma, b.r).0;
-        [-q, -q * b.h, -q * b.y]
+        [-q, -q * b.h, -q * b.y, -q * b.f]
     }
 }
 
@@ -399,6 +404,7 @@ mod tests {
             u: 0.0,
             p: 1e5,
             y: 0.0,
+            f: 0.0,
         };
         let mut pipe = Pipe::new(&g, &gas, rest);
         let n = pipe.cells();
@@ -412,6 +418,7 @@ mod tests {
                 u: dp / (rest.rho * st0.c),
                 p: 1e5 + dp,
                 y: 0.0,
+                f: 0.0,
             };
             let st = State::of(&gas, w);
             pipe.q[i] = conserved(&st, pipe.area[i]);
@@ -427,7 +434,7 @@ mod tests {
             let wall = face_pressure(&s, -s.w.u, 1.0);
             pipe.set_end_flux(
                 End::Start,
-                [0.0, wall * pipe.end_area(End::Start), 0.0, 0.0],
+                [0.0, wall * pipe.end_area(End::Start), 0.0, 0.0, 0.0],
             );
             let s = *pipe.end(End::End);
             let f = pipe_radiating(&gas, &s, 1.0, pipe.end_area(End::End), &air, &mut rad, dt);
@@ -469,6 +476,7 @@ mod tests {
                 u: 5.0,
                 p: 1e5,
                 y: 0.0,
+                f: 0.0,
             },
         );
         let res = Reservoir::new(&gas, 1e5, 300.0, 0.0);
@@ -501,6 +509,7 @@ mod tests {
                     u,
                     p,
                     y: 0.0,
+                    f: 0.0,
                 },
             );
             let a = pipe_open_to_reservoir(&gas, &s, 1.0, 1e-3, &res);
@@ -524,6 +533,7 @@ mod tests {
                 u: 0.0,
                 p: 1e5,
                 y: 0.0,
+                f: 0.0,
             },
         );
         let f = pipe_to_reservoir(&gas, &rest, 1.0, 1e-3, 1e-3, &res, &mut 0.0);
@@ -535,6 +545,7 @@ mod tests {
                 u: 0.0,
                 p: 1.1e5,
                 y: 0.0,
+                f: 0.0,
             },
         );
         let f = pipe_to_reservoir(&gas, &high, 1.0, 1e-3, 1e-3, &res, &mut 0.0);
@@ -549,6 +560,7 @@ mod tests {
                 u: 0.0,
                 p: 0.9e5,
                 y: 0.0,
+                f: 0.0,
             },
         );
         assert!(pipe_to_reservoir(&gas, &low, 1.0, 1e-3, 1e-3, &res, &mut 0.0)[0] < 0.0);
