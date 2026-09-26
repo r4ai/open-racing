@@ -73,6 +73,9 @@ pub struct CylinderPlace {
 pub struct Head {
     pub valves: Valves,
     pub cam: Cam,
+    /// A second, higher lobe the ECU switches the valves to (VTEC and the like).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_cam: Option<Cam>,
     pub port: Port,
 }
 
@@ -285,11 +288,36 @@ pub struct Ecu {
     /// burning, and banging, in the exhaust.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pops: Option<Pops>,
+    /// When the valves go over to the heads' high lobes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cam_switch: Option<CamSwitch>,
+    /// Cam phasers: advance of the intake and of the exhaust cam, crank degrees, against
+    /// rpm and load (none: the cam as ground).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_phase: Option<Map2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhaust_phase: Option<Map2>,
     /// Spark advance before the firing TDC, crank degrees, against rpm and load (the
     /// throttle, 0..1).
     pub spark_deg: Map2,
     /// Excess-air ratio λ against rpm and load.
     pub lambda: Map2,
+}
+
+/// Switching over to the high lobes: above a speed with enough load, back below it less
+/// the hysteresis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CamSwitch {
+    pub rpm: f64,
+    #[serde(default = "default_cam_hysteresis")]
+    pub hysteresis_rpm: f64,
+    /// Least throttle, 0..1.
+    #[serde(default)]
+    pub min_load: f64,
+}
+
+fn default_cam_hysteresis() -> f64 {
+    200.0
 }
 
 /// What an ECU cuts to hold a speed.

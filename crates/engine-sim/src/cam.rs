@@ -1,5 +1,10 @@
 //! Valve lift from the cam, and the effective flow area it opens.
 //!
+//! A head may have a second, higher lobe per valve that rocker pins lock in (Honda's VTEC,
+//! Mitsubishi's MIVEC): the pins can only slide when the rockers sit on the base circle,
+//! so each cylinder changes lobes when its valves are shut. A cam phaser turns the whole
+//! cam against the crank, moving every event earlier (advance) or later together.
+//!
 //! Angles here are crank angles within the 720° cycle, with the firing TDC at 0° and the
 //! gas-exchange TDC at 360°.
 
@@ -17,50 +22,31 @@ fn rise(x: f64) -> f64 {
     x4 * (35.0 - 84.0 * x + 70.0 * x * x - 20.0 * x * x * x)
 }
 
-/// A side's valves as the simulation uses them.
+/// A lobe's events.
 #[derive(Clone, Debug)]
-pub struct Valvetrain {
-    /// Crank angle at which the valve leaves its seat, degrees in 0..720.
-    pub open_deg: f64,
-    pub duration_deg: f64,
-    pub lift: f64,
+struct Lobe {
+    open_deg: f64,
+    duration_deg: f64,
+    lift: f64,
     profile: Profile,
-    diameter: f64,
-    count: f64,
-    /// Area of the throats past the stems, m².
-    throat: f64,
-    cd: Vec<(f64, f64)>,
 }
 
-impl Valvetrain {
-    /// The intake (`intake`) or exhaust side of a head.
-    pub fn new(head: &Head, intake: bool) -> Self {
-        let cam = &head.cam;
+impl Lobe {
+    fn new(cam: &crate::spec::Cam, intake: bool) -> Self {
         let peak = if intake {
             360.0 + cam.centreline_deg
         } else {
             360.0 - cam.centreline_deg
         };
-        let v = &head.valves;
         Self {
             open_deg: (peak - 0.5 * cam.duration_deg).rem_euclid(720.0),
             duration_deg: cam.duration_deg,
             lift: cam.lift,
             profile: cam.profile.clone(),
-            diameter: v.diameter,
-            count: v.count as f64,
-            throat: PI * 0.25 * (v.diameter * v.diameter - v.stem * v.stem),
-            cd: v.cd.clone(),
         }
     }
 
-    /// Crank angle at which the valve closes, degrees in 0..720.
-    pub fn close_deg(&self) -> f64 {
-        (self.open_deg + self.duration_deg).rem_euclid(720.0)
-    }
-
-    /// Valve lift at a crank angle in the cycle, m.
-    pub fn lift_at(&self, cycle_deg: f64) -> f64 {
+    fn lift_at(&self, cycle_deg: f64) -> f64 {
         let a = (cycle_deg - self.open_deg).rem_euclid(720.0);
         if a >= self.duration_deg {
             return 0.0;
@@ -77,6 +63,76 @@ impl Valvetrain {
             Profile::Table(t) => lookup(t, f).clamp(0.0, 1.0),
         };
         s * self.lift
+    }
+}
+
+/// A side's valves as the simulation uses them.
+#[derive(Clone, Debug)]
+pub struct Valvetrain {
+    /// Crank angle at which the valve leaves its seat on the (low) lobe, unphased,
+    /// degrees in 0..720.
+    pub open_deg: f64,
+    pub duration_deg: f64,
+    pub lift: f64,
+    low: Lobe,
+    high: Option<Lobe>,
+    diameter: f64,
+    count: f64,
+    /// Area of the throats past the stems, m².
+    throat: f64,
+    cd: Vec<(f64, f64)>,
+}
+
+impl Valvetrain {
+    /// The intake (`intake`) or exhaust side of a head.
+    pub fn new(head: &Head, intake: bool) -> Self {
+        let low = Lobe::new(&head.cam, intake);
+        let v = &head.valves;
+        Self {
+            open_deg: low.open_deg,
+            duration_deg: low.duration_deg,
+            lift: low.lift,
+            low,
+            high: head.high_cam.as_ref().map(|c| Lobe::new(c, intake)),
+            diameter: v.diameter,
+            count: v.count as f64,
+            throat: PI * 0.25 * (v.diameter * v.diameter - v.stem * v.stem),
+            cd: v.cd.clone(),
+        }
+    }
+
+    /// Crank angle at which the valve closes, degrees in 0..720.
+    pub fn close_deg(&self) -> f64 {
+        (self.open_deg + self.duration_deg).rem_euclid(720.0)
+    }
+
+    /// Whether it has a high lobe to switch to.
+    pub fn switchable(&self) -> bool {
+        self.high.is_some()
+    }
+
+    /// Crank angle at which the valve closes on a lobe (`high`) with the cam advanced by
+    /// `phase` crank degrees, degrees in 0..720.
+    pub fn close_deg_on(&self, high: bool, phase: f64) -> f64 {
+        let l = self.lobe(high);
+        (l.open_deg + l.duration_deg - phase).rem_euclid(720.0)
+    }
+
+    fn lobe(&self, high: bool) -> &Lobe {
+        match (&self.high, high) {
+            (Some(h), true) => h,
+            _ => &self.low,
+        }
+    }
+
+    /// Valve lift at a crank angle in the cycle on the low lobe, unphased, m.
+    pub fn lift_at(&self, cycle_deg: f64) -> f64 {
+        self.low.lift_at(cycle_deg)
+    }
+
+    /// Valve lift on a lobe (`high`) with the cam advanced by `phase` crank degrees, m.
+    pub fn lift_on(&self, cycle_deg: f64, high: bool, phase: f64) -> f64 {
+        self.lobe(high).lift_at(cycle_deg + phase)
     }
 
     /// Effective flow area (discharge coefficient × geometric area) of all the side's
@@ -95,9 +151,10 @@ impl Valvetrain {
         self.area_at_lift(self.lift_at(cycle_deg))
     }
 
-    /// Largest effective area, m² (at full lift).
+    /// Largest effective area, m² (at full lift, of the higher lobe).
     pub fn max_area(&self) -> f64 {
-        self.area_at_lift(self.lift)
+        let high = self.high.as_ref().map_or(0.0, |h| h.lift);
+        self.area_at_lift(self.lift.max(high))
     }
 }
 

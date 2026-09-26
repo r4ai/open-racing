@@ -1,7 +1,8 @@
 //! Reference engines and systems: a naturally aspirated 2.0 l inline four with a
-//! plenum intake and a 4-2-1 exhaust, and a 4.0 l flat-plane V8 with individual throttle
-//! bodies. They are starting points for new designs, the machine tool's samples, and what
-//! the tests check the simulator against.
+//! plenum intake and a 4-2-1 exhaust, its 1.8 l high-revving cousin with switched cam lobes,
+//! and a 4.0 l flat-plane V8 with individual throttle bodies. They are starting points
+//! for new designs, the machine tool's samples, and what the tests check the simulator
+//! against.
 
 use crate::spec::*;
 
@@ -62,6 +63,7 @@ pub fn i4() -> EngineSpec {
                 centreline_deg: 108.0,
                 profile: Profile::Polynomial,
             },
+            high_cam: None,
             port: Port {
                 length: 0.10,
                 diameter: vec![(0.0, 0.038), (1.0, 0.040)],
@@ -81,6 +83,7 @@ pub fn i4() -> EngineSpec {
                 centreline_deg: 112.0,
                 profile: Profile::Polynomial,
             },
+            high_cam: None,
             port: Port {
                 length: 0.08,
                 diameter: vec![(0.0, 0.031), (1.0, 0.034)],
@@ -116,6 +119,9 @@ pub fn i4() -> EngineSpec {
             idle_authority: 0.04,
             idle_gain: 0.00005,
             limiter_cut: Cut::Fuel,
+            cam_switch: None,
+            intake_phase: None,
+            exhaust_phase: None,
             overrun_cut_rpm: Some(1500.0),
             pops: None,
             spark_deg: Map2 {
@@ -142,6 +148,73 @@ pub fn i4() -> EngineSpec {
             },
         },
     }
+}
+
+/// 1.8 l inline four with switched cam lobes, in the manner of Honda's B18C: 81 × 87.2 mm,
+/// 11.1:1, a mild low lobe for the street and a long, high one that the rocker pins lock in
+/// above 5200 rpm with the throttle open, to an 8400 rpm limiter.
+pub fn i4_vtec() -> EngineSpec {
+    let mut e = i4();
+    e.bore = 0.081;
+    e.stroke = 0.0872;
+    e.rod = 0.1385;
+    e.compression_ratio = 11.1;
+    e.intake.valves.diameter = 0.033;
+    e.exhaust.valves.diameter = 0.028;
+    e.intake.cam = Cam {
+        lift: 0.0078,
+        duration_deg: 232.0,
+        centreline_deg: 112.0,
+        profile: Profile::Polynomial,
+    };
+    e.intake.high_cam = Some(Cam {
+        lift: 0.0115,
+        duration_deg: 282.0,
+        centreline_deg: 106.0,
+        profile: Profile::Polynomial,
+    });
+    e.exhaust.cam = Cam {
+        lift: 0.0076,
+        duration_deg: 228.0,
+        centreline_deg: 112.0,
+        profile: Profile::Polynomial,
+    };
+    e.exhaust.high_cam = Some(Cam {
+        lift: 0.0105,
+        duration_deg: 270.0,
+        centreline_deg: 108.0,
+        profile: Profile::Polynomial,
+    });
+    e.crank.flywheel_inertia = 0.075;
+    e.ecu.limiter_rpm = 8400.0;
+    e.ecu.cam_switch = Some(CamSwitch {
+        rpm: 5200.0,
+        hysteresis_rpm: 200.0,
+        min_load: 0.3,
+    });
+    e.ecu.spark_deg.rpm.push(8500.0);
+    let last = e.ecu.spark_deg.values.last().unwrap().clone();
+    e.ecu.spark_deg.values.push(last);
+    e
+}
+
+/// The VTEC four's intake: the plenum's, with a bigger throttle and short runners tuned
+/// for its high lobes' speeds.
+pub fn i4_vtec_intake() -> Network {
+    let mut n = i4_intake();
+    for p in &mut n.pipes {
+        if p.name.starts_with("runner") {
+            p.length = 0.20;
+        }
+        if let End::Volume {
+            restriction: Some(Restriction::Throttle { bore, .. }),
+            ..
+        } = &mut p.b
+        {
+            *bore = 0.064;
+        }
+    }
+    n
 }
 
 fn pipe(name: &str, length: f64, d: &[(f64, f64)], wall: f64, a: End, b: End) -> PipeSpec {
@@ -374,6 +447,7 @@ pub fn v8() -> EngineSpec {
                 centreline_deg: 105.0,
                 profile: Profile::Polynomial,
             },
+            high_cam: None,
             port: Port {
                 length: 0.09,
                 diameter: vec![(0.0, 0.044), (1.0, 0.046)],
@@ -393,6 +467,7 @@ pub fn v8() -> EngineSpec {
                 centreline_deg: 108.0,
                 profile: Profile::Polynomial,
             },
+            high_cam: None,
             port: Port {
                 length: 0.08,
                 diameter: vec![(0.0, 0.034), (1.0, 0.038)],
@@ -428,6 +503,9 @@ pub fn v8() -> EngineSpec {
             idle_authority: 0.04,
             idle_gain: 0.00005,
             limiter_cut: Cut::Fuel,
+            cam_switch: None,
+            intake_phase: None,
+            exhaust_phase: None,
             overrun_cut_rpm: Some(2000.0),
             pops: None,
             spark_deg: Map2 {

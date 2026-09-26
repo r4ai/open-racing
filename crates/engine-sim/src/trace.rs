@@ -129,8 +129,8 @@ pub fn cycle(
         t.volume.push(g.volume);
         t.temperature.push(g.t);
         t.burned.push(g.y);
-        t.intake_lift.push(m.intake_valves.lift_at(deg));
-        t.exhaust_lift.push(m.exhaust_valves.lift_at(deg));
+        t.intake_lift.push(m.valve_lift_at(cylinder, true, deg));
+        t.exhaust_lift.push(m.valve_lift_at(cylinder, false, deg));
         t.intake_flow.push(flow_into(iv));
         t.exhaust_flow.push(flow_into(ev));
         for (k, &pi) in chosen.iter().enumerate() {

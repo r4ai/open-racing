@@ -372,6 +372,8 @@ pub struct Cylinder {
     pub last: CycleStats,
     /// Valve lifts at the previous step, for seating.
     lift_prev: [f64; 2],
+    /// Whether its intake and exhaust valves run on the high lobes.
+    pub high: [bool; 2],
     /// Seating velocity of a valve that closed this step, m/s.
     pub seated: f64,
     /// dp/dt of the cylinder this step, Pa/s.
@@ -459,7 +461,16 @@ pub struct CycleStats {
 struct EcuState {
     idle: f64,
     limiter_cut: bool,
+    /// The high lobes asked for, and how long the oil has been changing over.
+    cam_want: bool,
+    cam_timer: f64,
 }
+
+/// Time the oil takes to move the rocker pins once the ECU switches the spool valve, s.
+const CAM_SWITCH_TIME: f64 = 0.08;
+
+/// Fastest a cam phaser turns, crank degrees per second.
+const PHASER_RATE: f64 = 250.0;
 
 /// What the ECU does to the cylinders this step.
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +527,10 @@ pub struct Model {
     peak_pressure: f64,
     /// The speed below which fuel is cut and the engine is taken as stopped, rad/s.
     stall: f64,
+    /// Oil pressure at the rocker pins: valves go over to the high lobes as they shut.
+    pub cam_oil: bool,
+    /// Advance of the intake and exhaust cams, crank degrees.
+    pub phase: [f64; 2],
 }
 
 impl Model {
@@ -564,10 +579,9 @@ impl Model {
             load_torque: 0.0,
             split_steps: 0,
             fault: None,
-            ecu: EcuState {
-                idle: 0.0,
-                limiter_cut: false,
-            },
+            ecu: EcuState::default(),
+            cam_oil: false,
+            phase: [0.0; 2],
             peak_pressure: 50e5,
         };
         for (i, f) in firing.into_iter().enumerate() {
@@ -594,6 +608,7 @@ impl Model {
                 acc: CycleAcc::default(),
                 last: CycleStats::default(),
                 lift_prev: [0.0; 2],
+                high: [false; 2],
                 seated: 0.0,
                 dpdt: 0.0,
             });
@@ -716,6 +731,30 @@ impl Model {
         {
             self.throttle = self.throttle.max(pops.throttle);
         }
+        // Cam lobes: the spool valve follows the ECU, the oil after it.
+        if let Some(sw) = &e.cam_switch {
+            let want = if self.ecu.cam_want {
+                rpm > sw.rpm - sw.hysteresis_rpm && self.throttle >= 0.5 * sw.min_load
+            } else {
+                rpm > sw.rpm && self.throttle >= sw.min_load
+            };
+            self.ecu.cam_want = want;
+            if want != self.cam_oil {
+                self.ecu.cam_timer += self.dt;
+                if self.ecu.cam_timer >= CAM_SWITCH_TIME {
+                    self.cam_oil = want;
+                    self.ecu.cam_timer = 0.0;
+                }
+            } else {
+                self.ecu.cam_timer = 0.0;
+            }
+        }
+        // Cam phasers, as fast as they turn.
+        for (k, map) in [&e.intake_phase, &e.exhaust_phase].into_iter().enumerate() {
+            let target = map.as_ref().map_or(0.0, |m| m.at(rpm, self.throttle));
+            let most = PHASER_RATE * self.dt;
+            self.phase[k] += (target - self.phase[k]).clamp(-most, most);
+        }
         if rpm > e.limiter_rpm {
             self.ecu.limiter_cut = true;
         } else if rpm < e.limiter_rpm - e.limiter_hysteresis_rpm {
@@ -780,13 +819,26 @@ impl Model {
             } => 0.85 * throttle_area(bore, shaft, closed_angle_deg, self.throttle),
             Opening::Valves { cylinder, intake } => {
                 let deg = self.cycle_deg(cylinder);
-                if intake {
-                    self.intake_valves.area_at(deg)
+                let v = if intake {
+                    &self.intake_valves
                 } else {
-                    self.exhaust_valves.area_at(deg)
-                }
+                    &self.exhaust_valves
+                };
+                v.area_at_lift(self.valve_lift_at(cylinder, intake, deg))
             }
         }
+    }
+
+    /// A cylinder's intake (`intake`) or exhaust valve lift at a cycle angle, on the lobe
+    /// it runs on and with the cam's phase, m.
+    pub fn valve_lift_at(&self, cylinder: usize, intake: bool, deg: f64) -> f64 {
+        let k = if intake { 0 } else { 1 };
+        let v = if intake {
+            &self.intake_valves
+        } else {
+            &self.exhaust_valves
+        };
+        v.lift_on(deg, self.cylinders[cylinder].high[k], self.phase[k])
     }
 
     fn advance(&mut self, h: f64, c: &Controls) {
@@ -922,7 +974,7 @@ impl Model {
         let ht = self.spec.heat_transfer.clone();
         let comb = self.spec.combustion.clone();
         let afr = self.chem.afr;
-        let ivc_deg = self.intake_valves.close_deg();
+
         let m_rec = self.spec.crank.reciprocating_mass;
         let mut gas_torque = 0.0;
         for ci in 0..self.cylinders.len() {
@@ -948,6 +1000,9 @@ impl Model {
             };
             // Inlet valve closing: the charge is trapped, and (port injection) the
             // fresh part of it is air and fuel at the ECU's λ.
+            let ivc_deg = self
+                .intake_valves
+                .close_deg_on(self.cylinders[ci].high[0], self.phase[0]);
             if crossed(ivc_deg) {
                 let gi = self.cylinders[ci].gas;
                 let l = &mut self.lumps[gi];
@@ -1037,8 +1092,8 @@ impl Model {
                 let l = &self.lumps[self.cylinders[ci].gas];
                 (l.p, l.t)
             };
-            let li = self.intake_valves.lift_at(deg1);
-            let le = self.exhaust_valves.lift_at(deg1);
+            let li = self.valve_lift_at(ci, true, deg1);
+            let le = self.valve_lift_at(ci, false, deg1);
             let phase = if burning {
                 Phase::Combustion
             } else if li > 0.0 || le > 0.0 {
@@ -1080,13 +1135,28 @@ impl Model {
             let ddx = piston.ddx * omega * omega;
             let t_gas = (p1 - self.ambient.pressure) * piston.dv - m_rec * ddx * piston.dx;
             gas_torque += t_gas;
-            // Valve seating.
+            // Valve seating. The rocker pins can move only with both lobes' rockers on
+            // their base circles.
+            let shut = [true, false].map(|intake| {
+                let v = if intake {
+                    &self.intake_valves
+                } else {
+                    &self.exhaust_valves
+                };
+                let k = if intake { 0 } else { 1 };
+                [false, true]
+                    .iter()
+                    .all(|&hi| v.lift_on(deg1, hi, self.phase[k]) == 0.0)
+            });
             let cyl = &mut self.cylinders[ci];
             for (k, lift) in [li, le].into_iter().enumerate() {
                 if lift == 0.0 && cyl.lift_prev[k] > 0.0 {
                     cyl.seated = cyl.seated.max(cyl.lift_prev[k] / h);
                 }
                 cyl.lift_prev[k] = lift;
+                if shut[k] {
+                    cyl.high[k] = self.cam_oil;
+                }
             }
             cyl.dpdt += (p1 - p0) / h;
             // Cycle bookkeeping.
@@ -1145,5 +1215,50 @@ impl Model {
         }
         self.angle = new_angle.rem_euclid(4.0 * PI);
         self.time += h;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Build, samples};
+
+    /// Above the switch speed the valves go over to the high lobes a cylinder at a time,
+    /// each while its valves are shut, and the engine breathes more for it.
+    #[test]
+    fn cam_lobes_switch_on_the_base_circle() {
+        let e = samples::i4_vtec();
+        let run = |switch: f64| {
+            let mut e = e.clone();
+            e.ecu.cam_switch.as_mut().unwrap().rpm = switch;
+            let (mut m, _) = Build::new(&e)
+                .system("intake", &samples::i4_vtec_intake())
+                .system("exhaust", &samples::i4_exhaust())
+                .quality(Quality::Draft)
+                .build()
+                .unwrap();
+            m.set_crank(0.0, 7000.0);
+            let c = Controls {
+                pedal: 1.0,
+                load: Load::Speed(7000.0),
+                ..Default::default()
+            };
+            for _ in 0..(0.4 / m.dt) as usize {
+                let before: Vec<[bool; 2]> = m.cylinders.iter().map(|c| c.high).collect();
+                m.step(&c);
+                for (ci, cyl) in m.cylinders.iter().enumerate() {
+                    for k in 0..2 {
+                        if cyl.high[k] != before[ci][k] {
+                            let deg = m.cycle_deg(ci);
+                            assert_eq!(m.valve_lift_at(ci, k == 0, deg), 0.0);
+                        }
+                    }
+                }
+            }
+            assert!(m.cylinders.iter().all(|c| c.high == [switch == 0.0; 2]));
+            m.cylinders[0].last.trapped
+        };
+        let (low, high) = (run(1e9), run(0.0));
+        assert!(high > 1.1 * low, "{low} {high}");
     }
 }
