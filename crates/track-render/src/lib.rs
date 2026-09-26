@@ -17,8 +17,7 @@ use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, Face, ShaderType, TexelCopyBufferLayout, TextureDimension,
-    TextureFormat,
+    AsBindGroup, Extent3d, Face, ShaderType, TexelCopyBufferLayout, TextureDimension, TextureFormat,
 };
 use bevy::render::renderer::RenderQueue;
 use bevy::render::texture::GpuImage;

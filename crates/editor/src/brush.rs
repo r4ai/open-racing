@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use bevy_egui::egui;
 use glam::{DVec2, DVec3};
-use open_racing_track_project::stamp::{Stamp, StampShape};
 use open_racing_track_project::ops::{Op, StrokeTarget};
 use open_racing_track_project::project::{
     Brush, GroundLayer, HARDNESS, LayerStroke, MAX_LAYERS, Stroke,
 };
+use open_racing_track_project::stamp::{Stamp, StampShape};
 use open_racing_track_project::terrain::{Grid, PaintMask, TerrainBuild};
 use open_racing_track_render::to_bevy;
 

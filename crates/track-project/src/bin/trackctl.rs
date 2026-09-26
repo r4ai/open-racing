@@ -351,8 +351,8 @@ fn run(cli: Cli) -> Result<(), Error> {
                 hi.y - lo.y,
                 hi.z - lo.z
             );
-            let kind = open_racing_track_project::project::ScatterModel::new(model.clone(), 1.0)
-                .kind();
+            let kind =
+                open_racing_track_project::project::ScatterModel::new(model.clone(), 1.0).kind();
             println!("as a scatter's model: {kind:?} unless its kind says otherwise");
             let plant = open_racing_track_project::scatter::varies(kind, &m);
             for (i, mat) in m.look.materials.iter().enumerate() {
@@ -369,7 +369,11 @@ fn run(cli: Cli) -> Result<(), Error> {
                 println!(
                     "material {i}: {alpha}{}{}{}",
                     if mat.double_sided { ", both sides" } else { "" },
-                    if mat.base_color_texture.is_some() { ", textured" } else { "" },
+                    if mat.base_color_texture.is_some() {
+                        ", textured"
+                    } else {
+                        ""
+                    },
                     match (leaves, plant) {
                         (true, Some([_, p])) => format!(
                             ", leaves: take each copy's colour, flutter {:.3} m, sway {:.4} m/m²",
@@ -389,7 +393,12 @@ fn run(cli: Cli) -> Result<(), Error> {
             let save = |name: String, image: &open_racing_track::texture::Image| {
                 let path = out.join(name);
                 std::fs::write(&path, rgba_png(image)).map_err(|e| Error::Io(path.clone(), e))?;
-                println!("wrote {} ({} × {})", path.display(), image.width, image.height);
+                println!(
+                    "wrote {} ({} × {})",
+                    path.display(),
+                    image.width,
+                    image.height
+                );
                 Ok::<_, Error>(())
             };
             save(
@@ -792,7 +801,8 @@ fn print_summary(s: &inspect::Summary) {
         e.exposure,
         e.haze,
         e.season
-            .map_or(String::new(), |s| format!(", plants in {s:?}").to_lowercase())
+            .map_or(String::new(), |s| format!(", plants in {s:?}")
+                .to_lowercase())
     );
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);

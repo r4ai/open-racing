@@ -132,7 +132,10 @@ mod tests {
                 angle: 0.3,
             };
             let (full, none) = shares(&s);
-            assert!(full > 0.05 && none > 0.2, "{shape:?}: {full} full, {none} none");
+            assert!(
+                full > 0.05 && none > 0.2,
+                "{shape:?}: {full} full, {none} none"
+            );
             assert_eq!(s.at(DVec2::new(3.3, -7.1)), s.at(DVec2::new(3.3, -7.1)));
         }
         // Streaks run along their angle: the stamp changes slower along it than across.
