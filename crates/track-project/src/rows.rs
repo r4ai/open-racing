@@ -105,6 +105,90 @@ pub fn all(project: &crate::Project, sampled: &[&Sampled]) -> Vec<Prop> {
         .collect()
 }
 
+/// The row that puts a garage (model `model`) behind each pit box, `offset` m beyond
+/// the pit lane's edge on the boxes' side.
+pub fn garages(
+    project: &crate::Project,
+    model: &std::path::Path,
+    offset: f64,
+) -> Result<crate::ops::Op, crate::Error> {
+    let pit = project
+        .markers
+        .pit
+        .as_ref()
+        .ok_or_else(|| crate::Error::Invalid("there is no pit lane: lay one first".into()))?;
+    if pit.boxes.is_empty() {
+        return Err(crate::Error::Invalid("the pit lane has no boxes".into()));
+    }
+    Ok(crate::ops::Op::PutRow {
+        road: pit.road.clone(),
+        row: PropRow {
+            name: "garages".into(),
+            model: model.to_path_buf(),
+            side: pit.box_side,
+            offset,
+            spacing: 10.0,
+            ranges: vec![],
+            at: pit.boxes.clone(),
+            yaw: 0.0,
+            scale: 1.0,
+            jitter: crate::project::Jitter::default(),
+            drape: true,
+            collide: true,
+        },
+    })
+}
+
+/// Rows of distance boards before each corner of road `road` turning at least
+/// `least` radians: one board `distances` metres (100, 200, 300…) before where the
+/// corner starts, on its outside, `offset` m beyond the road's edge. Each corner's
+/// boards are the row "T3 boards" (for corner 3), replacing those laid before.
+pub fn boards(
+    project: &crate::Project,
+    road: &str,
+    model: &std::path::Path,
+    distances: &[f64],
+    least: f64,
+    offset: f64,
+) -> Result<Vec<crate::ops::Op>, crate::Error> {
+    let i = project
+        .road_index(road)
+        .ok_or_else(|| crate::Error::Invalid(format!("no road named \"{road}\"")))?;
+    let (smp, corners) = crate::corners::of_road(project, i);
+    let mut ops = Vec::new();
+    for c in corners.iter().filter(|c| c.angle.abs() >= least) {
+        let at: Vec<f64> = distances
+            .iter()
+            .map(|d| {
+                let s = c.entry - d;
+                if smp.closed {
+                    smp.u_at(s.rem_euclid(smp.length))
+                } else {
+                    smp.u_at(s.max(0.0))
+                }
+            })
+            .collect();
+        ops.push(crate::ops::Op::PutRow {
+            road: road.to_string(),
+            row: PropRow {
+                name: format!("T{} boards", c.number),
+                model: model.to_path_buf(),
+                side: c.outside(),
+                offset,
+                spacing: 100.0,
+                ranges: vec![],
+                at,
+                yaw: 0.0,
+                scale: 1.0,
+                jitter: crate::project::Jitter::default(),
+                drape: true,
+                collide: false,
+            },
+        });
+    }
+    Ok(ops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,88 +278,4 @@ mod tests {
         );
         assert_eq!(at.len(), 2);
     }
-}
-
-/// The row that puts a garage (model `model`) behind each pit box, `offset` m beyond
-/// the pit lane's edge on the boxes' side.
-pub fn garages(
-    project: &crate::Project,
-    model: &std::path::Path,
-    offset: f64,
-) -> Result<crate::ops::Op, crate::Error> {
-    let pit = project
-        .markers
-        .pit
-        .as_ref()
-        .ok_or_else(|| crate::Error::Invalid("there is no pit lane: lay one first".into()))?;
-    if pit.boxes.is_empty() {
-        return Err(crate::Error::Invalid("the pit lane has no boxes".into()));
-    }
-    Ok(crate::ops::Op::PutRow {
-        road: pit.road.clone(),
-        row: PropRow {
-            name: "garages".into(),
-            model: model.to_path_buf(),
-            side: pit.box_side,
-            offset,
-            spacing: 10.0,
-            ranges: vec![],
-            at: pit.boxes.clone(),
-            yaw: 0.0,
-            scale: 1.0,
-            jitter: crate::project::Jitter::default(),
-            drape: true,
-            collide: true,
-        },
-    })
-}
-
-/// Rows of distance boards before each corner of road `road` turning at least
-/// `least` radians: one board `distances` metres (100, 200, 300…) before where the
-/// corner starts, on its outside, `offset` m beyond the road's edge. Each corner's
-/// boards are the row "T3 boards" (for corner 3), replacing those laid before.
-pub fn boards(
-    project: &crate::Project,
-    road: &str,
-    model: &std::path::Path,
-    distances: &[f64],
-    least: f64,
-    offset: f64,
-) -> Result<Vec<crate::ops::Op>, crate::Error> {
-    let i = project
-        .road_index(road)
-        .ok_or_else(|| crate::Error::Invalid(format!("no road named \"{road}\"")))?;
-    let (smp, corners) = crate::corners::of_road(project, i);
-    let mut ops = Vec::new();
-    for c in corners.iter().filter(|c| c.angle.abs() >= least) {
-        let at: Vec<f64> = distances
-            .iter()
-            .map(|d| {
-                let s = c.entry - d;
-                if smp.closed {
-                    smp.u_at(s.rem_euclid(smp.length))
-                } else {
-                    smp.u_at(s.max(0.0))
-                }
-            })
-            .collect();
-        ops.push(crate::ops::Op::PutRow {
-            road: road.to_string(),
-            row: PropRow {
-                name: format!("T{} boards", c.number),
-                model: model.to_path_buf(),
-                side: c.outside(),
-                offset,
-                spacing: 100.0,
-                ranges: vec![],
-                at,
-                yaw: 0.0,
-                scale: 1.0,
-                jitter: crate::project::Jitter::default(),
-                drape: true,
-                collide: false,
-            },
-        });
-    }
-    Ok(ops)
 }

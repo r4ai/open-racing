@@ -447,6 +447,53 @@ pub fn select_similar(editor: &mut Editor, by: crate::commands::Similar) {
     editor.status = format!("{} more selected", found.len());
 }
 
+/// The new names batch renaming gives `items`: `find` replaced by `replace` in each,
+/// or with nothing to find, `replace` numbered ("tree 1", "tree 2"…). Unchanged names
+/// are left out.
+pub fn batch_names(
+    project: &Project,
+    items: &[Item],
+    find: &str,
+    replace: &str,
+) -> Vec<(Item, String)> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(k, &item)| {
+            let name = item_name(project, item)?;
+            let to = if find.is_empty() {
+                if replace.trim().is_empty() {
+                    return None;
+                }
+                format!("{} {}", replace.trim(), k + 1)
+            } else {
+                name.replace(find, replace)
+            };
+            (to != name && !to.trim().is_empty()).then(|| (item, to.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Renames several items at once, as one step.
+pub fn batch_rename(editor: &mut Editor, items: &[Item], find: &str, replace: &str) {
+    let p = &editor.project;
+    let ops: Vec<Op> = batch_names(p, items, find, replace)
+        .into_iter()
+        .filter_map(|(item, to)| {
+            let name = item_name(p, item)?.to_string();
+            Some(match item {
+                Item::Road(_) => Op::RenameRoad { road: name, to },
+                Item::Spline(_) => Op::RenameSpline { name, to },
+                Item::Prop(_) => Op::RenameProp { name, to },
+            })
+        })
+        .collect();
+    let n = ops.len();
+    if n > 0 && editor.apply(ops, None) {
+        editor.status = format!("{n} renamed");
+    }
+}
+
 /// Makes the selected road the circuit.
 pub fn set_main(editor: &mut Editor) {
     if let Some(road) = editor.road_name() {
@@ -716,6 +763,28 @@ mod tests {
         assert_eq!(e.selection.others, vec![Item::Spline(1)]);
         select_similar(&mut e, crate::commands::Similar::Kind);
         assert_eq!(e.selection.items().len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn batch_rename_replaces_or_numbers() {
+        let (mut e, dir) = editor("batch-rename");
+        for y in [0.0, 10.0] {
+            let spline = crate::presets::named(&e.project, "kerb")
+                .unwrap()
+                .spline(
+                    &e.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(9.0, y, 0.0)],
+                )
+                .unwrap();
+            assert!(e.apply(vec![Op::PutSpline { spline }], None));
+        }
+        let items = [Item::Spline(0), Item::Spline(1)];
+        batch_rename(&mut e, &items, "", "T4 sausage");
+        let names: Vec<&str> = e.project.splines.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["T4 sausage 1", "T4 sausage 2"]);
+        batch_rename(&mut e, &items, "T4", "T5");
+        assert_eq!(e.project.splines[1].name, "T5 sausage 2");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

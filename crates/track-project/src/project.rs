@@ -1541,7 +1541,8 @@ impl Project {
                     ));
                 }
                 if !(row.spacing >= 0.5 || !row.at.is_empty())
-                    || !(row.scale > 0.0)
+                    || row.scale.is_nan()
+                    || row.scale <= 0.0
                     || !row.offset.is_finite()
                     || !row.yaw.is_finite()
                 {

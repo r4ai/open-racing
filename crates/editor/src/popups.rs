@@ -22,6 +22,7 @@ pub fn show(ctx: &egui::Context, c: &mut Ctx) {
         Popup::Pie { at } => pie(ctx, c, at),
         Popup::Choose { at, of } => choose(ctx, c, at, of),
         Popup::Collection { at, text } => collection(ctx, c, at, text),
+        Popup::BatchRename { at, find, replace } => batch_rename(ctx, c, at, find, replace),
     };
     c.shell.popup = keep;
     if let Some(cmd) = chosen {
@@ -145,6 +146,53 @@ fn rename(
         return (None, None);
     }
     (Some(Popup::Rename { at, item, text }), None)
+}
+
+/// Batch rename (Ctrl F2), as Blender's: what to find in the selected items' names and
+/// what to put instead; with nothing to find, the new name numbered for each.
+fn batch_rename(
+    ctx: &egui::Context,
+    c: &mut Ctx,
+    at: Vec2,
+    mut find: String,
+    mut replace: String,
+) -> (Option<Popup>, Option<Cmd>) {
+    let items = c.editor.selection.items();
+    let mut done = false;
+    let (_, outside) = popup_area(
+        ctx,
+        "batch rename",
+        pos(at) - egui::vec2(20.0, 12.0),
+        |ui| {
+            ui.set_min_width(260.0);
+            ui.strong(format!("Rename {} Selected", items.len()));
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Find");
+                ui.add(egui::TextEdit::singleline(&mut find).hint_text("nothing: set the name"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Replace");
+                ui.add(egui::TextEdit::singleline(&mut replace));
+            });
+            let preview: Vec<String> =
+                crate::edit::batch_names(&c.editor.project, &items, &find, &replace)
+                    .into_iter()
+                    .take(4)
+                    .map(|(_, to)| to)
+                    .collect();
+            ui.weak(format!("{} …", preview.join(", ")));
+            done = ui.button("Rename").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+        },
+    );
+    if done {
+        crate::edit::batch_rename(c.editor, &items, &find, &replace);
+        return (None, None);
+    }
+    if outside || escape(ctx) {
+        return (None, None);
+    }
+    (Some(Popup::BatchRename { at, find, replace }), None)
 }
 
 /// Move to Collection (M): an existing collection, a new one typed, or none.

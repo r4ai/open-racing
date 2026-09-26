@@ -143,12 +143,31 @@ pub struct Shown {
     pub locked_groups: HashSet<String>,
 }
 
+/// A step of the undo history: the project to go back (or on) to, and what the step
+/// did, for the history's list.
+struct Step {
+    project: Project,
+    what: String,
+}
+
+/// What a list of operations does, in a few words.
+fn describe(ops: &[Op]) -> String {
+    let Some(first) = ops.first().map(|o| o.kind()) else {
+        return "Edit".into();
+    };
+    match ops.len() {
+        1 => first.to_string(),
+        n if ops.iter().all(|o| o.kind() == first) => format!("{first} ×{n}"),
+        n => format!("{first} and {} more", n - 1),
+    }
+}
+
 #[derive(Resource)]
 pub struct Editor {
     pub dir: PathBuf,
     pub project: Project,
-    undo: VecDeque<Project>,
-    redo: Vec<Project>,
+    undo: VecDeque<Step>,
+    redo: Vec<Step>,
     /// Bumped on every change; the preview rebuilds when it moves.
     pub revision: u64,
     /// Modification time of `project.ron` when last written or read here.
@@ -218,8 +237,11 @@ impl Editor {
         }
     }
 
-    fn push_undo(&mut self, before: Project) {
-        self.undo.push_back(before);
+    fn push_undo(&mut self, before: Project, what: &str) {
+        self.undo.push_back(Step {
+            project: before,
+            what: what.to_string(),
+        });
         if self.undo.len() > HISTORY {
             self.undo.pop_front();
         }
@@ -241,7 +263,12 @@ impl Editor {
             return false;
         }
         if !merge && !self.dragging {
-            self.push_undo(before);
+            self.push_undo(before, &describe(&ops));
+        } else if self.dragging
+            && let Some(step) = self.undo.back_mut()
+        {
+            // A drag is named after what it does.
+            step.what = describe(&ops);
         }
         self.last_edit = key.map(|k| (k.to_string(), now));
         self.revision += 1;
@@ -271,7 +298,7 @@ impl Editor {
     /// end.
     pub fn begin_drag(&mut self) {
         if !self.dragging {
-            self.push_undo(self.project.clone());
+            self.push_undo(self.project.clone(), "Drag");
             self.last_edit = None;
             self.dragging = true;
         }
@@ -288,8 +315,8 @@ impl Editor {
     pub fn cancel_drag(&mut self) {
         if self.dragging {
             self.dragging = false;
-            if let Some(p) = self.undo.pop_back() {
-                self.project = p;
+            if let Some(step) = self.undo.pop_back() {
+                self.project = step.project;
                 self.revision += 1;
                 self.clamp_selection();
             }
@@ -301,9 +328,15 @@ impl Editor {
         if !self.can_undo() {
             return;
         }
-        if let Some(p) = self.undo.pop_back() {
-            self.redo.push(std::mem::replace(&mut self.project, p));
-            self.changed("undone");
+        if let Some(step) = self.undo.pop_back() {
+            let now = std::mem::replace(&mut self.project, step.project);
+            self.status = format!("undone: {}", step.what);
+            self.redo.push(Step {
+                project: now,
+                what: step.what,
+            });
+            let status = std::mem::take(&mut self.status);
+            self.changed(&status);
         }
     }
 
@@ -311,9 +344,33 @@ impl Editor {
         if !self.can_redo() {
             return;
         }
-        if let Some(p) = self.redo.pop() {
-            self.undo.push_back(std::mem::replace(&mut self.project, p));
-            self.changed("redone");
+        if let Some(step) = self.redo.pop() {
+            let now = std::mem::replace(&mut self.project, step.project);
+            let status = format!("redone: {}", step.what);
+            self.undo.push_back(Step {
+                project: now,
+                what: step.what,
+            });
+            self.changed(&status);
+        }
+    }
+
+    /// What each step that undoes did, the oldest first, and each that redoes, the
+    /// next first.
+    pub fn history(&self) -> (Vec<&str>, Vec<&str>) {
+        (
+            self.undo.iter().map(|s| s.what.as_str()).collect(),
+            self.redo.iter().rev().map(|s| s.what.as_str()).collect(),
+        )
+    }
+
+    /// Undoes or redoes until `steps` steps are left to undo.
+    pub fn go_to(&mut self, steps: usize) {
+        while self.undo.len() > steps && self.can_undo() {
+            self.undo();
+        }
+        while self.undo.len() < steps && self.can_redo() {
+            self.redo();
         }
     }
 
@@ -381,7 +438,7 @@ impl Editor {
         match Project::load(&self.dir) {
             Ok(p) if p != self.project => {
                 let before = std::mem::replace(&mut self.project, p);
-                self.push_undo(before);
+                self.push_undo(before, "Reload from disk");
                 self.changed("reloaded: project.ron changed on disk");
             }
             Ok(_) => {}
@@ -641,7 +698,7 @@ impl Editor {
         match project {
             Ok(p) => {
                 let before = std::mem::replace(&mut self.project, p);
-                self.push_undo(before);
+                self.push_undo(before, "Restore backup");
                 self.changed("restored a backup (Ctrl Z undoes it)");
             }
             Err(e) => self.status = format!("{}: {e}", path.display()),
@@ -810,6 +867,39 @@ mod tests {
         editor.shown.hidden_groups.clear();
         editor.shown.locked_groups.insert("T1 kerbs".into());
         assert!(editor.visible(Item::Spline(0)) && !editor.pickable(Item::Spline(0)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_history_names_steps_and_goes_back_and_on_to_any() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let rename = |to: &str| {
+            vec![Op::SetName {
+                name: to.to_string(),
+            }]
+        };
+        assert!(editor.apply(rename("a"), None));
+        let moves = (0..3)
+            .map(|i| Op::MoveNode {
+                line: "circuit".into(),
+                index: i,
+                pos: DVec3::new(i as f64, 1.0, 0.0),
+            })
+            .collect();
+        assert!(editor.apply(moves, None));
+        assert!(editor.apply(rename("b"), None));
+        assert_eq!(
+            editor.history().0,
+            vec!["SetName", "MoveNode ×3", "SetName"]
+        );
+        editor.go_to(1);
+        assert_eq!(editor.project.name, "a");
+        assert_eq!(editor.history().1, vec!["MoveNode ×3", "SetName"]);
+        editor.go_to(3);
+        assert_eq!(editor.project.name, "b");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

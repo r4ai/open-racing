@@ -33,6 +33,8 @@ pub enum Cmd {
     Redo,
     Search,
     Rename,
+    /// Ctrl F2.
+    BatchRename,
     Bake,
     BakeDrive,
     Quit,
@@ -123,6 +125,7 @@ impl Cmd {
             Undo,
             Redo,
             Rename,
+            BatchRename,
             Bake,
             BakeDrive,
             Quit,
@@ -192,6 +195,7 @@ impl Cmd {
             Redo => "Redo".into(),
             Search => "Search…".into(),
             Rename => "Rename Active Item…".into(),
+            BatchRename => "Batch Rename…".into(),
             Bake => "Bake".into(),
             BakeDrive => "Bake & Drive".into(),
             Quit => "Quit".into(),
@@ -265,8 +269,8 @@ impl Cmd {
             | SimilarMenu | SelectSimilar(_) => "Select",
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
             | HandleMenu | ToggleClosed | Duplicate | MoveToCollection | Copy | MirrorMenu
-            | Mirror(_) | Split | Join | Reverse | SetMain | Rename | SmoothHeights
-            | SmoothShape | Flatten | EvenGrade => "Edit",
+            | Mirror(_) | Split | Join | Reverse | SetMain | Rename | BatchRename
+            | SmoothHeights | SmoothShape | Flatten | EvenGrade => "Edit",
             View(_) | ToggleOrtho | Walk | Replay | FrameSelected | FrameAll | ViewPie
             | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap | ToggleProportional
             | LocalView | Hide | HideOthers | Reveal => "View",
@@ -286,6 +290,7 @@ impl Cmd {
             Redo => "Ctrl Shift Z",
             Search => "F3",
             Rename => "F2",
+            BatchRename => "Ctrl F2",
             Quit => "Ctrl Q",
             View(v) => v.shortcut(),
             ToggleOrtho => "Numpad 5",
@@ -337,7 +342,9 @@ impl Cmd {
             Redo => e.can_redo(),
             Bake | BakeDrive => !c.jobs.running(),
             Replay => !c.jobs.lap.is_empty(),
-            Rename | Grab | Rotate | Scale | Delete | Hide | HideOthers => sel.item.is_some(),
+            Rename | BatchRename | Grab | Rotate | Scale | Delete | Hide | HideOthers => {
+                sel.item.is_some()
+            }
             LocalView => sel.item.is_some() || e.shown.local.is_some(),
             Reveal => !e.shown.hidden.is_empty(),
             FrameSelected => sel.item.is_some(),
@@ -410,6 +417,13 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         Undo => c.editor.undo(),
         Redo => c.editor.redo(),
         Search => c.shell.popup = Some(Popup::search(at)),
+        BatchRename => {
+            c.shell.popup = Some(Popup::BatchRename {
+                at,
+                find: String::new(),
+                replace: String::new(),
+            })
+        }
         Rename => {
             if let Some(item) = c.editor.selection.item {
                 let text = edit::item_name(&c.editor.project, item)
@@ -598,6 +612,7 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
     }
     run_if(Cmd::Search, Key::F3, none, c);
     run_if(Cmd::Rename, Key::F2, none, c);
+    run_if(Cmd::BatchRename, Key::F2, Modifiers::COMMAND, c);
     run_if(Cmd::ToggleMaximize, Key::Space, Modifiers::COMMAND, c);
     if c.tool.draw.is_some() {
         return;

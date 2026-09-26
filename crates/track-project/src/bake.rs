@@ -72,12 +72,7 @@ pub struct BuildCache {
     pub dir: Option<PathBuf>,
     /// The elevation data read in, with the file's time and the place on the Earth it
     /// was read about.
-    heights: Option<(
-        PathBuf,
-        Option<SystemTime>,
-        Option<crate::geo::Geo>,
-        Arc<crate::dem::Heights>,
-    )>,
+    heights: Option<HeightsKey>,
     /// The surfaces and materials the roads were built with.
     lists: Option<(Vec<crate::project::NamedSurface>, Vec<MaterialDef>)>,
     /// Each road as it was, and its build before overlaps were resolved.
@@ -86,6 +81,15 @@ pub struct BuildCache {
     /// the terrain.
     terrain: Option<TerrainKey>,
 }
+
+/// Elevation data read in: its file, the file's time, the place on the Earth it was read
+/// about, and the heights.
+type HeightsKey = (
+    PathBuf,
+    Option<SystemTime>,
+    Option<crate::geo::Geo>,
+    Arc<crate::dem::Heights>,
+);
 
 type TerrainKey = (
     crate::project::Terrain,

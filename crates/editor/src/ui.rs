@@ -84,6 +84,13 @@ pub enum Popup {
     Handles { at: Vec2 },
     /// `: the view pie.
     Pie { at: Vec2 },
+    /// Ctrl F2: renames the selected items, finding and replacing in their names, or
+    /// giving them all one name numbered.
+    BatchRename {
+        at: Vec2,
+        find: String,
+        replace: String,
+    },
     /// M: the collection to move the selected splines and props to.
     Collection { at: Vec2, text: String },
     /// A few commands to choose from (Shift G, Ctrl M).
@@ -548,9 +555,11 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
         ui.menu_button("Edit", |ui| {
             entry(ui, c, Cmd::Undo);
             entry(ui, c, Cmd::Redo);
+            ui.menu_button("Undo History", |ui| undo_history(ui, c));
             ui.separator();
             entry(ui, c, Cmd::Search);
             entry(ui, c, Cmd::Rename);
+            entry(ui, c, Cmd::BatchRename);
             ui.separator();
             entry(ui, c, Cmd::Duplicate);
             entry(ui, c, Cmd::Copy);
@@ -607,6 +616,53 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
             }
         });
     });
+}
+
+/// The steps that undo, newest at the top, and those that redo; a click goes back (or
+/// on) to just after that step.
+fn undo_history(ui: &mut egui::Ui, c: &mut Ctx) {
+    ui.set_min_width(220.0);
+    let (done, undone) = c.editor.history();
+    let (done, undone): (Vec<String>, Vec<String>) = (
+        done.into_iter().map(str::to_string).collect(),
+        undone.into_iter().map(str::to_string).collect(),
+    );
+    let mut go = None;
+    egui::ScrollArea::vertical()
+        .max_height(420.0)
+        .show(ui, |ui| {
+            for (i, what) in undone.iter().enumerate().rev() {
+                if ui
+                    .button(egui::RichText::new(what).weak())
+                    .on_hover_text("Redo up to here")
+                    .clicked()
+                {
+                    go = Some(done.len() + i + 1);
+                }
+            }
+            let now = egui::RichText::new(format!(
+                "▶ {}",
+                done.last().map_or("Original", String::as_str)
+            ))
+            .strong();
+            ui.label(now);
+            for (i, what) in done.iter().enumerate().rev().skip(1) {
+                if ui
+                    .button(what)
+                    .on_hover_text("Go back to just after this")
+                    .clicked()
+                {
+                    go = Some(i + 1);
+                }
+            }
+            if !done.is_empty() && ui.button("Original").clicked() {
+                go = Some(0);
+            }
+        });
+    if let Some(steps) = go {
+        c.editor.go_to(steps);
+        ui.close();
+    }
 }
 
 /// The problems the last build found; clicking one with a place looks at it.

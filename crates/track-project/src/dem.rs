@@ -203,7 +203,9 @@ fn geotiff(bytes: &[u8], geo: Option<Geo>) -> Result<Heights, String> {
         .unwrap_or_default();
     let key = |id: u16| {
         keys.get(4..)?
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find(|k| k[0] == id && k[1] == 0)
             .map(|k| k[3])
     };
