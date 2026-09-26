@@ -58,10 +58,8 @@ pub fn input(
         return;
     }
     sync_mode(editor, tool);
-    let pointer_free = !wants.wants_any_pointer_input()
-        && !rect.ui_busy
-        && tool.menu.is_none()
-        && !tool.blocked;
+    let pointer_free =
+        !wants.wants_any_pointer_input() && !rect.ui_busy && tool.menu.is_none() && !tool.blocked;
     // A panel's edge dragged from beside the view: whatever the press began here is the
     // panel's, not a box to select with.
     if rect.ui_busy && tool.modal.is_none() {
@@ -210,9 +208,17 @@ pub fn input(
                         m.axis = axis;
                     }
                 }
-                Some(Hit::Body(item @ Item::Prop(_))) => {
+                // Object mode, as Blender's tweak: dragging an item moves it, with
+                // the rest of the selection when it is part of it.
+                Some(Hit::Body(item))
+                    if !shift && (!tool.edit || matches!(item, Item::Prop(_))) =>
+                {
                     tool.press = None;
-                    editor.selection.select(item);
+                    if !editor.selection.has(item) {
+                        editor.selection.select(item);
+                    }
+                    editor.selection.nodes.clear();
+                    tool.edit = false;
                     start_modal(editor, tool, &built, Mode::Grab, None, from, true);
                 }
                 Some(
@@ -222,6 +228,7 @@ pub fn input(
                     | Hit::Range(_)
                     | Hit::Reach(_)
                     | Hit::Edge(..)
+                    | Hit::Line(..)
                     | Hit::Landform(..)),
                 ) => {
                     tool.press = None;
@@ -367,6 +374,7 @@ pub(super) fn click(
             | Hit::Range(_)
             | Hit::Reach(_)
             | Hit::Edge(..)
+            | Hit::Line(..)
             | Hit::Gizmo(_),
         ) => {}
         // Empty space: in edit mode no nodes, in object mode nothing at all.

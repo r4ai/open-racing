@@ -22,10 +22,85 @@ pub(super) fn parts(road: &Road) -> impl Iterator<Item = (Part, &[Range])> {
         .enumerate()
         .filter(|(_, w)| w.at.is_empty())
         .map(|(i, w)| (Part::Row(i), w.ranges.as_slice()));
+    let lines = road
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (Part::Line(i), l.ranges.as_slice()));
     strips
         .chain(barriers)
         .chain(rows)
+        .chain(lines)
         .filter(|(_, r)| !r.is_empty())
+}
+
+/// A copy of one of a road's parts, to change and put back with one operation.
+pub enum PartValue {
+    Strip(Side, Strip),
+    Barrier(Barrier),
+    Row(PropRow),
+    Line(PaintLine),
+}
+
+impl PartValue {
+    /// The part, if the road still has it (a menu or a drag may outlive it).
+    pub fn of(road: &Road, part: Part) -> Option<Self> {
+        Some(match part {
+            Part::Strip(side, i) => Self::Strip(side, road.strips(side).get(i)?.clone()),
+            Part::Barrier(i) => Self::Barrier(road.barriers.get(i)?.clone()),
+            Part::Row(i) => Self::Row(road.rows.get(i)?.clone()),
+            Part::Line(i) => Self::Line(road.lines.get(i)?.clone()),
+        })
+    }
+
+    pub fn ranges_mut(&mut self) -> &mut Vec<Range> {
+        match self {
+            Self::Strip(_, s) => &mut s.ranges,
+            Self::Barrier(b) => &mut b.ranges,
+            Self::Row(r) => &mut r.ranges,
+            Self::Line(l) => &mut l.ranges,
+        }
+    }
+
+    /// The corner it was laid round, for the parts that can be.
+    pub fn corner_mut(&mut self) -> Option<&mut Option<Anchor>> {
+        match self {
+            Self::Strip(_, s) => Some(&mut s.corner),
+            Self::Barrier(b) => Some(&mut b.corner),
+            Self::Row(_) | Self::Line(_) => None,
+        }
+    }
+
+    /// The operation that puts it on `road` as it now is.
+    pub fn put(self, road: &str) -> Op {
+        let road = road.to_string();
+        match self {
+            Self::Strip(side, strip) => Op::PutStrip {
+                road,
+                side,
+                strip,
+                at: None,
+            },
+            Self::Barrier(barrier) => Op::PutBarrier { road, barrier },
+            Self::Row(row) => Op::PutRow { road, row },
+            Self::Line(line) => Op::PutLine { road, line },
+        }
+    }
+
+    /// The operation that takes it off `road`.
+    pub fn remove(self, road: &str) -> Op {
+        let road = road.to_string();
+        match self {
+            Self::Strip(side, s) => Op::RemoveStrip {
+                road,
+                side,
+                name: s.name,
+            },
+            Self::Barrier(b) => Op::RemoveBarrier { road, name: b.name },
+            Self::Row(r) => Op::RemoveRow { road, name: r.name },
+            Self::Line(l) => Op::RemoveLine { road, name: l.name },
+        }
+    }
 }
 
 /// Width of a side's strips inside strip `i` at frame `f`: each as wide as it is there,
@@ -60,6 +135,7 @@ pub(super) fn part_offset(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> 
             let w = &road.rows[i];
             w.side.sign() * (edge_of(f, w.side) + w.offset)
         }
+        Part::Line(i) => road.lines[i].offset,
     }
 }
 
@@ -71,7 +147,7 @@ pub(super) fn part_reach(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> f
             let inner = inner_width(road, smp, side, i, f);
             side.sign() * (edge_of(f, side) + inner + road.strips(side)[i].width)
         }
-        Part::Barrier(_) | Part::Row(_) => part_offset(road, smp, part, f),
+        Part::Barrier(_) | Part::Row(_) | Part::Line(_) => part_offset(road, smp, part, f),
     }
 }
 

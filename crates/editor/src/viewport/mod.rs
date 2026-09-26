@@ -32,7 +32,9 @@ use open_racing_sim::GroundMesh;
 use open_racing_track_project::Node;
 use open_racing_track_project::curve::{Frame, Sampled, handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
-use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side, StationCurve};
+use open_racing_track_project::project::{
+    Barrier, HandleMode, PaintLine, PropRow, Range, Road, Shape, Side, StationCurve, Strip,
+};
 use open_racing_track_render::{from_bevy, to_bevy};
 
 use std::path::PathBuf;
@@ -54,6 +56,7 @@ mod pick;
 mod transform;
 
 pub use camera::*;
+pub use geometry::PartValue;
 use geometry::*;
 pub use gizmos::*;
 pub use input::*;
@@ -137,6 +140,8 @@ pub enum Hit {
     Reach(RangeEnd),
     /// A road's edge on one side at one of its selected nodes: its width there.
     Edge(usize, usize, Side),
+    /// A line painted along the selected road (edit mode): the road and the line.
+    Line(usize, usize),
     /// A road's or spline's body.
     Body(Item),
     /// A part of the active tool's gizmo: an axis, or `Free` for its middle or ring.
@@ -163,6 +168,8 @@ pub enum Part {
     Barrier(usize),
     /// A row of models beside the road.
     Row(usize),
+    /// A line painted along the road.
+    Line(usize),
 }
 
 /// One end of one stretch of a road's part.
@@ -240,6 +247,12 @@ enum Target {
     /// A strip's width or a barrier's offset, at a stretch of it.
     Reach {
         end: RangeEnd,
+    },
+    /// A painted line moved across the road, grabbed `s` metres along it.
+    Line {
+        road: usize,
+        line: usize,
+        s: f64,
     },
     /// A road's width on one side at some of its nodes.
     Edge {
@@ -1071,6 +1084,60 @@ mod tests {
         editor.apply(ops, None);
         let w = editor.project.roads[0].left[0].width;
         assert!((w - 2.0).abs() < 0.05, "{w}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_painted_line_is_picked_in_edit_mode_and_dragged_across() {
+        let n0 = DVec3::new(250.0, 0.0, 0.0);
+        let (mut editor, built, camera, t, dir) = top_down("paint", n0);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        editor.selection.select(Item::Road(0));
+        let smp = &built.roads[0];
+        let f = smp.frame_at(smp.s_at(1.0));
+        let line = |e: &Editor| e.project.roads[0].lines[0].clone();
+        let on = f.pos + flat_left(&f) * line(&editor).offset;
+        let at = view.screen(on).unwrap();
+        assert_eq!(
+            pick(&editor, &built, view, at, Some(on), true),
+            Some(Hit::Line(0, 0))
+        );
+        assert_ne!(
+            pick(&editor, &built, view, at, Some(on), false),
+            Some(Hit::Line(0, 0))
+        );
+
+        let mut tool = Tool::editing(true);
+        tool.pointer = Some(on);
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            Some(Hit::Line(0, 0)),
+            at,
+            true,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        // Near the left edge it lies just inside it; elsewhere it steps.
+        let to = view.screen(f.pos + flat_left(&f) * 5.85).unwrap();
+        let (ops, readout) =
+            transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
+        assert!(readout.contains("left edge"), "{readout}");
+        assert!(editor.apply(ops, None));
+        let l = line(&editor);
+        assert!(
+            (l.offset - (6.0 - 0.5 * l.width)).abs() < 1e-9,
+            "{}",
+            l.offset
+        );
+        let to = view.screen(f.pos + flat_left(&f) * 3.02).unwrap();
+        let (ops, _) = transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
+        assert!(editor.apply(ops, None));
+        assert!((line(&editor).offset - 3.0).abs() < 1e-9);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

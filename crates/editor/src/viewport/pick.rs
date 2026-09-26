@@ -80,6 +80,9 @@ pub(super) fn pick(
     if let Some((hit, _)) = best {
         return Some(hit);
     }
+    if edit && let Some(hit) = pick_line(editor, built, view, at, ground_at) {
+        return Some(hit);
+    }
     // Props, by where they stand.
     for (i, prop) in editor.project.props.iter().enumerate() {
         if !editor.pickable(Item::Prop(i)) {
@@ -113,6 +116,35 @@ pub(super) fn pick(
     }
     let g = ground_at?;
     body_at(editor, built, g).map(Hit::Body)
+}
+
+/// The painted line of the selected road under the pointer: near it on screen, or on
+/// it where it is wide.
+fn pick_line(
+    editor: &Editor,
+    built: &Built,
+    view: View,
+    at: Vec2,
+    ground_at: Option<DVec3>,
+) -> Option<Hit> {
+    let r = editor.selection.road()?;
+    let (road, smp) = (editor.project.roads.get(r)?, built.roads.get(r)?);
+    let g = ground_at?;
+    let f = smp.frames.get(smp.nearest(g))?;
+    let along = (g - f.pos).dot(f.tangent);
+    let across = (g - f.pos).dot(flat_left(f));
+    let mut best = None;
+    for (i, l) in road.lines.iter().enumerate() {
+        if smp.presence(&l.ranges, 0.0, f.s) <= 0.5 {
+            continue;
+        }
+        if (across - l.offset).abs() <= 0.5 * l.width {
+            return Some(Hit::Line(r, i));
+        }
+        let p = f.pos + f.tangent * along + flat_left(f) * l.offset;
+        consider_pick(&mut best, Hit::Line(r, i), view.screen(p), at);
+    }
+    best.map(|(hit, _)| hit)
 }
 
 /// Where the selection's transform gizmo stands: a prop, or the middle of the selected

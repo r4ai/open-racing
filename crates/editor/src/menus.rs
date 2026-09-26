@@ -3,14 +3,14 @@
 
 use bevy_egui::egui;
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::HandleMode;
+use open_racing_track_project::project::{HandleMode, PaintLine};
 
 use crate::commands::{self, Cmd, Ctx, entry};
 use crate::edit;
 use crate::presets;
 use crate::sidebar::overlay_checks;
 use crate::state::{Item, item_line};
-use crate::viewport::{Hit, Marker, Menu, Part, RangeEnd, ToolKind, ViewDir, add_node_at};
+use crate::viewport::{Hit, Marker, Menu, PartValue, RangeEnd, ToolKind, ViewDir, add_node_at};
 
 /// The strip above the 3D view: its menus, what a transform is doing, snapping, the
 /// projection and the overlays.
@@ -372,6 +372,16 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 used = true;
                 add_node_at(c.editor, c.built, menu.world);
             }
+            if let (Item::Road(r), Some(at), true) = (it, menu.world, c.tool.edit) {
+                if item(ui, "Paint a line here", "") {
+                    used = true;
+                    add_line_at(c, r, at, false);
+                }
+                if item(ui, "Paint a dashed line here", "") {
+                    used = true;
+                    add_line_at(c, r, at, true);
+                }
+            }
             if let (Item::Road(r), Some(at)) = (it, menu.world)
                 && name == c.editor.project.main_road
                 && let Some(u) = c.built.roads.get(r).map(|s| s.frames[s.nearest(at)].u)
@@ -426,6 +436,7 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 ui.close();
             }
         }
+        Some(Hit::Line(r, i)) => used |= line_menu(ui, c, r, i),
         Some(Hit::Gizmo(_) | Hit::Reach(_) | Hit::Edge(..)) | None => {}
     }
     if menu.hit.is_some() {
@@ -456,6 +467,96 @@ fn add_items(ui: &mut egui::Ui, c: &mut Ctx) -> bool {
     used | command(ui, c, Cmd::PlaceProp)
 }
 
+/// A new line painted along the whole road where `at` is across it, snapped to 5 cm.
+fn add_line_at(c: &mut Ctx, r: usize, at: glam::DVec3, dashed: bool) {
+    let (Some(road), Some(smp)) = (c.editor.project.roads.get(r), c.built.roads.get(r)) else {
+        return;
+    };
+    let f = &smp.frames[smp.nearest(at)];
+    let left = f.lateral.truncate().normalize_or(glam::DVec2::Y);
+    let offset = ((at - f.pos).truncate().dot(left) * 20.0).round() / 20.0;
+    let name = presets::free_name("line", |n| road.lines.iter().any(|l| l.name == n));
+    let p = &c.editor.project;
+    let material = ["paint", "line"]
+        .into_iter()
+        .find(|m| p.material_index(m).is_some())
+        .map_or_else(
+            || {
+                p.materials
+                    .first()
+                    .map_or(String::new(), |m| m.name.clone())
+            },
+            str::to_string,
+        );
+    let line = PaintLine {
+        name,
+        offset,
+        width: 0.12,
+        material,
+        ranges: vec![],
+        dash: dashed.then_some((3.0, 9.0)),
+    };
+    let road = road.name.clone();
+    if c.editor.apply(vec![Op::PutLine { road, line }], None) {
+        c.editor.status = "painted along the whole road: drag it across, or limit it to stretches in the Lines tab".into();
+    }
+}
+
+/// The menu for a painted line; true once an entry is used.
+fn line_menu(ui: &mut egui::Ui, c: &mut Ctx, r: usize, i: usize) -> bool {
+    let Some(road) = c.editor.project.roads.get(r) else {
+        return false;
+    };
+    let Some(line) = road.lines.get(i).cloned() else {
+        return false;
+    };
+    let road = road.name.clone();
+    ui.strong(format!("Line {}", line.name));
+    ui.separator();
+    let mut used = false;
+    let dashed = line.dash.is_some();
+    if item(
+        ui,
+        if dashed {
+            "Make it solid"
+        } else {
+            "Make it dashed"
+        },
+        "",
+    ) {
+        used = true;
+        let line = PaintLine {
+            dash: (!dashed).then_some((3.0, 9.0)),
+            ..line.clone()
+        };
+        c.editor.apply(
+            vec![Op::PutLine {
+                road: road.clone(),
+                line,
+            }],
+            None,
+        );
+    }
+    if item(ui, "Width, colour and stretches…", "") {
+        used = true;
+        c.shell.maximized = false;
+        c.shell.tab = crate::ui::PropTab::Lines;
+        c.shell.focus = Some(crate::ui::Focus::Line(i));
+    }
+    ui.separator();
+    if item(ui, "Remove line", "") {
+        used = true;
+        c.editor.apply(
+            vec![Op::RemoveLine {
+                road,
+                name: line.name,
+            }],
+            None,
+        );
+    }
+    used
+}
+
 fn set_markers(c: &mut Ctx, start: Option<f64>, sectors: Option<Vec<f64>>) {
     c.editor.apply(
         vec![Op::SetMarkers {
@@ -467,68 +568,26 @@ fn set_markers(c: &mut Ctx, start: Option<f64>, sectors: Option<Vec<f64>>) {
     );
 }
 
-/// Removes a stretch of a road's strip or barrier, or the part itself with its last
-/// stretch (no stretches would mean everywhere).
+/// Removes a stretch of a road's part, or the part itself with its last stretch (no
+/// stretches would mean everywhere).
 fn remove_stretch(c: &mut Ctx, end: RangeEnd) {
     let Some(road) = c.editor.project.roads.get(end.road) else {
         return;
     };
     let name = road.name.clone();
     // The menu may outlive what it was opened on (an undo, a reload).
-    let ranges = match end.part {
-        Part::Strip(side, i) => road.strips(side).get(i).map(|s| s.ranges.len()),
-        Part::Barrier(i) => road.barriers.get(i).map(|b| b.ranges.len()),
-        Part::Row(i) => road.rows.get(i).map(|w| w.ranges.len()),
+    let Some(mut part) = PartValue::of(road, end.part) else {
+        return;
     };
-    if ranges.is_none_or(|n| end.range >= n) {
+    let ranges = part.ranges_mut();
+    if end.range >= ranges.len() {
         return;
     }
-    let op = match end.part {
-        Part::Strip(side, i) => {
-            let mut strip = road.strips(side)[i].clone();
-            strip.ranges.remove(end.range);
-            if strip.ranges.is_empty() {
-                Op::RemoveStrip {
-                    road: name,
-                    side,
-                    name: strip.name,
-                }
-            } else {
-                Op::PutStrip {
-                    road: name,
-                    side,
-                    strip,
-                    at: None,
-                }
-            }
-        }
-        Part::Barrier(i) => {
-            let mut barrier = road.barriers[i].clone();
-            barrier.ranges.remove(end.range);
-            if barrier.ranges.is_empty() {
-                Op::RemoveBarrier {
-                    road: name,
-                    name: barrier.name,
-                }
-            } else {
-                Op::PutBarrier {
-                    road: name,
-                    barrier,
-                }
-            }
-        }
-        Part::Row(i) => {
-            let mut row = road.rows[i].clone();
-            row.ranges.remove(end.range);
-            if row.ranges.is_empty() {
-                Op::RemoveRow {
-                    road: name,
-                    name: row.name,
-                }
-            } else {
-                Op::PutRow { road: name, row }
-            }
-        }
+    ranges.remove(end.range);
+    let op = if ranges.is_empty() {
+        part.remove(&name)
+    } else {
+        part.put(&name)
     };
     c.editor.apply(vec![op], None);
 }

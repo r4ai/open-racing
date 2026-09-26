@@ -111,6 +111,7 @@ pub fn gizmos(
                 Part::Strip(..) => theme::STRIP,
                 Part::Barrier(_) => theme::BARRIER,
                 Part::Row(_) => theme::LANDFORM,
+                Part::Line(_) => theme::PAINT,
             };
             for (range, rg) in ranges.iter().enumerate() {
                 let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
@@ -144,6 +145,22 @@ pub fn gizmos(
                 }
             }
         }
+    }
+
+    // The painted line under the pointer, all along it.
+    if let Some(Hit::Line(r, i)) = hover
+        && let (Some(road), Some(smp)) = (p.roads.get(r), built.roads.get(r))
+        && let Some(l) = road.lines.get(i)
+    {
+        let mut run: Vec<Vec3> = Vec::new();
+        for f in &smp.frames {
+            if smp.presence(&l.ranges, 0.0, f.s) > 0.5 {
+                run.push(lift(f.pos + flat_left(f) * l.offset));
+            } else if !run.is_empty() {
+                gizmos.linestrip(std::mem::take(&mut run), theme::HOVER);
+            }
+        }
+        gizmos.linestrip(run, theme::HOVER);
     }
 
     // Handles for widths: the outer edge of each stretch (a strip's width, a barrier's

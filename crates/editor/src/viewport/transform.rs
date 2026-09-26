@@ -92,6 +92,16 @@ pub fn start_modal(
             }
         }
         Some(Hit::Range(end)) => Target::Range { end },
+        Some(Hit::Line(road, line)) => {
+            let (Some(smp), Some(at)) = (built.roads.get(road), tool.pointer) else {
+                return;
+            };
+            Target::Line {
+                road,
+                line,
+                s: smp.frames[smp.nearest(at)].s,
+            }
+        }
         Some(Hit::Reach(end)) => Target::Reach { end },
         Some(Hit::Edge(r, node, side)) => {
             let Some(road) = editor.project.roads.get(r) else {
@@ -223,6 +233,17 @@ pub fn start_modal(
                 return;
             };
             (Mode::Grab, reach_pos(road, smp, end.part, rg))
+        }
+        Target::Line { road, line, s } => {
+            let (Some(r), Some(smp)) = (editor.project.roads.get(*road), built.roads.get(*road))
+            else {
+                return;
+            };
+            let Some(l) = r.lines.get(*line) else {
+                return;
+            };
+            let f = smp.frame_at(*s);
+            (Mode::Grab, f.pos + flat_left(&f) * l.offset)
         }
         Target::Edge {
             index, node, side, ..
@@ -473,6 +494,7 @@ pub(super) fn transform_ops(
         Target::Reach { .. } => reach_ops(editor, built, m, p),
         Target::Edge { .. } => edge_ops(built, m, p),
         Target::Range { .. } => range_ops(editor, built, m, p),
+        Target::Line { .. } => line_ops(editor, built, m, p),
         Target::Shape { .. } => shape_ops(m, p),
         Target::Prop { .. } => prop_ops(editor, m, p),
         Target::Marker { .. } => marker_ops(editor, built, m, p),
@@ -671,42 +693,116 @@ fn reach_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
             v
         }
     };
-    let name = road.name.clone();
-    match end.part {
-        Part::Strip(side, i) => {
-            let mut strip = road.strips(side)[i].clone();
-            let inner = part_reach(road, smp, end.part, &f).abs() - strip.width;
+    let Some(mut value) = PartValue::of(road, end.part) else {
+        return (vec![], String::new());
+    };
+    let reach = part_reach(road, smp, end.part, &f).abs();
+    let readout = match &mut value {
+        PartValue::Strip(side, strip) => {
+            let inner = reach - strip.width;
             strip.width = step(side.sign() * d - inner).max(0.1);
-            let readout = format!("{}: {:.2} m wide", strip.name, strip.width);
-            let op = Op::PutStrip {
-                road: name,
-                side,
-                strip,
-                at: None,
-            };
-            (vec![op], readout)
+            format!("{}: {:.2} m wide", strip.name, strip.width)
         }
-        Part::Barrier(i) => {
-            let mut barrier = road.barriers[i].clone();
-            let edge = part_reach(road, smp, end.part, &f).abs() - barrier.offset;
+        PartValue::Barrier(barrier) => {
+            let edge = reach - barrier.offset;
             barrier.offset = step(barrier.side.sign() * d - edge).max(0.0);
-            let readout = format!("{}: {:.2} m from the edge", barrier.name, barrier.offset);
-            (
-                vec![Op::PutBarrier {
-                    road: name,
-                    barrier,
-                }],
-                readout,
-            )
+            format!("{}: {:.2} m from the edge", barrier.name, barrier.offset)
         }
-        Part::Row(i) => {
-            let mut row = road.rows[i].clone();
-            let edge = part_reach(road, smp, end.part, &f).abs() - row.offset;
+        PartValue::Row(row) => {
+            let edge = reach - row.offset;
             row.offset = step(row.side.sign() * d - edge).max(0.0);
-            let readout = format!("{}: {:.2} m from the edge", row.name, row.offset);
-            (vec![Op::PutRow { road: name, row }], readout)
+            format!("{}: {:.2} m from the edge", row.name, row.offset)
         }
+        PartValue::Line(line) => {
+            let (offset, what) = line_offset(road, &f, line, d, p);
+            line.offset = offset;
+            line_readout(line, what)
+        }
+    };
+    (vec![value.put(&road.name)], readout)
+}
+
+/// How near a dragged line must come to what it catches on, m.
+const LINE_CATCH: f64 = 0.25;
+
+/// Where a painted line dragged sideways to `d` (m left of the centre) goes: it catches
+/// on the road's centre, just inside its edges and on the other lines (Ctrl frees it),
+/// or steps; and what it caught on.
+fn line_offset(
+    road: &Road,
+    f: &Frame,
+    line: &PaintLine,
+    d: f64,
+    p: &Gesture,
+) -> (f64, Option<String>) {
+    if let Some(t) = p.typed {
+        return (t, None);
     }
+    let half = 0.5 * line.width;
+    let mut marks = vec![
+        (0.0, "the centre".to_string()),
+        (f.width_left - half, "the left edge".to_string()),
+        (half - f.width_right, "the right edge".to_string()),
+    ];
+    marks.extend(
+        road.lines
+            .iter()
+            .filter(|l| l.name != line.name)
+            .map(|l| (l.offset, l.name.clone())),
+    );
+    let caught = (!p.free && p.snapping.edges)
+        .then(|| {
+            marks
+                .into_iter()
+                .map(|(at, what)| ((at - d).abs(), at, what))
+                .filter(|(gap, ..)| *gap < LINE_CATCH)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+        })
+        .flatten();
+    match caught {
+        Some((_, at, what)) => (at, Some(what)),
+        None if p.snap => (p.snapping.fine(d), None),
+        None => (d, None),
+    }
+}
+
+fn line_readout(line: &PaintLine, caught: Option<String>) -> String {
+    let side = match line.offset {
+        o if o > 1e-6 => "left of the centre",
+        o if o < -1e-6 => "right of the centre",
+        _ => "on the centre",
+    };
+    let at = caught.map_or(String::new(), |w| format!(" → on {w}"));
+    format!("{}: {:.2} m {side}{at}", line.name, line.offset.abs())
+}
+
+/// A painted line dragged sideways, from where it was grabbed.
+fn line_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>, String) {
+    let Target::Line { road, line, s } = &m.target else {
+        return (vec![], String::new());
+    };
+    let (Some(r), Some(smp), Some(at)) = (
+        editor.project.roads.get(*road),
+        built.roads.get(*road),
+        p.view.on_plane(p.cursor, m.pivot.z),
+    ) else {
+        return (vec![], String::new());
+    };
+    let Some(mut l) = r.lines.get(*line).cloned() else {
+        return (vec![], String::new());
+    };
+    let f = smp.frame_at(*s);
+    let d = (at - f.pos).dot(flat_left(&f));
+    let (offset, what) = line_offset(r, &f, &l, d, p);
+    l.offset = offset;
+    let readout = line_readout(&l, what);
+    (
+        vec![Op::PutLine {
+            road: r.name.clone(),
+            line: l,
+        }],
+        readout,
+    )
 }
 
 /// A road's width on one side at the grabbed nodes, from its edge dragged.
@@ -827,34 +923,14 @@ fn range_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
             a.shift[end.to as usize] = corners::shift_to(smp, c, a, end.to, smp.s_at(u));
         }
     };
-    let name = road.name.clone();
-    let op = match end.part {
-        Part::Strip(side, i) => {
-            let mut strip = road.strips(side)[i].clone();
-            set(&mut strip.ranges);
-            anchored(&mut strip.corner);
-            Op::PutStrip {
-                road: name,
-                side,
-                strip,
-                at: None,
-            }
-        }
-        Part::Barrier(i) => {
-            let mut barrier = road.barriers[i].clone();
-            set(&mut barrier.ranges);
-            anchored(&mut barrier.corner);
-            Op::PutBarrier {
-                road: name,
-                barrier,
-            }
-        }
-        Part::Row(i) => {
-            let mut row = road.rows[i].clone();
-            set(&mut row.ranges);
-            Op::PutRow { road: name, row }
-        }
+    let Some(mut value) = PartValue::of(road, end.part) else {
+        return (vec![], String::new());
     };
+    set(value.ranges_mut());
+    if let Some(anchor) = value.corner_mut() {
+        anchored(anchor);
+    }
+    let op = value.put(&road.name);
     if caught.is_some() {
         *m.snapped.lock().expect("snap") = Some(range_end_pos(road, smp, end.part, u));
     }

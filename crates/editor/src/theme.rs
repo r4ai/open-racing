@@ -6,10 +6,12 @@
 use bevy::color::Color;
 use bevy_egui::egui::Color32;
 
-/// The selected item, and the lines of what is selected.
 /// The terrain's landforms in the view.
 pub const LANDFORM: Color = Color::srgb(0.55, 0.85, 0.45);
+/// Painted lines of the selected road, their stretches and handles.
+pub const PAINT: Color = Color::srgb(0.95, 0.95, 0.85);
 
+/// The selected item, and the lines of what is selected.
 pub const SELECTED: Color = Color::srgb(1.0, 0.63, 0.16);
 /// Items selected with the active one, darker as Blender's.
 pub const SELECTED_OTHER: Color = Color::srgb(0.85, 0.42, 0.05);

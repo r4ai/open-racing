@@ -379,7 +379,10 @@ pub fn ui(
         inner.max.x,
         inner.max.y,
     ));
-    root.painter().set(backdrop, around(ctx.viewport_rect(), free, root.visuals().panel_fill));
+    root.painter().set(
+        backdrop,
+        around(ctx.viewport_rect(), free, root.visuals().panel_fill),
+    );
     overlay::view(&ctx, free, &mut c, view);
     menus::overlay(&ctx, &mut c);
     popups::show(&ctx, &mut c);
@@ -783,7 +786,9 @@ fn mouse_hints(c: &Ctx) -> String {
             .to_string()
     };
     let tool = match t.active {
-        _ if !t.edit && t.active == ToolKind::Select => "Click: select · Tab: edit nodes",
+        _ if !t.edit && t.active == ToolKind::Select => {
+            "Click: select · Drag: move it, or a box · Tab: edit nodes"
+        }
         ToolKind::AddNode => "Click: add node",
         ToolKind::Measure => match t.measure.len() {
             1 => "Click: measure to here",
@@ -816,6 +821,15 @@ fn mouse_hints(c: &Ctx) -> String {
         Some(Hit::Edge(..)) => {
             "Road edge  ·  Drag: the width on this side at the selected nodes".into()
         }
+        Some(Hit::Line(r, i)) => format!(
+            "Line {}  ·  Drag: move it across (catches on the centre, the edges and other lines; Ctrl: free) · Right: menu",
+            c.editor
+                .project
+                .roads
+                .get(r)
+                .and_then(|road| road.lines.get(i))
+                .map_or("", |l| l.name.as_str())
+        ),
         Some(Hit::Body(item)) => format!(
             "{} {}  ·  {tool} · Right: insert node, markers",
             edit::item_kind(item),
@@ -908,7 +922,9 @@ fn bottom_area(
                 .id_salt("curves")
                 .auto_shrink([false, false])
                 .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
-                .show(ui, |ui| curve_graph::panel(ui, c.editor, profile, curve_graph));
+                .show(ui, |ui| {
+                    curve_graph::panel(ui, c.editor, profile, curve_graph)
+                });
         }
         BottomTab::Checks => {
             egui::ScrollArea::vertical()
