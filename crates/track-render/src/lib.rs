@@ -141,6 +141,9 @@ const DETAIL_NORMAL_MAP: u32 = 32;
 const TINTED: u32 = 64;
 /// Moves in the wind.
 const WIND: u32 = 128;
+/// Pictures of a model from many sides, turned to the viewer (see
+/// `open_racing_track::Material::impostor`).
+const IMPOSTOR: u32 = 256;
 
 #[derive(ShaderType, Clone, Debug, Default, Reflect)]
 pub struct TrackParams {
@@ -235,6 +238,40 @@ impl MaterialExtension for TrackExtension {
 
     fn fragment_shader() -> ShaderRef {
         "embedded://open_racing_track_render/track_material.wgsl".into()
+    }
+
+    /// The prepasses and shadow maps read the vertex normals too, which say where an
+    /// impostor's quad reaches (see `track_plant.wgsl`), as `TRACK_NORMALS`.
+    fn specialize(
+        _: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        let defs = &mut descriptor.vertex.shader_defs;
+        let has = |defs: &Vec<bevy::shader::ShaderDefVal>, name: &str| {
+            defs.iter()
+                .any(|d| matches!(d, bevy::shader::ShaderDefVal::Bool(n, true) if n == name))
+        };
+        if !has(defs, "PREPASS_PIPELINE") || !layout.0.contains(Mesh::ATTRIBUTE_NORMAL) {
+            return Ok(());
+        }
+        if !has(defs, "VERTEX_NORMALS") {
+            let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
+            if layout.0.contains(Mesh::ATTRIBUTE_UV_0) {
+                attributes.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(1));
+            }
+            if layout.0.contains(Mesh::ATTRIBUTE_UV_1) {
+                attributes.push(Mesh::ATTRIBUTE_UV_1.at_shader_location(2));
+            }
+            attributes.push(Mesh::ATTRIBUTE_NORMAL.at_shader_location(3));
+            if has(defs, "VERTEX_COLORS") {
+                attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(7));
+            }
+            descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
+        }
+        descriptor.vertex.shader_defs.push("TRACK_NORMALS".into());
+        Ok(())
     }
 }
 
@@ -468,10 +505,13 @@ pub fn merge_tile(
                 let turn = Quat::from_xyzw(x, y, z, w);
                 let at = Vec3::from_array(c.pos) - middle;
                 let base = m.positions.len() as u32;
+                // Normals grow with the copy: an impostor's say how large it is, and the
+                // others are made unit length again when drawn.
                 for (p, n) in part.positions.iter().zip(&part.normals) {
                     m.positions
                         .push((at + turn * (Vec3::from_array(*p) * c.scale)).to_array());
-                    m.normals.push((turn * Vec3::from_array(*n)).to_array());
+                    m.normals
+                        .push((turn * Vec3::from_array(*n) * c.scale).to_array());
                 }
                 m.uvs.extend(&part.uvs);
                 m.indices.extend(part.indices.iter().map(|i| i + base));
@@ -587,6 +627,9 @@ pub fn add_materials(
             };
             extension.params.reflection = m.reflection;
             extension.set_varies(m.varies);
+            if m.impostor {
+                extension.params.flags |= IMPOSTOR;
+            }
             if extension.normal_map.is_some() {
                 extension.params.flags |= NORMAL_MAP;
             }

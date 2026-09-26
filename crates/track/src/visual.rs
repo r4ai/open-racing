@@ -14,7 +14,7 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
 /// Stored for an absent texture index.
@@ -67,7 +67,19 @@ pub struct Material {
     /// Of a model drawn many times: it moves in the wind (a plant's), or takes each
     /// copy's colour (a plant's leaves, spectators' clothes).
     pub varies: Option<Varies>,
+    /// Of pictures of a model seen from many sides (see `IMPOSTOR_FRAMES`): each
+    /// mesh is quads whose corners all lie at the model's middle, their normal the
+    /// model's X axis as long as the radius of the sphere round it, and their UVs
+    /// saying which corner. The renderer turns each quad to the picture seen nearest to
+    /// the viewer's side and shows that picture on it.
+    pub impostor: bool,
 }
+
+/// An impostor's pictures are seen from this many × this many sides over the half of a
+/// sphere above it, laid out as a hemi-octahedron (Praun and Hoppe): the picture at
+/// (i, j) of the grid looks from the direction whose hemi-octahedral coordinates are
+/// ((i, j) + ½) / frames, each picture a square of the texture, row i across.
+pub const IMPOSTOR_FRAMES: u32 = 8;
 
 /// How a material of a model drawn many times varies: a plant's moves in the wind,
 /// and leaves or clothes take each copy's colour. The wind comes from the game's
@@ -99,6 +111,7 @@ impl Default for Material {
             double_sided: false,
             detail: None,
             varies: None,
+            impostor: false,
         }
     }
 }
@@ -396,6 +409,7 @@ impl Visual {
                 AlphaMode::Blend => (w.u8(2), w.f32(0.0)),
             };
             w.u8(m.double_sided.into());
+            w.u8(m.impostor.into());
             match &m.varies {
                 None => w.u8(0),
                 Some(p) => {
@@ -490,6 +504,7 @@ impl Visual {
                 (a, _) => return Err(Error::Format(format!("visual: unknown alpha mode {a}"))),
             };
             let double_sided = r.u8()? != 0;
+            let impostor = r.u8()? != 0;
             let varies = match r.u8()? {
                 0 => None,
                 _ => Some(Varies {
@@ -538,6 +553,7 @@ impl Visual {
                 double_sided,
                 detail,
                 varies,
+                impostor,
             });
         }
         let meshes = |r: &mut Reader| -> Result<Vec<Mesh>, Error> {

@@ -399,7 +399,7 @@ impl Cache {
         }
         let model = self.model(dir, &m.model)?;
         let paints = self.paints(project, dir, &model, m)?;
-        let cards = Arc::new(crate::impostor::cards(&model, &paints));
+        let cards = Arc::new(crate::impostor::impostor(&model, &paints));
         self.cards.insert(key, (stamp, cards.clone()));
         Ok(cards)
     }

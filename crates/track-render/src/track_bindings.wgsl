@@ -30,6 +30,8 @@ const DETAIL_NORMAL_MAP: u32 = 32u;
 const TINTED: u32 = 64u;
 // Moves in the wind: `sway` and `flutter` apply, and the wind texture is present.
 const WIND: u32 = 128u;
+// Pictures of a model from many sides, turned to the viewer: see `track_plant::impostor`.
+const IMPOSTOR: u32 = 256u;
 
 // Textures, as indices into the bindless index table below.
 const MASK: u32 = 0u;

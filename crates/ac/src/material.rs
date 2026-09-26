@@ -474,6 +474,7 @@ impl<'a> Materials<'a> {
             double_sided: false,
             detail,
             varies: None,
+            impostor: false,
         };
         let i = visual.add_material(material);
         self.added[index] = Some(i);

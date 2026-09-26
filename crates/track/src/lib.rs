@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
 pub use visual::{
-    AlphaMode, BARE, Detail, DetailLayer, DetailMask, DetailNormal, FAR_AWAY, Instance, Instances,
-    Level, Material, Mesh, Shape, Texture, Varies, Visual, VisualBuilder,
+    AlphaMode, BARE, Detail, DetailLayer, DetailMask, DetailNormal, FAR_AWAY, IMPOSTOR_FRAMES,
+    Instance, Instances, Level, Material, Mesh, Shape, Texture, Varies, Visual, VisualBuilder,
 };
 
 /// Version of the package layout and of `track.ron`.
@@ -391,6 +391,7 @@ mod tests {
             double_sided: true,
             detail: Some(detail.clone()),
             varies: None,
+            impostor: true,
         });
         v.add_material(Material {
             detail: Some(Detail {

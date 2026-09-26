@@ -4,7 +4,8 @@
 #define_import_path open_racing::track_plant
 
 #import bevy_pbr::{mesh_bindings::mesh, mesh_functions}
-#import open_racing::track_bindings::{params, wind, TINTED, WIND}
+#import bevy_pbr::mesh_view_bindings::view
+#import open_racing::track_bindings::{params, wind, IMPOSTOR, TINTED, WIND}
 
 // The wind `sway` and `flutter` are given at, m/s.
 const REFERENCE_WIND: f32 = 10.0;
@@ -82,4 +83,65 @@ fn tinted(base: vec3<f32>, look: u32) -> vec3<f32> {
     let luminance = dot(base, vec3(0.2126, 0.7152, 0.0722));
     let tinted = srgb_to_linear(l.rgb) * (luminance / REFERENCE_LUMINANCE);
     return mix(base, tinted, l.w);
+}
+
+// An impostor's pictures are seen from FRAMES × FRAMES sides: see
+// `open_racing_track::IMPOSTOR_FRAMES`.
+const FRAMES: f32 = 8.0;
+
+// Whether the material in `instance_index`'s slot is an impostor's.
+fn is_impostor(instance_index: u32) -> bool {
+    return (params(slot(instance_index)).flags & IMPOSTOR) != 0u;
+}
+
+// A corner of an impostor's quad, in Bevy's axes: where it is, the quad's normal, and
+// the UV of the picture it shows.
+struct Corner {
+    world: vec3<f32>,
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+}
+
+// Corner `uv` of an impostor's quad about the copy's middle `centre`, whose X axis is
+// `axis` (as long as the radius of the sphere round the copy): the quad turned square
+// to the side its picture nearest the viewer (the camera, or the sun in a shadow map)
+// was drawn from, and the UV of that picture in the texture. The leaves of a bare copy
+// (`look`) shrink to its middle, drawing nothing.
+fn impostor(centre: vec3<f32>, axis: vec3<f32>, uv: vec2<f32>, instance_index: u32, look: u32) -> Corner {
+    var out: Corner;
+    let radius = length(axis);
+    let x = axis / max(radius, 1e-6);
+    let up = vec3(0.0, 1.0, 0.0);
+    // The model's y (the simulation's axes: z up) in Bevy's.
+    let y = normalize(cross(up, x));
+    var toward: vec3<f32>;
+    if view.clip_from_view[3][3] == 1.0 {
+        toward = normalize(view.world_from_view[2].xyz);
+    } else {
+        toward = normalize(view.world_position - centre);
+    }
+    let d = vec3(dot(toward, x), dot(toward, y), max(dot(toward, up), 0.0));
+    // Hemi-octahedral coordinates, and the picture whose side is nearest.
+    let o = d.xy / max(abs(d.x) + abs(d.y) + d.z, 1e-6);
+    let h = vec2(o.x + o.y, o.x - o.y) * 0.5 + 0.5;
+    let cell = clamp(floor(h * FRAMES), vec2(0.0), vec2(FRAMES - 1.0));
+    let fh = (cell + 0.5) / FRAMES;
+    let fo = vec2(fh.x + fh.y - 1.0, fh.x - fh.y);
+    let side = normalize(vec3(fo, max(1.0 - abs(fo.x) - abs(fo.y), 0.0)));
+    // The picture's axes, as it was drawn (see `impostor::octahedral`).
+    var right = vec3(-side.y, side.x, 0.0);
+    let across = length(right);
+    right = select(vec3(1.0, 0.0, 0.0), right / across, across > 1e-4);
+    let above = cross(side, right);
+    let world = mat3x3(x, y, up);
+    out.normal = world * side;
+    out.uv = (cell + uv) / FRAMES;
+    let p = params(slot(instance_index));
+    if (p.flags & TINTED) != 0u && unpack(look).w < 0.0 {
+        out.world = centre;
+        return out;
+    }
+    let c = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    out.world = centre + (world * right * c.x + world * above * c.y) * radius;
+    return out;
 }

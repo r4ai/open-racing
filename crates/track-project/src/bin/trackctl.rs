@@ -647,7 +647,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 format!("{stem}-picture.png"),
                 &open_racing_track_project::impostor::thumbnail(&m, &paints, 256),
             )?;
-            let far = open_racing_track_project::impostor::cards(&m, &paints);
+            let far = open_racing_track_project::impostor::impostor(&m, &paints);
             for (i, mat) in far.look.materials.iter().enumerate() {
                 let Some(t) = mat.base_color_texture else {
                     continue;

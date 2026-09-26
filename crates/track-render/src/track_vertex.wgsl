@@ -7,7 +7,7 @@
     view_transformations::position_world_to_clip,
 }
 #import bevy_pbr::mesh_view_bindings::globals
-#import open_racing::track_plant::{look, moved}
+#import open_racing::track_plant::{impostor, is_impostor, look, moved}
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
@@ -16,6 +16,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
+#endif
+
+#ifdef VERTEX_UVS_A
+    out.uv = vertex.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = vertex.uv_b;
 #endif
 
 #ifdef VERTEX_POSITIONS
@@ -30,15 +37,24 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #else
     let copy = look(vertex.instance_index, vec2(0.0), false);
 #endif
-    out.world_position = vec4(moved(out.world_position.xyz, normal, world_from_local[3].xyz, vertex.instance_index, globals.time, copy), 1.0);
-    out.position = position_world_to_clip(out.world_position.xyz);
-#endif
-
+#ifdef VERTEX_NORMALS
 #ifdef VERTEX_UVS_A
-    out.uv = vertex.uv;
+    if is_impostor(vertex.instance_index) {
+        let axis = (world_from_local * vec4(vertex.normal, 0.0)).xyz;
+        let corner = impostor(out.world_position.xyz, axis, vertex.uv, vertex.instance_index, copy);
+        out.world_position = vec4(corner.world, 1.0);
+        out.world_normal = corner.normal;
+        out.uv = corner.uv;
+    } else {
+        out.world_position = vec4(moved(out.world_position.xyz, normal, world_from_local[3].xyz, vertex.instance_index, globals.time, copy), 1.0);
+    }
+#else
+    out.world_position = vec4(moved(out.world_position.xyz, normal, world_from_local[3].xyz, vertex.instance_index, globals.time, copy), 1.0);
 #endif
-#ifdef VERTEX_UVS_B
-    out.uv_b = vertex.uv_b;
+#else
+    out.world_position = vec4(moved(out.world_position.xyz, normal, world_from_local[3].xyz, vertex.instance_index, globals.time, copy), 1.0);
+#endif
+    out.position = position_world_to_clip(out.world_position.xyz);
 #endif
 
 #ifdef VERTEX_TANGENTS
