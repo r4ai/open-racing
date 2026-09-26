@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
+use bevy_egui::{EguiPlugin, EguiPreUpdateSet, EguiPrimaryContextPass};
 use clap::Parser;
 use open_racing_track_render::TrackModelPlugin;
 
@@ -249,6 +249,12 @@ fn main() {
     .init_resource::<jobs::Jobs>()
     .init_resource::<reference::Shown>()
     .add_systems(Startup, viewport::setup)
+    .add_systems(
+        PreUpdate,
+        ui::keep_tab
+            .after(EguiPreUpdateSet::ProcessInput)
+            .before(EguiPreUpdateSet::BeginPass),
+    )
     .add_systems(EguiPrimaryContextPass, ui::ui)
     .add_systems(
         Update,

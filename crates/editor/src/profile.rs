@@ -140,7 +140,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
 
     let size = ui.available_size();
     let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(60.0)),
+        egui::vec2(size.x, size.y.max(40.0)),
         egui::Sense::click_and_drag(),
     );
     let rect = resp.rect.shrink(8.0);

@@ -58,7 +58,16 @@ pub fn input(
         return;
     }
     sync_mode(editor, tool);
-    let pointer_free = !wants.wants_any_pointer_input() && tool.menu.is_none() && !tool.blocked;
+    let pointer_free = !wants.wants_any_pointer_input()
+        && !rect.ui_busy
+        && tool.menu.is_none()
+        && !tool.blocked;
+    // A panel's edge dragged from beside the view: whatever the press began here is the
+    // panel's, not a box to select with.
+    if rect.ui_busy && tool.modal.is_none() {
+        tool.press = None;
+        tool.boxing = None;
+    }
     let keys_free = !wants.wants_any_keyboard_input() && !tool.blocked;
     let anywhere = window.cursor_position();
     let over = cursor(&window, &rect).filter(|_| pointer_free);
@@ -243,10 +252,14 @@ pub fn input(
         }
     }
 
-    let Some(at) = over else { return };
     if !keys_free {
         return;
     }
+    // Tab switches modes wherever the pointer is, as long as nothing is being typed.
+    if keys.just_pressed(KeyCode::Tab) && !ctrl && !alt {
+        toggle_edit(editor, tool);
+    }
+    let Some(at) = over else { return };
     let pressed = |k| keys.just_pressed(k);
     if pressed(KeyCode::KeyG) {
         start_modal(editor, tool, &built, Mode::Grab, None, at, false);
@@ -264,8 +277,6 @@ pub fn input(
         duplicate(editor, tool, &built, at);
     } else if pressed(KeyCode::KeyA) && shift {
         open_menu(tool, at, hover, true);
-    } else if pressed(KeyCode::Tab) && !ctrl && !alt {
-        toggle_edit(editor, tool);
     } else if pressed(KeyCode::KeyA) && alt {
         if tool.edit {
             editor.selection.nodes.clear();

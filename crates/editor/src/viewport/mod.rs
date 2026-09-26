@@ -107,9 +107,15 @@ impl Default for Orbit {
     }
 }
 
-/// The part of the window the 3D view covers, logical pixels, set by the UI each frame.
+/// The part of the window the 3D view covers, logical pixels, and whether the UI has
+/// the pointer: both set by the UI each frame.
 #[derive(Resource, Default)]
-pub struct ViewRect(pub Option<Rect>);
+pub struct ViewRect {
+    pub rect: Option<Rect>,
+    /// The pointer is on a panel's edge, or the UI is dragging something (a panel being
+    /// resized, a slider): the view takes no clicks, and a drag it began is dropped.
+    pub ui_busy: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Marker {
@@ -754,7 +760,7 @@ impl View<'_> {
 /// The cursor in the 3D view, in window coordinates, if it is over it.
 fn cursor(window: &Window, rect: &ViewRect) -> Option<Vec2> {
     let p = window.cursor_position()?;
-    cursor_in_view(p, rect.0)
+    cursor_in_view(p, rect.rect)
 }
 
 fn cursor_in_view(p: Vec2, rect: Option<Rect>) -> Option<Vec2> {

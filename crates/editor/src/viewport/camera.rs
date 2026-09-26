@@ -130,7 +130,7 @@ pub fn place_camera(
 
 /// Keeps the 3D camera's viewport on the part of the window the view covers.
 pub(super) fn set_viewport(cam: &mut Camera, rect: &ViewRect, window: &Window) {
-    if let Some(r) = rect.0 {
+    if let Some(r) = rect.rect {
         let scale = window.scale_factor();
         let pos = (r.min * scale).max(Vec2::ZERO).as_uvec2();
         let size = (r.size() * scale).max(Vec2::ONE).as_uvec2();

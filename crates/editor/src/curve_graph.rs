@@ -74,6 +74,7 @@ pub fn panel(
     elevation: &mut ProfileView,
     state: &mut CurveGraph,
 ) {
+    let mut fit_clicked = false;
     ui.horizontal(|ui| {
         for (shown, label) in [
             (Shown::Elevation, "Elevation"),
@@ -88,6 +89,20 @@ pub fn panel(
                 state.road = None;
                 state.selected = None;
             }
+        }
+        if let Some(curve) = state.shown.curve() {
+            ui.separator();
+            fit_clicked = ui.button("Fit").clicked();
+            ui.weak("controls").on_hover_text(format!(
+                "{}, along the road left to right with its nodes marked below
+                 Double-click: add a key · drag a key or its small handles · right click a key: remove
+                 Alt S / Ctrl T in the view: width / bank at the selected nodes",
+                match curve {
+                    Curve::WidthLeft => "Road width left of the centre line",
+                    Curve::WidthRight => "Road width right of the centre line",
+                    _ => "Bank: positive raises the right edge",
+                }
+            ));
         }
     });
     let Some(curve) = state.shown.curve() else {
@@ -112,7 +127,6 @@ pub fn panel(
     };
     let period = road.period();
     let scale = state.shown.scale();
-    let fit_clicked = ui.button("Fit").clicked();
     let fit = state.road.as_deref() != Some(&road.name) || fit_clicked;
     if fit {
         state.stop(editor);
@@ -134,14 +148,6 @@ pub fn panel(
         state.range = (lo - pad, hi + pad);
     }
     let unit = if curve == Curve::Bank { "°" } else { " m" };
-    ui.horizontal_wrapped(|ui| {
-        ui.weak(match curve {
-            Curve::WidthLeft => "Road width left of the centre line",
-            Curve::WidthRight => "Road width right of the centre line",
-            _ => "Bank: positive raises the right edge",
-        });
-        ui.weak("· along the road →, nodes marked below");
-    });
     let mut remove = None;
     ui.horizontal(|ui| match state.selected.filter(|&i| i < c.keys.len()) {
         Some(i) => {
@@ -183,10 +189,9 @@ pub fn panel(
             ui.weak("Click a key to edit it.");
         }
     });
-    ui.small("Double-click: add a key · drag a key or its small handles · right click a key: remove · Alt S / Ctrl T in the view: width / bank at the selected nodes");
     let size = ui.available_size();
     let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(80.0)),
+        egui::vec2(size.x, size.y.max(40.0)),
         egui::Sense::click_and_drag(),
     );
     let rect = resp.rect.shrink2(egui::vec2(12.0, 10.0));

@@ -174,6 +174,31 @@ pub struct UiState {
     styled: bool,
 }
 
+/// Tab is Blender's mode switch: egui must not take it as well to move its keyboard focus
+/// from button to button (a focused button then holds every key the view reads), except
+/// while text is typed.
+pub fn keep_tab(
+    mut contexts: Query<
+        (&mut bevy_egui::EguiInput, &mut bevy_egui::EguiContext),
+        With<bevy_egui::PrimaryEguiContext>,
+    >,
+) {
+    for (mut input, mut ctx) in &mut contexts {
+        if ctx.get_mut().text_edit_focused() {
+            continue;
+        }
+        input.events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    ..
+                }
+            )
+        });
+    }
+}
+
 /// Blender's colours where egui's defaults differ most: the blue of what is selected.
 fn style(ctx: &egui::Context) {
     ctx.all_styles_mut(|s| {
@@ -213,7 +238,7 @@ pub fn ui(
     }
     // The window starts out tiny on some systems; the panels need room.
     if ctx.viewport_rect().width() < 800.0 || ctx.viewport_rect().height() < 500.0 {
-        rect.0 = None;
+        rect.rect = None;
         return Ok(());
     }
     let (cam, t) = *camera;
@@ -221,7 +246,7 @@ pub fn ui(
     let pointer = ctx
         .pointer_latest_pos()
         .map_or(Vec2::ZERO, |p| Vec2::new(p.x, p.y));
-    let over_view = rect.0.is_some_and(|r| r.contains(pointer));
+    let over_view = rect.rect.is_some_and(|r| r.contains(pointer));
     let UiState {
         shell,
         new_project,
@@ -274,6 +299,10 @@ pub fn ui(
             .max_rect(ctx.viewport_rect()),
     );
 
+    // The 3D view's sky fills the window under the panels: whatever the panels leave
+    // uncovered beside the view (a pixel between two of them) is painted as a panel.
+    let backdrop = root.painter().add(egui::Shape::Noop);
+
     egui::Panel::top("top bar").show(&mut root, |ui| top_bar(ui, &mut c, new_project));
     egui::Panel::bottom("status bar").show(&mut root, |ui| status_bar(ui, &c));
 
@@ -294,12 +323,13 @@ pub fn ui(
                 });
             });
         let mut open = c.shell.bottom_open;
-        // As tall as the user drags it, leaving the view its header and a strip below.
-        let tallest = (root.available_height() - 120.0).max(90.0);
+        // As tall as the user drags it, leaving the view no more than its header and a
+        // strip below; what does not fit scrolls, so nothing in it holds the edge.
+        let tallest = (root.available_height() - 70.0).max(60.0);
         egui::Panel::bottom("bottom area")
             .resizable(true)
             .default_size(230.0)
-            .size_range(90.0..=tallest)
+            .size_range(60.0..=tallest)
             .show_collapsible(&mut root, &mut open, |ui| {
                 bottom_area(
                     ui,
@@ -343,12 +373,13 @@ pub fn ui(
     let free = root.available_rect_before_wrap();
     // The panels' resize handles reach into the view: clicks there resize, not select.
     let inner = free.shrink(ctx.global_style().interaction.resize_grab_radius_side + 1.0);
-    rect.0 = Some(Rect::new(
+    rect.rect = Some(Rect::new(
         inner.min.x,
         inner.min.y,
         inner.max.x,
         inner.max.y,
     ));
+    root.painter().set(backdrop, around(ctx.viewport_rect(), free, root.visuals().panel_fill));
     overlay::view(&ctx, free, &mut c, view);
     menus::overlay(&ctx, &mut c);
     popups::show(&ctx, &mut c);
@@ -359,10 +390,49 @@ pub fn ui(
         c.editor.status = format!("{n} copied: Ctrl V pastes them, here or in another project");
     }
     c.tool.blocked = c.shell.popup.is_some();
+    rect.ui_busy = ui_has_pointer(&ctx);
     if c.shell.quit {
         exit.write(AppExit::Success);
     }
     Ok(())
+}
+
+/// Rectangles filling `outer` round `hole`.
+fn around(outer: egui::Rect, hole: egui::Rect, fill: egui::Color32) -> egui::Shape {
+    let hole = hole.intersect(outer);
+    let rects = [
+        egui::Rect::from_x_y_ranges(outer.x_range(), outer.top()..=hole.top()),
+        egui::Rect::from_x_y_ranges(outer.x_range(), hole.bottom()..=outer.bottom()),
+        egui::Rect::from_x_y_ranges(outer.left()..=hole.left(), hole.y_range()),
+        egui::Rect::from_x_y_ranges(hole.right()..=outer.right(), hole.y_range()),
+    ];
+    egui::Shape::Vec(
+        rects
+            .into_iter()
+            .filter(|r| r.is_positive())
+            .map(|r| egui::Shape::rect_filled(r, 0.0, fill))
+            .collect(),
+    )
+}
+
+/// Whether the UI has the pointer: dragging something, or over a panel's edge (which a
+/// press there would resize), where the view must not start a box.
+fn ui_has_pointer(ctx: &egui::Context) -> bool {
+    use egui::CursorIcon as C;
+    ctx.egui_is_using_pointer()
+        || matches!(
+            ctx.output(|o| o.cursor_icon),
+            C::ResizeHorizontal
+                | C::ResizeVertical
+                | C::ResizeColumn
+                | C::ResizeRow
+                | C::ResizeEast
+                | C::ResizeWest
+                | C::ResizeNorth
+                | C::ResizeSouth
+                | C::ResizeNeSw
+                | C::ResizeNwSe
+        )
 }
 
 fn list_projects() -> Vec<std::path::PathBuf> {
@@ -832,7 +902,14 @@ fn bottom_area(
     });
     ui.separator();
     match c.shell.bottom {
-        BottomTab::Curves => curve_graph::panel(ui, c.editor, profile, curve_graph),
+        BottomTab::Curves => {
+            // The wheel zooms the graphs; only the bar scrolls.
+            egui::ScrollArea::vertical()
+                .id_salt("curves")
+                .auto_shrink([false, false])
+                .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
+                .show(ui, |ui| curve_graph::panel(ui, c.editor, profile, curve_graph));
+        }
         BottomTab::Checks => {
             egui::ScrollArea::vertical()
                 .id_salt("checks")
