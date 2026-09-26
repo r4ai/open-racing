@@ -699,6 +699,13 @@ fn reach_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
                 readout,
             )
         }
+        Part::Row(i) => {
+            let mut row = road.rows[i].clone();
+            let edge = part_reach(road, smp, end.part, &f).abs() - row.offset;
+            row.offset = step(row.side.sign() * d - edge).max(0.0);
+            let readout = format!("{}: {:.2} m from the edge", row.name, row.offset);
+            (vec![Op::PutRow { road: name, row }], readout)
+        }
     }
 }
 
@@ -841,6 +848,11 @@ fn range_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
                 road: name,
                 barrier,
             }
+        }
+        Part::Row(i) => {
+            let mut row = road.rows[i].clone();
+            set(&mut row.ranges);
+            Op::PutRow { road: name, row }
         }
     };
     if caught.is_some() {

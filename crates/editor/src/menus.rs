@@ -477,6 +477,7 @@ fn remove_stretch(c: &mut Ctx, end: RangeEnd) {
     let ranges = match end.part {
         Part::Strip(side, i) => road.strips(side).get(i).map(|s| s.ranges.len()),
         Part::Barrier(i) => road.barriers.get(i).map(|b| b.ranges.len()),
+        Part::Row(i) => road.rows.get(i).map(|w| w.ranges.len()),
     };
     if ranges.is_none_or(|n| end.range >= n) {
         return;
@@ -513,6 +514,18 @@ fn remove_stretch(c: &mut Ctx, end: RangeEnd) {
                     road: name,
                     barrier,
                 }
+            }
+        }
+        Part::Row(i) => {
+            let mut row = road.rows[i].clone();
+            row.ranges.remove(end.range);
+            if row.ranges.is_empty() {
+                Op::RemoveRow {
+                    road: name,
+                    name: row.name,
+                }
+            } else {
+                Op::PutRow { road: name, row }
             }
         }
     };

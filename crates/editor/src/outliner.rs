@@ -299,6 +299,9 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
             format!("🚧 {}", b.name),
         ));
     }
+    for (i, w) in road.rows.iter().enumerate() {
+        parts.push((Some(Focus::Row(i)), PropTab::Rows, format!("🌲 {}", w.name)));
+    }
     if parts.is_empty() {
         ui.weak("no strips, lines or barriers");
     }

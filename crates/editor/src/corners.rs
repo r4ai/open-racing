@@ -287,7 +287,7 @@ fn kit_ui(
 }
 
 /// The Corners tab of a road.
-pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
+pub fn tab(ui: &mut egui::Ui, c: &mut Ctx, library: &crate::assets::Library) {
     let Some(r) = c.editor.selection.road() else {
         return;
     };
@@ -346,6 +346,30 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
             {
                 lay(c, false);
             }
+            crate::properties::model_button(
+                ui,
+                library,
+                "Distance boards",
+                "100, 200 and 300 m boards before every corner turning 45° or more, on its outside, as a row per corner",
+                |model| {
+                    match open_racing_track_project::rows::boards(
+                        &c.editor.project,
+                        &road.name,
+                        model,
+                        &[100.0, 200.0, 300.0],
+                        45f64.to_radians(),
+                        4.0,
+                    ) {
+                        Ok(ops) => {
+                            let n = ops.len();
+                            if c.editor.apply(ops, None) {
+                                c.editor.status = format!("distance boards before {n} corners");
+                            }
+                        }
+                        Err(e) => c.editor.status = e.to_string(),
+                    }
+                },
+            );
             if ui.button("Clear all corners").clicked() {
                 let ops: Vec<Op> = corners
                     .iter()

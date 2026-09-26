@@ -64,6 +64,9 @@ trackctl guide                          # this text
                  ranges: [], dash: None)],   // dash: Some((3, 9)) for 3 m on, 9 m off
         barriers: [(name: "wall", side: Left, offset: 20, height: 1, thickness: 0.5,
                     material: "concrete", ranges: [])],   // offset from the road's edge
+        rows: [(name: "trees", model: "assets/models/tree.glb", side: Left, offset: 30,
+                spacing: 15, ranges: [(from: 20, to: 60)],
+                jitter: (offset: 6, yaw: 3.14, scale: 0.3))],   // models beside it
         resolution: 2,               // m between cross-sections
     )],
     splines: [                       // kerbs, walls and fences on their own lines
@@ -139,6 +142,17 @@ trackctl guide                          # this text
 - Models are Y-up as glTF has them. Their own materials and textures come along; the project's materials are not used.
 - The files a project refers to, and those it does not, are listed by `trackctl assets`.
 
+**Rows.** A row repeats a glTF model beside a road: trees, cones, distance boards, lamp
+posts, spectators' stands, pit garages.
+
+- Each copy stands `offset` metres beyond the road's edge on `side`, facing the road: the
+  model's +X runs along the road and its +Y towards it, as a wall's models do; `yaw`
+  turns it from there.
+- Copies are `spacing` metres apart along `ranges` (everywhere when empty), or one at each
+  place of `at` (spline parameters).
+- `jitter` varies each copy's place across, turn and size by up to that much, the same way
+  every build. `drape` stands them on the ground; `collide` makes them solid.
+
 **Pit lane.** The pit lane is a separate, open road. It starts where it leaves the track and ends where it rejoins.
 
 **Terrain.** The terrain fills in around the roads. It lies just under them and meets their outer edges.
@@ -202,6 +216,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveStrip` | `road`, `side`, `name` | removes a strip |
 | `PutLine` / `RemoveLine` | `road`, `line` / `name` | adds, replaces or removes a painted line |
 | `PutBarrier` / `RemoveBarrier` | `road`, `barrier` / `name` | adds, replaces or removes a barrier |
+| `PutRow` / `RemoveRow` | `road`, `row` / `name` | adds, replaces or removes a row of a model beside the road |
 | `PutMark` / `RemoveMark` | `road`, `mark: (name, at, length, from, to, material)` / `name` | paints a mark across the road (a start line, a grid slot, a pit speed limit line) |
 | `FitCorners` | `road` | puts the road's strips and barriers laid round corners back round them; every change to a road does this anyway |
 
@@ -285,6 +300,12 @@ the project's types. The editor's Corners tab does the same corner by corner, or
 every corner at once.
 
 `trackctl paint <project>` paints the start/finish line and the grid slots' lines.
+
+`trackctl garages <project> <model> [--offset m]` puts a garage behind each pit box, and
+`trackctl boards <project> <model> [--distances 100,200,300] [--least deg]` distance
+boards before each corner on its outside, both as rows. The editor offers them in Race
+markers › Pit lane and the Corners tab; a road's Rows tab lays any model beside it, and
+its stretches and distance drag in the view.
 
 `trackctl pitlane <project> [--from u --to u] [--left] [--gap m] [--width m] [--boxes n]`
 lays a pit lane road beside a stretch of the main road (by default round the start line):

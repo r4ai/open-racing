@@ -155,6 +155,8 @@ pub enum LandformHandle {
 pub enum Part {
     Strip(Side, usize),
     Barrier(usize),
+    /// A row of models beside the road.
+    Row(usize),
 }
 
 /// One end of one stretch of a road's part.

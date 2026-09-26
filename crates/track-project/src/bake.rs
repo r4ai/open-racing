@@ -361,9 +361,9 @@ pub fn add_look(model: &Model, visual: &mut VisualBuilder) -> Vec<u32> {
         .collect()
 }
 
-/// Adds the props: their meshes to `visual`, and those cars collide with to `ground`.
+/// Adds props: their meshes to `visual`, and those cars collide with to `ground`.
 pub fn add_props(
-    project: &Project,
+    props: &[crate::project::Prop],
     dir: &Path,
     cache: &mut Cache,
     under: Option<&GroundMesh>,
@@ -371,7 +371,7 @@ pub fn add_props(
     ground: &mut Ground,
 ) -> Result<(), Error> {
     let mut looks: HashMap<&Path, Vec<u32>> = HashMap::new();
-    for prop in &project.props {
+    for prop in props {
         let model = cache.model(dir, &prop.model)?;
         let materials = looks
             .entry(prop.model.as_path())
@@ -434,13 +434,16 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
 
     let mut visual = VisualBuilder::new();
     add_materials(project, dir, cache, &mut visual)?;
-    let under = project
-        .props
+    // The props, and the rows of models beside the roads.
+    let sampled: Vec<&Sampled> = scene.roads.iter().map(|b| &b.sampled).collect();
+    let mut props = project.props.clone();
+    props.extend(crate::rows::all(project, &sampled));
+    let under = props
         .iter()
         .any(|p| p.drape)
         .then(|| scene.ground.build(&surface_props(project)));
     add_props(
-        project,
+        &props,
         dir,
         cache,
         under.as_ref(),

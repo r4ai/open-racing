@@ -602,3 +602,158 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
         }
     });
 }
+
+/// Rows of models beside the road: trees, cones, boards, lights, stands, garages.
+pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
+    let Some(r) = c.editor.selection.road() else {
+        return;
+    };
+    let Some(road) = c.editor.project.roads.get(r).cloned() else {
+        return;
+    };
+    let name = road.name.clone();
+    let node = c.editor.selection.node();
+    let period = road.period();
+    ui.weak("A model repeated beside the road, facing it (its +X along the road, +Y towards it): every so many metres along its stretches, or at given places.");
+    for (i, row_) in road.rows.iter().enumerate() {
+        let mut w = row_.clone();
+        let (mut changed, mut removed) = (false, false);
+        let open = focused(c, Focus::Row(i));
+        let count = c.built.roads.get(r).map_or(0, |smp| {
+            open_racing_track_project::rows::copies(&road, smp, &w).len()
+        });
+        let resp = egui::CollapsingHeader::new(format!(
+            "{}  ·  {count} × {}, {:?}",
+            w.name,
+            w.model.file_stem().unwrap_or_default().to_string_lossy(),
+            w.side
+        ))
+        .id_salt(("row", r, i))
+        .show_background(true)
+        .open(open)
+        .show(ui, |ui| {
+            row(ui, "Model", |ui| {
+                egui::ComboBox::from_id_salt(("row model", r, i))
+                    .selected_text(w.model.to_string_lossy())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for a in library.models() {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut w.model,
+                                    a.path.clone(),
+                                    a.path.to_string_lossy(),
+                                )
+                                .changed();
+                        }
+                    });
+            });
+            changed |= row(ui, "Side", |ui| {
+                choice(
+                    ui,
+                    &mut w.side,
+                    &[(Side::Left, "Left"), (Side::Right, "Right")],
+                )
+            });
+            changed |= drag(ui, "From edge m", &mut w.offset, 0.1, 0.0..=1000.0);
+            if w.at.is_empty() {
+                changed |= drag(ui, "Every m", &mut w.spacing, 0.5, 0.5..=5000.0);
+            } else {
+                row(ui, "Places", |ui| {
+                    ui.label(format!("{} given (u)", w.at.len()));
+                    if ui.small_button("Every so many metres instead").clicked() {
+                        w.at.clear();
+                        changed = true;
+                    }
+                });
+            }
+            let mut deg = w.yaw.to_degrees();
+            if row(ui, "Turn", |ui| number(ui, &mut deg, 1.0, "°")) {
+                w.yaw = deg.to_radians();
+                changed = true;
+            }
+            changed |= drag(ui, "Scale", &mut w.scale, 0.01, 0.01..=100.0);
+            ui.weak("Each copy differs by up to:");
+            changed |= drag(ui, "Across m", &mut w.jitter.offset, 0.05, 0.0..=100.0);
+            let mut jd = w.jitter.yaw.to_degrees();
+            if row(ui, "Turn °", |ui| number(ui, &mut jd, 1.0, "°")) {
+                w.jitter.yaw = jd.to_radians().max(0.0);
+                changed = true;
+            }
+            changed |= drag(ui, "Size", &mut w.jitter.scale, 0.01, 0.0..=0.9);
+            changed |= row(ui, "", |ui| {
+                ui.checkbox(&mut w.drape, "Stand on the ground").changed()
+                    | ui.checkbox(&mut w.collide, "Cars collide with them")
+                        .changed()
+            });
+            if w.at.is_empty() {
+                changed |= ranges_ui(ui, &mut w.ranges, node, period, road.closed);
+            }
+            removed = row(ui, "", |ui| ui.button("Remove row").clicked());
+        });
+        if open.is_some() {
+            resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+        }
+        if removed {
+            c.editor.apply(
+                vec![Op::RemoveRow {
+                    road: name.clone(),
+                    name: w.name,
+                }],
+                None,
+            );
+            return;
+        }
+        if changed {
+            c.editor.apply(
+                vec![Op::PutRow {
+                    road: name.clone(),
+                    row: w,
+                }],
+                Some(&format!("row {name} {i}")),
+            );
+        }
+    }
+    let models: Vec<_> = library.models().collect();
+    if models.is_empty() {
+        ui.weak("Import a glTF model under Assets to lay rows of it.");
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Add a row of");
+        for a in models {
+            let stem = a.path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            if ui
+                .small_button(format!("+ {stem}"))
+                .on_hover_text(match node {
+                    Some(n) => format!("Round node {n}, on the left, every 20 m; drag its ends and distance in the view"),
+                    None => "Along the whole road, on the left, every 20 m".into(),
+                })
+                .clicked()
+            {
+                let n = crate::presets::free_name(&stem, |n| road.rows.iter().any(|w| w.name == n));
+                let row = open_racing_track_project::project::PropRow {
+                    name: n,
+                    model: a.path.clone(),
+                    side: Side::Left,
+                    offset: 8.0,
+                    spacing: 20.0,
+                    ranges: stretch_round(node, period, road.closed),
+                    at: vec![],
+                    yaw: 0.0,
+                    scale: 1.0,
+                    jitter: Default::default(),
+                    drape: true,
+                    collide: false,
+                };
+                c.editor.apply(
+                    vec![Op::PutRow {
+                        road: name.clone(),
+                        row,
+                    }],
+                    None,
+                );
+            }
+        }
+    });
+}

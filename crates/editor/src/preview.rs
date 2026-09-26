@@ -32,6 +32,10 @@ pub struct PreviewMesh(Option<Item>);
 #[derive(Component)]
 pub struct PreviewProp(usize, PathBuf);
 
+/// A copy of a model of a row beside road `.0`.
+#[derive(Component)]
+pub struct PreviewRow(usize);
+
 /// Textures and models, shared by the builds in the background and the main thread,
 /// and what the last build made, for the next to build only what changed.
 #[derive(Resource, Clone, Default)]
@@ -380,7 +384,11 @@ pub fn props(
     }
 
     // Models to load.
-    let wanted: HashSet<&PathBuf> = project.props.iter().map(|p| &p.model).collect();
+    let rows = project
+        .roads
+        .iter()
+        .flat_map(|r| r.rows.iter().map(|w| &w.model));
+    let wanted: HashSet<&PathBuf> = project.props.iter().map(|p| &p.model).chain(rows).collect();
     let missing: Vec<PathBuf> = wanted
         .into_iter()
         .filter(|p| !state.models.contains_key(*p) && !state.failed.contains_key(*p))
@@ -466,5 +474,67 @@ pub fn show_items(
     }
     for (p, mut v) in &mut props {
         v.set_if_neq(want(editor.visible(Item::Prop(p.0))));
+    }
+}
+
+/// Shows the copies of the rows of models beside the roads, placed again whenever the
+/// project, the build or the models loaded change.
+#[allow(clippy::too_many_arguments)]
+pub fn rows(
+    mut commands: Commands,
+    editor: Res<Editor>,
+    built: Res<Built>,
+    state: Res<Props>,
+    shown: Query<Entity, With<PreviewRow>>,
+    mut rows: Query<(&PreviewRow, &mut Visibility)>,
+    mut last: Local<(u64, u64, usize)>,
+) {
+    let key = (editor.revision, built.count, state.models.len());
+    if *last != key {
+        *last = key;
+        for e in &shown {
+            commands.entity(e).despawn();
+        }
+        let p = &editor.project;
+        for (i, (road, smp)) in p.roads.iter().zip(&built.roads).enumerate() {
+            for row in &road.rows {
+                let Some(model) = state.models.get(&row.model) else {
+                    continue;
+                };
+                for prop in open_racing_track_project::rows::copies(road, smp, row) {
+                    let at = Placement::of(&prop, built.ground.as_deref());
+                    commands
+                        .spawn((
+                            PreviewRow(i),
+                            Transform {
+                                translation: to_bevy(at.pos),
+                                rotation: Quat::from_rotation_y(at.yaw as f32),
+                                scale: Vec3::splat(at.scale as f32),
+                            },
+                            Visibility::default(),
+                        ))
+                        .with_children(|c| {
+                            for (mesh, material, shadows) in &model.parts {
+                                let mut e = c.spawn((
+                                    Mesh3d(mesh.clone()),
+                                    MeshMaterial3d(material.clone()),
+                                ));
+                                if !shadows {
+                                    e.insert(NotShadowCaster);
+                                }
+                            }
+                        });
+                }
+            }
+        }
+        return;
+    }
+    for (r, mut v) in &mut rows {
+        let shown = editor.visible(Item::Road(r.0));
+        v.set_if_neq(if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
 }

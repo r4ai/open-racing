@@ -172,6 +172,33 @@ enum Command {
     /// Paints the start/finish line across the main road and a line at the front of
     /// each grid slot, in place of those painted before.
     Paint { project: String },
+    /// Puts a garage (a glTF model in the project) behind each pit box, as the pit
+    /// lane's row "garages".
+    Garages {
+        project: String,
+        model: PathBuf,
+        /// Distance beyond the pit lane's edge, m.
+        #[arg(long, default_value_t = 6.0)]
+        offset: f64,
+    },
+    /// Puts distance boards (a glTF model in the project) before each corner on its
+    /// outside, as a row per corner ("T3 boards").
+    Boards {
+        project: String,
+        model: PathBuf,
+        /// The road; the main road by default.
+        #[arg(long)]
+        road: Option<String>,
+        /// Metres before each corner.
+        #[arg(long, value_delimiter = ',', default_values_t = [100.0, 200.0, 300.0])]
+        distances: Vec<f64>,
+        /// Only corners turning at least this far, degrees.
+        #[arg(long, default_value_t = 45.0)]
+        least: f64,
+        /// Distance beyond the road's edge, m.
+        #[arg(long, default_value_t = 4.0)]
+        offset: f64,
+    },
     /// Bakes the project and checks the package, without saving it.
     Check {
         project: String,
@@ -463,6 +490,43 @@ fn run(cli: Cli) -> Result<(), Error> {
             if terrain {
                 println!("the terrain follows it away from the roads");
             }
+        }
+        Command::Garages {
+            project,
+            model,
+            offset,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let op = open_racing_track_project::rows::garages(&p, &model, offset)?;
+            ops::apply_all(&mut p, &[op])?;
+            p.save(&dir)?;
+            let n = p.markers.pit.as_ref().map_or(0, |pit| pit.boxes.len());
+            println!("a garage behind each of {n} pit boxes");
+        }
+        Command::Boards {
+            project,
+            model,
+            road,
+            distances,
+            least,
+            offset,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let road = road.unwrap_or_else(|| p.main_road.clone());
+            let list = open_racing_track_project::rows::boards(
+                &p,
+                &road,
+                &model,
+                &distances,
+                least.to_radians(),
+                offset,
+            )?;
+            let n = list.len();
+            ops::apply_all(&mut p, &list)?;
+            p.save(&dir)?;
+            println!("distance boards before {n} corners of \"{road}\"");
         }
         Command::Paint { project } => {
             let dir = resolve(&project);

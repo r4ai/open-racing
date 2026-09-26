@@ -23,6 +23,8 @@ mod object;
 mod road;
 mod track;
 
+pub use track::model_button;
+
 use library::*;
 pub use object::*;
 use road::*;
@@ -82,6 +84,11 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
             ),
             (PropTab::Lines, "✏", "Painted lines"),
             (PropTab::Barriers, "🚧", "Barriers along the road"),
+            (
+                PropTab::Rows,
+                "🌲",
+                "Rows: trees, cones, boards, lights, stands and garages beside the road",
+            ),
         ]),
         Some(Item::Spline(_)) => tabs.push((PropTab::Object, "〰", "Kerb, wall or fence")),
         Some(Item::Prop(_)) => tabs.push((PropTab::Object, "📦", "Prop")),
@@ -171,7 +178,7 @@ pub fn show(
             .auto_shrink([false, false])
             .show(ui, |ui| match c.shell.tab {
                 PropTab::Track => track_tab(ui, c, state),
-                PropTab::Markers => markers_tab(ui, c.editor, state),
+                PropTab::Markers => markers_tab(ui, c.editor, state, library),
                 PropTab::Terrain => terrain_tab(ui, c),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Library => library_tab(ui, c.editor, state, library),
@@ -181,10 +188,11 @@ pub fn show(
                     Some(Item::Prop(_)) => prop_tab(ui, c, state, library),
                     None => {}
                 },
-                PropTab::Corners => crate::corners::tab(ui, c),
+                PropTab::Corners => crate::corners::tab(ui, c, library),
                 PropTab::Strips => strips_tab(ui, c),
                 PropTab::Lines => lines_tab(ui, c),
                 PropTab::Barriers => barriers_tab(ui, c, library),
+                PropTab::Rows => rows_tab(ui, c, library),
             });
     });
 }

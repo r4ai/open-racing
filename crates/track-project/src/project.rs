@@ -670,6 +670,59 @@ pub struct Mark {
     pub material: MaterialId,
 }
 
+/// Copies of a model beside a road, every `spacing` metres along its stretches or at
+/// given places: trees, cones, marker boards, lamp posts, spectators' stands, pit
+/// garages. Each faces the road (the model's +X along it, +Y towards it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PropRow {
+    pub name: String,
+    /// A glTF file (.glb or .gltf), relative to the project's directory.
+    pub model: PathBuf,
+    pub side: Side,
+    /// Distance from the road's edge, m.
+    pub offset: f64,
+    /// Metres between copies.
+    pub spacing: f64,
+    /// Where it runs; everywhere when empty.
+    #[serde(default)]
+    pub ranges: Vec<Range>,
+    /// Places along the road (`u`) for one copy each, instead of every `spacing`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<f64>,
+    /// Turn from facing the road, radians anticlockwise seen from above.
+    #[serde(default)]
+    pub yaw: f64,
+    #[serde(default = "one")]
+    pub scale: f64,
+    /// How much copies differ, at random but the same every build.
+    #[serde(default, skip_serializing_if = "Jitter::is_none")]
+    pub jitter: Jitter,
+    /// Stand each on the ground under it (else at the road's height).
+    #[serde(default = "yes")]
+    pub drape: bool,
+    /// Whether cars collide with them.
+    #[serde(default)]
+    pub collide: bool,
+}
+
+/// How much the copies of a row differ from each other: up to this far across (m),
+/// turned (radians) and resized (a fraction), either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Jitter {
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default)]
+    pub yaw: f64,
+    #[serde(default)]
+    pub scale: f64,
+}
+
+impl Jitter {
+    pub fn is_none(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A wall, guard rail or fence the cars collide with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Barrier {
@@ -716,6 +769,9 @@ pub struct Road {
     /// Marks painted across it: the start line, grid slots, pit lane lines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marks: Vec<Mark>,
+    /// Models repeated beside it: trees, cones, boards, lights, stands, garages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<PropRow>,
     /// Spacing of the cross-sections the road is built from, m.
     pub resolution: f64,
 }
@@ -812,6 +868,13 @@ impl Road {
         }
         for m in &mut self.marks {
             m.at = f(m.at);
+        }
+        for r in &mut self.rows {
+            for g in &mut r.ranges {
+                g.from = f(g.from);
+                g.to = f(g.to);
+            }
+            r.at.iter_mut().for_each(|u| *u = f(*u));
         }
         let anchors = self
             .left
@@ -1268,6 +1331,7 @@ impl Project {
                 .to_vec(),
             barriers: vec![barrier(Side::Left), barrier(Side::Right)],
             marks: vec![],
+            rows: vec![],
             resolution: 2.0,
         };
         Self {
@@ -1462,6 +1526,24 @@ impl Project {
             for b in &r.barriers {
                 self.check_wall_style(b.style.as_deref(), b.model.as_ref())
                     .map_err(|e| Error::Invalid(format!("road \"{}\": {e}", r.name)))?;
+            }
+            for (i, row) in r.rows.iter().enumerate() {
+                if r.rows[..i].iter().any(|o| o.name == row.name) {
+                    return invalid(format!(
+                        "road \"{}\": two rows are named \"{}\"",
+                        r.name, row.name
+                    ));
+                }
+                if !(row.spacing >= 0.5 || !row.at.is_empty())
+                    || !(row.scale > 0.0)
+                    || !row.offset.is_finite()
+                    || !row.yaw.is_finite()
+                {
+                    return invalid(format!(
+                        "road \"{}\": row \"{}\" needs a spacing of 0.5 m or more and a size above 0",
+                        r.name, row.name
+                    ));
+                }
             }
         }
         for s in &self.strip_styles {

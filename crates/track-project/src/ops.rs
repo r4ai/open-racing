@@ -187,6 +187,15 @@ pub enum Op {
         road: String,
         name: String,
     },
+    /// Puts a row of a model beside a road, or replaces the one of the same name.
+    PutRow {
+        road: String,
+        row: crate::project::PropRow,
+    },
+    RemoveRow {
+        road: String,
+        name: String,
+    },
     /// Paints a mark across a road, or replaces the one of the same name.
     PutMark {
         road: String,
@@ -454,6 +463,7 @@ fn plain_road(project: &Project, name: String, closed: bool, nodes: Vec<Node>) -
         lines: vec![],
         barriers: vec![],
         marks: vec![],
+        rows: vec![],
         resolution: 2.0,
     }
 }
@@ -488,6 +498,7 @@ impl Op {
                         r.lines.retain(|l| l.ranges.is_empty());
                         r.barriers.retain(|b| b.ranges.is_empty());
                         r.marks.clear();
+                        r.rows.retain(|w| w.ranges.is_empty() && w.at.is_empty());
                         Road {
                             name,
                             closed,
@@ -754,6 +765,10 @@ impl Op {
                     &b.name
                 })?
             }
+            Op::PutRow { road, row } => put(&mut road_mut(p, &road)?.rows, row, |r| &r.name, None),
+            Op::RemoveRow { road, name } => {
+                remove(&mut road_mut(p, &road)?.rows, "row", &name, |r| &r.name)?
+            }
             Op::PutMark { road, mark } => {
                 put(&mut road_mut(p, &road)?.marks, mark, |m| &m.name, None)
             }
@@ -942,6 +957,8 @@ impl Op {
             Op::RemoveLine { .. } => "RemoveLine",
             Op::PutBarrier { .. } => "PutBarrier",
             Op::RemoveBarrier { .. } => "RemoveBarrier",
+            Op::PutRow { .. } => "PutRow",
+            Op::RemoveRow { .. } => "RemoveRow",
             Op::PutMark { .. } => "PutMark",
             Op::RemoveMark { .. } => "RemoveMark",
             Op::PutSpline { .. } => "PutSpline",

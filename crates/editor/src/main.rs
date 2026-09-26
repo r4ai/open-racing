@@ -262,6 +262,7 @@ fn main() {
             preview::rebuild,
             preview::props,
             preview::show_items,
+            preview::rows,
             jobs::poll,
             viewport::gizmos,
             viewport::place_camera,

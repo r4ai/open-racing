@@ -124,6 +124,11 @@ pub fn reverse(p: &mut Project, name: &str) -> Result<(), Error> {
         m.at = f(m.at);
         (m.from, m.to) = (-m.to, -m.from);
     }
+    for w in &mut road.rows {
+        w.side = w.side.other();
+        reversed_ranges(&mut w.ranges, &f);
+        w.at.iter_mut().for_each(|u| *u = f(*u));
+    }
     let m = &mut p.markers;
     if p.main_road == name {
         m.start = f(m.start);
@@ -243,6 +248,7 @@ fn cut(road: &Road, from: usize, to: usize, name: &str) -> Road {
         lines: vec![],
         barriers: vec![],
         marks: vec![],
+        rows: vec![],
         ..road.clone()
     };
     let ranges = |r: &[Range]| cut_ranges(r, period, closed, a, b);
@@ -291,6 +297,26 @@ fn cut(road: &Road, from: usize, to: usize, name: &str) -> Road {
         if (0.0..=b - a).contains(&at) {
             out.marks.push(crate::project::Mark { at, ..m.clone() });
         }
+    }
+    for w in &road.rows {
+        let mut w = w.clone();
+        if !w.at.is_empty() {
+            w.at =
+                w.at.iter()
+                    .map(|&u| along(u))
+                    .filter(|u| (0.0..=b - a).contains(u))
+                    .collect();
+            if w.at.is_empty() {
+                continue;
+            }
+        } else {
+            match ranges(&w.ranges) {
+                Some(r) if r.is_empty() => continue,
+                Some(r) => w.ranges = r,
+                None => {}
+            }
+        }
+        out.rows.push(w);
     }
     out
 }
@@ -583,6 +609,32 @@ pub fn join(p: &mut Project, name: &str, with: &str) -> Result<(), Error> {
     }
     for t in &mut out.barriers {
         if !rb.barriers.iter().any(|b| b.name == t.name) && t.ranges.is_empty() {
+            t.ranges = vec![Range { from: 0.0, to: la }];
+        }
+    }
+    for w in &rb.rows {
+        let mut w = w.clone();
+        w.at.iter_mut().for_each(|u| *u += off);
+        match out.rows.iter().position(|t| t.name == w.name) {
+            Some(i) if w.at.is_empty() && out.rows[i].at.is_empty() => {
+                out.rows[i].ranges = joined(&out.rows[i].ranges, &w.ranges);
+            }
+            Some(i) if !w.at.is_empty() && !out.rows[i].at.is_empty() => {
+                out.rows[i].at.extend(w.at);
+            }
+            found => {
+                if w.at.is_empty() {
+                    w.ranges = only_b(&w.ranges);
+                }
+                if found.is_some() {
+                    w.name = format!("{} ({with})", w.name);
+                }
+                out.rows.push(w);
+            }
+        }
+    }
+    for t in &mut out.rows {
+        if !rb.rows.iter().any(|w| w.name == t.name) && t.ranges.is_empty() && t.at.is_empty() {
             t.ranges = vec![Range { from: 0.0, to: la }];
         }
     }

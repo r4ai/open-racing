@@ -76,6 +76,11 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for p in &project.props {
         refs.push((portable(&p.model), format!("prop {}", p.name)));
     }
+    for r in &project.roads {
+        for w in &r.rows {
+            refs.push((portable(&w.model), format!("row {} of {}", w.name, r.name)));
+        }
+    }
     for (m, user) in wall_models(project) {
         refs.push((portable(&m.model), user));
     }
@@ -273,6 +278,16 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
             let mut p = p.clone();
             p.model = to.clone();
             ops.push(Op::PutProp { prop: p });
+        }
+    }
+    for r in &project.roads {
+        for w in r.rows.iter().filter(|w| portable(&w.model) == from) {
+            let mut w = w.clone();
+            w.model = to.clone();
+            ops.push(Op::PutRow {
+                road: r.name.clone(),
+                row: w,
+            });
         }
     }
     let moved = |m: &Option<ModelRun>| match m {

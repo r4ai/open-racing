@@ -124,7 +124,12 @@ pub(super) fn pit_generator(ui: &mut egui::Ui, editor: &mut Editor, state: &mut 
         });
 }
 
-pub(super) fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
+pub(super) fn markers_tab(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    state: &mut State,
+    library: &Library,
+) {
     let p = &editor.project;
     let mut m = p.markers.clone();
     let main_period = p.road(&p.main_road).map_or(1.0, |r| r.period());
@@ -274,7 +279,55 @@ pub(super) fn markers_tab(ui: &mut egui::Ui, editor: &mut Editor, state: &mut St
         if pchanged {
             editor.apply(vec![Op::SetPit { pit }], Some("pit"));
         }
+        if editor.project.markers.pit.is_some() {
+            ui.separator();
+            model_button(
+                ui,
+                library,
+                "Garages behind the boxes",
+                "A model behind each pit box, as the pit lane's row \"garages\" (see its Rows tab)",
+                |model| match open_racing_track_project::rows::garages(&editor.project, model, 6.0)
+                {
+                    Ok(op) => {
+                        if editor.apply(vec![op], None) {
+                            editor.status = "a garage behind each pit box".into();
+                        }
+                    }
+                    Err(e) => editor.status = e.to_string(),
+                },
+            );
+        }
     });
+}
+
+/// A button that asks for one of the project's models, and what to do with it.
+pub fn model_button(
+    ui: &mut egui::Ui,
+    library: &Library,
+    label: &str,
+    tip: &str,
+    then: impl FnOnce(&std::path::Path),
+) {
+    let models: Vec<_> = library.models().map(|a| a.path.clone()).collect();
+    if models.is_empty() {
+        ui.add_enabled(false, egui::Button::new(label))
+            .on_disabled_hover_text("Import a glTF model under Assets first");
+        return;
+    }
+    let mut chosen = None;
+    ui.menu_button(label, |ui| {
+        for m in &models {
+            if ui.button(m.to_string_lossy()).clicked() {
+                chosen = Some(m.clone());
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text(tip);
+    if let Some(m) = chosen {
+        then(&m);
+    }
 }
 
 pub(super) fn reference_tab(

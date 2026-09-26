@@ -110,6 +110,7 @@ pub fn gizmos(
             let color = match part {
                 Part::Strip(..) => theme::STRIP,
                 Part::Barrier(_) => theme::BARRIER,
+                Part::Row(_) => theme::LANDFORM,
             };
             for (range, rg) in ranges.iter().enumerate() {
                 let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));

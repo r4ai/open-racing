@@ -16,7 +16,16 @@ pub(super) fn parts(road: &Road) -> impl Iterator<Item = (Part, &[Range])> {
         .iter()
         .enumerate()
         .map(|(i, b)| (Part::Barrier(i), b.ranges.as_slice()));
-    strips.chain(barriers).filter(|(_, r)| !r.is_empty())
+    let rows = road
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.at.is_empty())
+        .map(|(i, w)| (Part::Row(i), w.ranges.as_slice()));
+    strips
+        .chain(barriers)
+        .chain(rows)
+        .filter(|(_, r)| !r.is_empty())
 }
 
 /// Width of a side's strips inside strip `i` at frame `f`: each as wide as it is there,
@@ -47,6 +56,10 @@ pub(super) fn part_offset(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> 
             let b = &road.barriers[i];
             b.side.sign() * (edge_of(f, b.side) + b.offset)
         }
+        Part::Row(i) => {
+            let w = &road.rows[i];
+            w.side.sign() * (edge_of(f, w.side) + w.offset)
+        }
     }
 }
 
@@ -58,7 +71,7 @@ pub(super) fn part_reach(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> f
             let inner = inner_width(road, smp, side, i, f);
             side.sign() * (edge_of(f, side) + inner + road.strips(side)[i].width)
         }
-        Part::Barrier(_) => part_offset(road, smp, part, f),
+        Part::Barrier(_) | Part::Row(_) => part_offset(road, smp, part, f),
     }
 }
 

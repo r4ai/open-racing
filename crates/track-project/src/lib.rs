@@ -28,6 +28,7 @@ pub mod pitlane;
 pub mod preview;
 pub mod project;
 pub mod road;
+pub mod rows;
 pub mod spline;
 pub mod terrain;
 pub mod validate;

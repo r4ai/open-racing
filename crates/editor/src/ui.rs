@@ -44,6 +44,8 @@ pub enum PropTab {
     Strips,
     Lines,
     Barriers,
+    /// Rows of models beside the road.
+    Rows,
 }
 
 impl PropTab {
@@ -52,6 +54,7 @@ impl PropTab {
         use PropTab::*;
         [
             Track, Markers, Terrain, Reference, Library, Object, Corners, Strips, Lines, Barriers,
+            Rows,
         ]
         .into_iter()
         .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
@@ -64,6 +67,7 @@ pub enum Focus {
     Strip(Side, usize),
     Line(usize),
     Barrier(usize),
+    Row(usize),
 }
 
 /// A popup over everything, taking the keys and clicks until it closes.
@@ -413,7 +417,10 @@ fn import_centreline(c: &mut Ctx) {
 fn import_heights(c: &mut Ctx) {
     use open_racing_track_project::dem;
     let Some(file) = rfd::FileDialog::new()
-        .add_filter("elevation data", &["tif", "tiff", "asc", "xyz", "csv", "txt"])
+        .add_filter(
+            "elevation data",
+            &["tif", "tiff", "asc", "xyz", "csv", "txt"],
+        )
         .pick_file()
     else {
         return;
