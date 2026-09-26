@@ -265,6 +265,7 @@ mod tests {
             radius,
             strength,
             points: vec![DVec2::new(at.0, at.1)],
+            fill: false,
         }
     }
 
@@ -305,6 +306,7 @@ mod tests {
             radius: 30.0,
             strength: 1.0,
             points: vec![DVec2::new(120.0, -60.0), DVec2::new(120.0, 60.0)],
+            fill: false,
         }]);
         let copies = copies(&s, &keepout, &ground);
         assert!(!copies.is_empty());

@@ -1353,6 +1353,14 @@ pub struct Stroke {
     pub strength: f64,
     /// Its path, m.
     pub points: Vec<DVec2>,
+    /// Its path is a closed outline, as a lasso: it acts fully inside it, easing to
+    /// nothing `radius` outside it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fill: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// What a stroke does.
@@ -1395,12 +1403,25 @@ impl Stroke {
     /// How much it acts at `p`: fully within half its radius of its path, easing
     /// smoothly to nothing at `radius` from it.
     pub fn weight(&self, p: DVec2) -> f64 {
+        let smooth = |t: f64| t * t * (3.0 - 2.0 * t);
+        if self.fill && self.points.len() > 2 {
+            if inside(&self.points, p) {
+                return 1.0;
+            }
+            // Outside the outline, its closing side included.
+            let closing = [self.points[self.points.len() - 1], self.points[0]];
+            let d = distance_to_path(&self.points, p).min(distance_to_path(&closing, p));
+            return if self.radius <= 0.0 || d >= self.radius {
+                0.0
+            } else {
+                smooth(1.0 - d / self.radius)
+            };
+        }
         let d = distance_to_path(&self.points, p);
         if self.radius <= 0.0 || d >= self.radius {
             return 0.0;
         }
-        let t = ((self.radius - d) / (0.5 * self.radius)).min(1.0);
-        t * t * (3.0 - 2.0 * t)
+        smooth(((self.radius - d) / (0.5 * self.radius)).min(1.0))
     }
 
     pub fn is_valid(&self) -> bool {
@@ -1415,6 +1436,19 @@ impl Stroke {
             && !self.points.is_empty()
             && self.points.iter().all(|p| p.is_finite())
     }
+}
+
+/// Whether `p` is inside the polygon through `points` (even-odd).
+pub fn inside(points: &[DVec2], p: DVec2) -> bool {
+    let n = points.len();
+    let mut odd = false;
+    for k in 0..n {
+        let (a, b) = (points[k], points[(k + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            odd = !odd;
+        }
+    }
+    odd
 }
 
 /// Distance from `p` to the path through `points` (to the point, if it is one).

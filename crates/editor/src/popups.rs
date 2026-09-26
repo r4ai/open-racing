@@ -395,6 +395,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Shift drag", "Smooth (sculpting)"),
             ("F / Shift F", "Radius / strength with the mouse"),
             ("[ / ]", "Smaller / larger"),
+            ("L", "Lasso fill: a drag outlines an area, filled fully"),
         ],
     ),
     (

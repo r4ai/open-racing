@@ -132,6 +132,7 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
             .iter()
             .map(|&(x, y)| glam::DVec2::new(x, y))
             .collect(),
+        fill: false,
     };
     use open_racing_track_project::ops::StrokeTarget;
     use open_racing_track_project::project::Brush;

@@ -56,6 +56,7 @@ fn main() {
             radius: 30.0,
             strength: 2.0,
             points: vec![middle, middle + glam::DVec2::X * 60.0],
+            fill: false,
         });
     let t = Instant::now();
     let _ = bake::build_with(&stroked, &mut cache);

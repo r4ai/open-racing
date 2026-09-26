@@ -98,6 +98,8 @@ pub struct Brushes {
     pub scatter: Option<String>,
     /// Scatter wipes models out rather than adding them (as Ctrl does).
     pub erase: bool,
+    /// Lasso fill: a stroke's path is an outline, acting fully inside it (L).
+    pub fill: bool,
     pub stroke: Option<Live>,
     /// F or Shift F: the radius or strength being set with the mouse.
     pub adjust: Option<Adjust>,
@@ -126,6 +128,7 @@ impl Default for Brushes {
             own: false,
             scatter: None,
             erase: false,
+            fill: false,
             stroke: None,
             adjust: None,
         }
@@ -140,6 +143,7 @@ impl Brushes {
             sizes: self.sizes,
             height: self.height,
             erase: self.erase,
+            fill: self.fill,
             ..Default::default()
         }
     }
@@ -195,8 +199,10 @@ pub struct Live {
 }
 
 /// How far apart a stroke's points are, m.
-fn spacing(radius: f64) -> f64 {
-    (0.15 * radius).max(0.25)
+fn spacing(radius: f64, fill: bool) -> f64 {
+    let s = (0.15 * radius).max(0.25);
+    // An outline wants its shape more than its reach.
+    if fill { s.min(2.0) } else { s }
 }
 
 /// The scatter and ground layer the brushes paint, made valid: a layer or scatter
@@ -241,6 +247,7 @@ fn start(
             radius: size.radius,
             strength: size.strength,
             points: vec![p],
+            fill: b.fill,
         },
         base: built.terrain.clone(),
         grid: None,
@@ -361,7 +368,7 @@ pub fn input(
         if let Some(at) = tool.pointer {
             let p = at.truncate();
             let last = *live.stroke.points.last().expect("a stroke has a point");
-            if p.distance(last) >= spacing(live.stroke.radius) {
+            if p.distance(last) >= spacing(live.stroke.radius, live.stroke.fill) {
                 live.stroke.points.push(p);
             }
         }
@@ -389,6 +396,9 @@ pub fn input(
     tool.hint = hint(tool, ctrl, shift);
     if !keys_free || over.is_none() {
         return;
+    }
+    if keys.just_pressed(KeyCode::KeyL) {
+        tool.brush.fill = !tool.brush.fill;
     }
     if keys.just_pressed(KeyCode::KeyF) {
         let what = if shift {
@@ -447,18 +457,29 @@ fn hint(tool: &Tool, ctrl: bool, shift: bool) -> String {
         ToolKind::Paint => "Ctrl: the ground's own",
         _ => "Ctrl: wipe out",
     };
+    let (drag, lasso) = if b.fill {
+        ("Drag round an area to", "L: stroke")
+    } else {
+        ("Drag to", "L: lasso fill")
+    };
     format!(
-        "Drag: {what} · radius {:.1} m (F, [ ]) · strength {:.0} % (Shift F) · {turn}",
+        "{drag} {what} · radius {:.1} m (F, [ ]) · strength {:.0} % (Shift F) · {turn} · {lasso}",
         size.radius,
         size.strength * 100.0
     )
 }
 
-/// Saves a stroke as an operation, its points to the centimetre.
+/// Saves a stroke as an operation: the points its path needs to keep its shape, to
+/// the centimetre.
 fn commit(editor: &mut Editor, live: Live) {
     let mut stroke = live.stroke;
-    stroke.points = stroke
-        .points
+    if stroke.fill && stroke.points.len() < 3 {
+        editor.status = "lasso fill: drag round the area to fill (L switches it off)".into();
+        return;
+    }
+    let path: Vec<DVec3> = stroke.points.iter().map(|p| p.extend(0.0)).collect();
+    let tolerance = (0.03 * stroke.radius).clamp(0.05, 0.5);
+    stroke.points = crate::viewport::simplify(&path, tolerance)
         .iter()
         .map(|p| DVec2::new(round(p.x), round(p.y)))
         .collect();
@@ -623,6 +644,17 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
         _ => Color::srgb(0.45, 1.0, 0.45),
     };
     if let Some(live) = &b.stroke {
+        // A lasso's outline so far, closed.
+        if live.stroke.fill {
+            let s = &live.stroke;
+            let outline: Vec<Vec3> = s
+                .points
+                .iter()
+                .chain(s.points.first())
+                .map(|p| to_bevy(on_ground(*p, at_z(tool))))
+                .collect();
+            gizmos.linestrip(outline, colour);
+        }
         for d in &live.dots {
             gizmos.sphere(
                 Isometry3d::from_translation(to_bevy(*d + DVec3::Z * 0.5)),
@@ -633,6 +665,17 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
     }
     let Some(at) = tool.pointer else { return };
     let radius = b.size(tool.active).radius;
+    // A lasso: a small ring at the pointer, the outline being what fills.
+    if b.fill && b.stroke.is_none() {
+        let ring: Vec<Vec3> = (0..=24)
+            .map(|k| {
+                let a = k as f64 / 24.0 * std::f64::consts::TAU;
+                to_bevy(on_ground(at.truncate() + DVec2::from_angle(a) * 1.0, at.z))
+            })
+            .collect();
+        gizmos.linestrip(ring, colour);
+        return;
+    }
     for (r, alpha) in [(radius, 1.0), (0.5 * radius, 0.45)] {
         let ring: Vec<Vec3> = (0..=64)
             .map(|k| {
@@ -642,6 +685,11 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
             .collect();
         gizmos.linestrip(ring, colour.with_alpha(alpha));
     }
+}
+
+/// The height to look for the ground from under the pointer.
+fn at_z(tool: &Tool) -> f64 {
+    tool.pointer.map_or(0.0, |p| p.z)
 }
 
 /// The ground layers a project starts painting with, by what they are made of.
@@ -800,6 +848,12 @@ pub fn settings_ui(ui: &mut egui::Ui, c: &mut Ctx, compact: bool) {
         _ => return,
     }
     let b = &mut c.tool.brush;
+    ui.separator();
+    ui.selectable_value(&mut b.fill, false, "Stroke")
+        .on_hover_text("A drag paints along its path");
+    ui.selectable_value(&mut b.fill, true, "Lasso fill")
+        .on_hover_text("A drag outlines an area, filled fully; the radius softens its edge (L)");
+    let b = &mut c.tool.brush;
     let by_height = kind == ToolKind::Sculpt && b.sculpt.by_height();
     let size = b.size_mut(kind);
     slider(ui, &mut size.radius, 0.5..=300.0, "Radius", " m", compact)
@@ -935,7 +989,8 @@ mod tests {
         assert_eq!(s.len(), 1, "{}", editor.status);
         assert_eq!(s[0].brush, Brush::Raise);
         assert_eq!(s[0].strength, tool.brush.height);
-        assert!(s[0].points.len() > 2 && s[0].points[0] == a && *s[0].points.last().unwrap() == b);
+        // A straight drag keeps its ends alone.
+        assert_eq!(s[0].points, vec![a, b]);
         assert!(tool.brush.stroke.is_none());
         // Ctrl lowers; Flatten levels where the stroke began.
         drag(&mut editor, &mut tool, &built, a, b, true);

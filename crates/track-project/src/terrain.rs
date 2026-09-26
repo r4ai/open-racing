@@ -833,6 +833,7 @@ mod tests {
             radius: 20.0,
             strength,
             points: points.iter().map(|&(x, y)| DVec2::new(x, y)).collect(),
+            fill: false,
         }
     }
 
@@ -870,6 +871,32 @@ mod tests {
         assert!(g(&project).height_at(hill).unwrap() < peak - 0.1);
         project.terrain.sculpt = vec![stroke(Brush::Noise, 2.0, &[(150.0, 130.0)])];
         assert_eq!(g(&project), g(&project));
+    }
+
+    #[test]
+    fn a_lasso_stroke_acts_fully_inside_its_outline() {
+        let mut project = Project::new("t");
+        project.terrain.cell = 4.0;
+        let road = crate::road::build(&project, 0);
+        let roads = std::slice::from_ref(&road);
+        let flat = build(&project, roads, None).unwrap().grid;
+        // A pad of 100 × 80 m inside the oval, raised 3 m, softened over 10 m outside.
+        project.terrain.sculpt = vec![Stroke {
+            fill: true,
+            radius: 10.0,
+            ..stroke(
+                Brush::Raise,
+                3.0,
+                &[(100.0, 90.0), (200.0, 90.0), (200.0, 170.0), (100.0, 170.0)],
+            )
+        }];
+        let g = build(&project, roads, None).unwrap().grid;
+        let rise = |p: DVec2| g.height_at(p).unwrap() - flat.height_at(p).unwrap();
+        for p in [(110.0, 100.0), (150.0, 130.0), (195.0, 165.0)] {
+            assert!((rise(DVec2::new(p.0, p.1)) - 3.0).abs() < 1e-6, "{p:?}");
+        }
+        assert!(rise(DVec2::new(205.0, 130.0)) > 0.1);
+        assert!(rise(DVec2::new(215.0, 130.0)).abs() < 1e-6);
     }
 
     #[test]
