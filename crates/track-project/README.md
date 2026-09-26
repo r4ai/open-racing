@@ -103,9 +103,10 @@ trackctl guide                          # this text
     scatter: [(name: "woods", models: [(model: "builtin:pine", weight: 3),
                                        (model: "assets/models/oak.glb", weight: 1,
                                         far: Some("assets/models/oak_far.glb"),   // optional
-                                        materials: [(slot: 1, material: "oak leaves")])],
+                                        materials: [(slot: 1, material: "oak leaves")],
+                                        foliage: Some(Deciduous))],
                spacing: 7, scale: (0.8, 1.25), tilt: 0.1, clearance: 3, max_slope: 35,
-               collide: false, shadows: true, detail: 150, draw: 2500,
+               collide: false, shadows: true, detail: 150, draw: 2500, variety: 0.4,
                strokes: [(brush: Paint, radius: 60, strength: 1, hardness: 0.8,
                           points: [(-300, -150), (-250, -80)]),
                          (brush: Erase, radius: 15, strength: 1, points: [(-270, -110)])],
@@ -224,6 +225,16 @@ spectators.
 - A model's `materials: [(slot, material)]` use the project's materials in place of its
   own, by their place in the model (its first material is slot 0): a bark or leaf
   texture of your own, laid by the model's UVs.
+- Plants: a model's `foliage` is `Evergreen` (sways in the wind, stays green),
+  `Deciduous` (sways; its leaves turn yellow, orange and red in autumn, fall in winter
+  and come out fresh in spring), `Grass` (bends far, dries in late summer, straw in
+  winter) or `Rigid` (rocks, cones: stands still). Left out, a built-in model's own
+  kind (`pine` evergreen, `tree`, `poplar` and `bush` broadleaf, `grass` grass, `rock`
+  and `cone` rigid), or else `Evergreen`. The game sways them in its weather's wind, in
+  gusts sweeping over the ground. A model's leaves are its materials cut out by alpha
+  or named as leaves (leaf, foliage, needle, grass, canopy, frond, twig); they take
+  each copy's colour, and none are drawn of a bare copy. `variety` (0 to 1, 0.4 when
+  left out) is how much the copies' leaf colours differ from each other.
 - `trackctl info` counts each scatter's copies, planted and taken out, and says where
   they stand.
 
@@ -237,6 +248,8 @@ game starts in them unless its weather settings say otherwise (Esc, "weather", "
   month and the sky give, K.
 - `exposure` brightens (above 0) or darkens the picture from what the daylight calls
   for, EV; `haze` thickens (above 1) or thins the haze the weather gives, 0 for none.
+- `season: Some(Autumn)` (`Spring`, `Summer`, `Autumn` or `Winter`) is the season
+  scattered plants show; left out, the month's (half a year on south of the equator).
 
 ## Operations
 

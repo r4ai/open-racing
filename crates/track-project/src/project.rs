@@ -1536,6 +1536,9 @@ pub struct Scatter {
     /// The farthest copies are drawn from, m; 0 draws them however far.
     #[serde(default = "draw_distance")]
     pub draw: f64,
+    /// How much the copies' leaf colours differ from each other, 0 (none) to 1.
+    #[serde(default = "variety", skip_serializing_if = "is_variety")]
+    pub variety: f64,
     /// Where they were painted and wiped out (`Paint` and `Erase`), in order.
     #[serde(default)]
     pub strokes: Vec<Stroke>,
@@ -1568,6 +1571,17 @@ fn detail_distance() -> f64 {
 
 fn draw_distance() -> f64 {
     2500.0
+}
+
+/// How much copies' leaf colours differ unless a scatter says otherwise.
+pub const VARIETY: f64 = 0.4;
+
+fn variety() -> f64 {
+    VARIETY
+}
+
+fn is_variety(v: &f64) -> bool {
+    *v == VARIETY
 }
 
 impl Scatter {
@@ -1610,6 +1624,25 @@ pub struct ScatterModel {
     /// the model (its first material is 0): bark or leaves of another texture.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materials: Vec<MaterialSlot>,
+    /// What kind of plant it is, if any: how it moves in the wind and changes with the
+    /// seasons. Left out, a built-in model's own kind, or else `Evergreen`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foliage: Option<Foliage>,
+}
+
+/// What kind of plant a scatter's model is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Foliage {
+    /// Not a plant: rocks, cones, stands. It stands still in the wind.
+    Rigid,
+    /// A conifer or other evergreen: it sways, and stays green.
+    Evergreen,
+    /// A broadleaf tree or bush: it sways, its leaves turn in autumn and fall in
+    /// winter, and come out fresh in spring.
+    Deciduous,
+    /// Long grass: it bends far in the wind, dries in late summer and is straw in
+    /// winter.
+    Grass,
 }
 
 impl ScatterModel {
@@ -1619,7 +1652,17 @@ impl ScatterModel {
             weight,
             far: None,
             materials: vec![],
+            foliage: None,
         }
+    }
+
+    /// What kind of plant it is.
+    pub fn foliage(&self) -> Foliage {
+        self.foliage.unwrap_or_else(|| {
+            crate::shapes::name(&self.model)
+                .and_then(crate::shapes::foliage)
+                .unwrap_or(Foliage::Evergreen)
+        })
     }
 
     /// The project's material used for the model's material `slot`, if one is.

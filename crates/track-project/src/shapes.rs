@@ -5,9 +5,10 @@
 use std::path::Path;
 
 use glam::Vec3;
-use open_racing_track::{Material, Mesh, VisualBuilder};
+use open_racing_track::{Material, Mesh, PlantLook, VisualBuilder};
 
 use crate::model::Model;
+use crate::project::Foliage;
 
 /// What a path to a built-in model starts with.
 pub const PREFIX: &str = "builtin:";
@@ -22,6 +23,17 @@ pub const BUILTIN: [(&str, &str); 7] = [
     ("grass", "a tuft of long grass, about 0.6 m"),
     ("cone", "a traffic cone, 0.7 m"),
 ];
+
+/// What kind of plant the built-in model `name` is.
+pub fn foliage(name: &str) -> Option<Foliage> {
+    Some(match name {
+        "pine" => Foliage::Evergreen,
+        "tree" | "poplar" | "bush" => Foliage::Deciduous,
+        "grass" => Foliage::Grass,
+        "rock" | "cone" => Foliage::Rigid,
+        _ => return None,
+    })
+}
 
 /// The built-in model's name, if `path` names one.
 pub fn name(path: &Path) -> Option<&str> {
@@ -48,6 +60,8 @@ const WHITE: [f32; 3] = [0.8, 0.8, 0.8];
 struct Part {
     colour: [f32; 3],
     roughness: f32,
+    /// A plant's leaves.
+    leaves: bool,
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
     indices: Vec<u32>,
@@ -58,9 +72,18 @@ impl Part {
         Self {
             colour,
             roughness,
+            leaves: false,
             positions: vec![],
             normals: vec![],
             indices: vec![],
+        }
+    }
+
+    /// A plant's leaves.
+    fn leaves(colour: [f32; 3], roughness: f32) -> Self {
+        Self {
+            leaves: true,
+            ..Self::new(colour, roughness)
         }
     }
 
@@ -216,7 +239,7 @@ pub fn model(name: &str) -> Option<Model> {
         "pine" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.28, 0.12, 3.0, 7);
-            let mut needles = Part::new(NEEDLES, 0.95);
+            let mut needles = Part::leaves(NEEDLES, 0.95);
             for (z, r, h) in [(1.6, 2.9, 4.6), (4.0, 2.2, 4.2), (6.4, 1.5, 4.4)] {
                 needles.cone(Vec3::Z * z, r, 0.0, h, 9);
             }
@@ -225,7 +248,7 @@ pub fn model(name: &str) -> Option<Model> {
         "tree" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.32, 0.18, 4.2, 7);
-            let mut leaves = Part::new(LEAVES, 0.9);
+            let mut leaves = Part::leaves(LEAVES, 0.9);
             leaves.blob(Vec3::new(0.0, 0.0, 5.9), Vec3::new(3.1, 3.1, 2.7), 0.14, 1);
             leaves.blob(Vec3::new(0.9, 0.6, 7.3), Vec3::new(2.1, 2.1, 1.8), 0.14, 2);
             leaves.blob(
@@ -239,12 +262,12 @@ pub fn model(name: &str) -> Option<Model> {
         "poplar" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.25, 0.12, 3.0, 7);
-            let mut leaves = Part::new(POPLAR, 0.9);
+            let mut leaves = Part::leaves(POPLAR, 0.9);
             leaves.blob(Vec3::new(0.0, 0.0, 7.2), Vec3::new(1.5, 1.5, 5.0), 0.1, 4);
             vec![trunk, leaves]
         }
         "bush" => {
-            let mut leaves = Part::new(SHRUB, 0.95);
+            let mut leaves = Part::leaves(SHRUB, 0.95);
             leaves.blob(Vec3::new(0.0, 0.0, 0.55), Vec3::new(1.3, 1.1, 0.85), 0.2, 5);
             leaves.blob(Vec3::new(0.6, 0.3, 0.8), Vec3::new(0.7, 0.7, 0.55), 0.2, 6);
             vec![leaves]
@@ -260,7 +283,7 @@ pub fn model(name: &str) -> Option<Model> {
             vec![stone]
         }
         "grass" => {
-            let mut blades = Part::new(STRAW, 0.95);
+            let mut blades = Part::leaves(STRAW, 0.95);
             for k in 0..9u32 {
                 let a = k as f32 * 2.4;
                 let at = Vec3::new(a.cos(), a.sin(), 0.0) * (0.06 + 0.02 * k as f32);
@@ -293,6 +316,10 @@ fn assemble(parts: Vec<Part>) -> Model {
             base_color: [r, g, b, 1.0],
             roughness: part.roughness,
             reflectance: 0.3,
+            plant: part.leaves.then_some(PlantLook {
+                leaves: true,
+                ..Default::default()
+            }),
             ..Default::default()
         });
         let n = part.positions.len();

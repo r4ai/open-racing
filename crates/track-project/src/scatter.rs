@@ -11,17 +11,21 @@
 //! instancing: the model in full near the camera, its far model (or pictures of it on
 //! crossed cards, see `impostor`) beyond the scatter's detail distance, and nothing
 //! beyond its draw distance, each copy faded in and out by its own distance.
+//!
+//! Each copy of a plant has leaves of its own colour, as the season and the scatter's
+//! variety make them: greens differing from tree to tree, turning yellow, orange and red
+//! each at its own time in autumn, and bare in winter (see `leaves`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec2, DVec3};
 use open_racing_sim::{GroundMesh, Surface};
-use open_racing_track::{FAR_AWAY, Instance, Level, Mesh};
+use open_racing_track::{BARE, FAR_AWAY, Instance, Level, Mesh, PlantLook, Visual};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Model;
-use crate::project::{Brush, Plant, Scatter};
+use crate::project::{Brush, Foliage, Plant, Scatter};
 use crate::road::RoadBuild;
 use crate::terrain::Lookup;
 
@@ -54,12 +58,13 @@ impl Copy {
             * DQuat::from_rotation_z(self.yaw)
     }
 
-    /// Where the renderer draws it.
-    pub fn instance(&self) -> Instance {
+    /// Where the renderer draws it, with its leaves' look.
+    pub fn instance(&self, leaves: [u8; 4]) -> Instance {
         Instance {
             pos: self.pos.as_vec3().to_array(),
             rotation: self.rotation().as_quat().to_array(),
             scale: self.scale as f32,
+            leaves,
         }
     }
 
@@ -273,15 +278,165 @@ pub fn fades(s: &Scatter, far: bool) -> [Level; 2] {
     ]
 }
 
-/// Each model's copies, where the renderer draws them.
-pub fn instances(models: usize, copies: &[Copy]) -> Vec<Vec<Instance>> {
-    let mut out = vec![Vec::new(); models];
+/// Each of the scatter's models' copies, where the renderer draws them, with their
+/// leaves as they look at the plant month `month` (see `Environment::plant_month`).
+pub fn instances(s: &Scatter, month: f64, copies: &[Copy]) -> Vec<Vec<Instance>> {
+    let mut out = vec![Vec::new(); s.models.len()];
     for c in copies {
         if let Some(list) = out.get_mut(c.model) {
-            list.push(c.instance());
+            let foliage = s.models[c.model].foliage();
+            list.push(c.instance(leaves(foliage, month, s.variety, c.pos.truncate())));
         }
     }
     out
+}
+
+/// How a model's materials move in the wind as a plant of `foliage`, if it is one: its
+/// wood's and its leaves'. The top of the model bends so far in a 10 m/s wind: the
+/// taller a copy, the farther.
+pub fn plant(foliage: Foliage, model: &Model) -> Option<[PlantLook; 2]> {
+    let (top, flutter) = match foliage {
+        Foliage::Rigid => return None,
+        Foliage::Evergreen => (0.25, 0.012),
+        Foliage::Deciduous => (0.35, 0.03),
+        Foliage::Grass => (0.12, 0.015),
+    };
+    let height = model.bounds[1].z.max(0.3);
+    let sway = top / (height * height);
+    Some([
+        PlantLook {
+            sway,
+            flutter: 0.0,
+            leaves: false,
+        },
+        PlantLook {
+            sway,
+            flutter,
+            leaves: true,
+        },
+    ])
+}
+
+/// A model's materials as a plant of `foliage`: those of its leaves as leaves, all
+/// moving in the wind; none a plant's when it is not one.
+pub fn plant_look(model: &Model, foliage: Foliage) -> Visual {
+    let plants = plant(foliage, model);
+    let mut look = model.look.clone();
+    for m in &mut look.materials {
+        let leaves = m.plant.is_some_and(|p| p.leaves);
+        m.plant = plants.map(|[wood, leaf]| if leaves { leaf } else { wood });
+    }
+    look
+}
+
+/// A colour for leaves, linear, scaled to `brightness` times their own, and mixed in
+/// by `amount` (0 to 1): see `open_racing_track::Instance::leaves`.
+fn tint(rgb: [f64; 3], brightness: f64, amount: f64) -> [u8; 4] {
+    let luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let scale = 0.2 * brightness / luminance.max(1e-6);
+    let srgb = |c: f64| {
+        let c = (c * scale).clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    };
+    let a = (amount.clamp(0.0, 1.0) * 254.0).round() as u8;
+    [srgb(rgb[0]), srgb(rgb[1]), srgb(rgb[2]), a]
+}
+
+fn smooth(a: f64, b: f64, x: f64) -> f64 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn mix3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Autumn's colours, in the order leaves turn: (colour, brightness).
+const AUTUMN: [([f64; 3], f64); 5] = [
+    ([0.35, 0.55, 0.08], 1.1),
+    ([0.8, 0.6, 0.05], 1.7),
+    ([0.9, 0.33, 0.03], 1.4),
+    ([0.7, 0.1, 0.03], 0.95),
+    ([0.35, 0.17, 0.06], 0.7),
+];
+
+/// How the leaves of a copy of a plant standing at `at` look at the plant month
+/// `month` (0 to 12, 0 the start of January, in a northern year), with the scatter's
+/// `variety`: each copy's green differs a little from the others', and each turns,
+/// falls and comes out at a time of its own round the season's.
+pub fn leaves(foliage: Foliage, month: f64, variety: f64, at: DVec2) -> [u8; 4] {
+    let cell = (at * 100.0).round();
+    let h = |k: u64| hash(0x1eaf, cell.x as i64, cell.y as i64, k);
+    let variety = variety.clamp(0.0, 1.0);
+    // Summer: greens from yellowish to bluish, lighter and darker.
+    let green = mix3([0.3, 0.6, 0.08], [0.12, 0.55, 0.25], h(1));
+    let summer = (green, 1.0 + (h(2) - 0.5) * 0.7 * variety, variety);
+    let (rgb, brightness, amount) = match foliage {
+        Foliage::Rigid => return [0; 4],
+        Foliage::Evergreen => {
+            // Darker and bluer in the cold months.
+            let cold = 1.0 - smooth(1.5, 3.5, month) + smooth(10.5, 12.0, month);
+            let winter = ([0.1, 0.4, 0.3], 0.8);
+            (
+                mix3(summer.0, winter.0, cold),
+                summer.1 + (winter.1 - summer.1) * cold,
+                summer.2.max(0.5 * cold),
+            )
+        }
+        Foliage::Grass => {
+            // Green in spring, drying through late summer, straw from late autumn.
+            let straw = ([0.6, 0.5, 0.2], 1.4);
+            let dry = (smooth(7.0, 9.0, month) * 0.5 + smooth(10.0, 11.5, month) * 0.5)
+                .max(1.0 - smooth(2.0, 3.5, month));
+            let dry = (dry + (h(3) - 0.5) * 0.3).clamp(0.0, 1.0);
+            (
+                mix3(summer.0, straw.0, dry),
+                summer.1 + (straw.1 - summer.1) * dry,
+                summer.2.max(0.85 * dry),
+            )
+        }
+        Foliage::Deciduous => {
+            // Each tree comes out and turns up to a few weeks from the others.
+            let spring = (month - 3.3) / 0.8 + (h(4) - 0.5) * 1.2;
+            let autumn = (month - 8.8) / 2.2 + (h(5) - 0.5) * 0.5;
+            if spring < 0.0 || autumn > 1.1 {
+                return BARE;
+            }
+            if month < 6.0 {
+                // Fresh, light green, darkening into summer's.
+                let fresh = 1.0 - spring.clamp(0.0, 1.0);
+                (
+                    mix3(summer.0, [0.4, 0.7, 0.1], fresh),
+                    summer.1 + 0.4 * fresh,
+                    summer.2.max(0.8 * fresh),
+                )
+            } else if autumn <= 0.0 {
+                summer
+            } else {
+                // Some turn only yellow, others on to red before they brown and fall.
+                let reach = 0.3 + 0.7 * h(6);
+                let t = if autumn > 1.0 {
+                    1.0
+                } else {
+                    autumn.min(reach)
+                } * (AUTUMN.len() - 1) as f64;
+                let (i, f) = ((t.floor() as usize).min(AUTUMN.len() - 2), t.fract());
+                let (a, b) = (AUTUMN[i], AUTUMN[i + 1]);
+                let f = if t >= (AUTUMN.len() - 1) as f64 { 1.0 } else { f };
+                (
+                    mix3(a.0, b.0, f),
+                    a.1 + (b.1 - a.1) * f,
+                    summer.2.max(smooth(0.0, 0.15, autumn) * 0.95),
+                )
+            }
+        }
+    };
+    tint(rgb, brightness, amount)
 }
 
 /// A model's part at each of `copies`, merged in the world: what cars hit when the
@@ -324,7 +479,7 @@ pub fn triangles(near: &[Arc<Model>], copies: &[Copy]) -> usize {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::project::{HARDNESS, Project, ScatterModel, Stroke};
+    use crate::project::{HARDNESS, Project, ScatterModel, Stroke, VARIETY};
 
     pub(crate) fn woods(strokes: Vec<Stroke>) -> Scatter {
         Scatter {
@@ -343,6 +498,7 @@ pub(crate) mod tests {
             shadows: true,
             detail: 150.0,
             draw: 2000.0,
+            variety: VARIETY,
             strokes,
             removed: vec![],
             placed: vec![],
@@ -455,7 +611,7 @@ pub(crate) mod tests {
         assert_eq!(planted[0].id, CopyId::Placed(0));
 
         // Each copy is drawn where it stands, turned and sized as it is.
-        let lists = instances(2, &copies);
+        let lists = instances(&s, 6.5, &copies);
         assert_eq!(lists[0].len() + lists[1].len(), copies.len());
         let c = copies.iter().find(|c| c.model == 1).unwrap();
         let i = lists[1][0];
@@ -468,6 +624,43 @@ pub(crate) mod tests {
         let pines = of_model(&copies, 0);
         let solid = world_mesh(&pine.meshes[0], &pines);
         assert_eq!(solid.indices.len(), pine.meshes[0].indices.len() * pines.len());
+    }
+
+    #[test]
+    fn leaves_turn_in_autumn_fall_in_winter_and_differ_from_copy_to_copy() {
+        let at = |k: usize| DVec2::new(k as f64 * 7.3, 3.1);
+        let look = |f, month, k| leaves(f, month, VARIETY, at(k));
+        // Rocks have no leaves to colour.
+        assert_eq!(look(Foliage::Rigid, 10.0, 0), [0; 4]);
+        // Broadleaf trees: bare in January, all in leaf in July, most turned in late
+        // October, and not all alike in summer.
+        let n = 200;
+        let count = |month, f: &dyn Fn([u8; 4]) -> bool| {
+            (0..n)
+                .filter(|&k| f(look(Foliage::Deciduous, month, k)))
+                .count()
+        };
+        assert_eq!(count(0.5, &|l| l == BARE), n);
+        assert_eq!(count(6.5, &|l| l == BARE), 0);
+        let red_or_yellow = |l: [u8; 4]| l != BARE && l[0] > l[1] / 2 + 40 && l[3] > 200;
+        assert!(count(9.8, &red_or_yellow) > n / 2, "{}", count(9.8, &red_or_yellow));
+        assert!(count(11.8, &|l| l == BARE) > n * 9 / 10);
+        let summer: std::collections::HashSet<_> =
+            (0..n).map(|k| look(Foliage::Deciduous, 6.5, k)).collect();
+        assert!(summer.len() > n / 2);
+        // Without variety, summer leaves keep their own colour.
+        assert_eq!(leaves(Foliage::Deciduous, 6.5, 0.0, at(3))[3], 0);
+        // Conifers stay in needles; grass is straw in winter.
+        assert!((0..n).all(|k| look(Foliage::Evergreen, 0.5, k) != BARE));
+        let straw = look(Foliage::Grass, 0.5, 1);
+        assert!(straw[0] > straw[2] + 60 && straw[3] > 150, "{straw:?}");
+        // South of the equator the seasons are the other way round.
+        let south = open_racing_track::Environment {
+            month: 7,
+            ..Default::default()
+        };
+        assert!(south.plant_month(-35.0) < 1.0);
+        assert_eq!(south.plant_month(48.0), 6.5);
     }
 
     #[test]

@@ -27,8 +27,17 @@ impl Plugin for ScenePlugin {
                     spawn_lights,
                 ),
             )
-            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate));
+            .add_systems(PostUpdate, update_car.before(TransformSystems::Propagate))
+            .add_systems(Update, update_wind);
     }
+}
+
+/// Plants sway in the weather's wind (10 m above the ground; gusts come in the shader).
+fn update_wind(sim: Res<Simulation>, mut wind: ResMut<track_model::Wind>) {
+    let (speed, from) = sim.weather.wind();
+    let a = from.to_radians();
+    let towards = [-(a.sin() * speed) as f32, -(a.cos() * speed) as f32];
+    wind.set_if_neq(track_model::Wind(towards));
 }
 
 /// Spawns the track's model, if it has one.

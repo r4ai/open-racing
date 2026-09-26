@@ -4,20 +4,30 @@
 //!
 //! Shared by the app and the track editor.
 
-use bevy::asset::{RenderAssetUsages, embedded_asset};
+use bevy::asset::{RenderAssetUsages, embedded_asset, uuid_handle};
 use bevy::camera::visibility::VisibilityRange;
 use bevy::image::{
     CompressedImageFormatSupport, CompressedImageFormats, ImageAddressMode, ImageSampler,
     ImageSamplerDescriptor, ImageType,
 };
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, Face, ShaderType};
-use bevy::shader::ShaderRef;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, Face, ShaderType, TexelCopyBufferLayout, TextureDimension,
+    TextureFormat,
+};
+use bevy::render::renderer::RenderQueue;
+use bevy::render::texture::GpuImage;
+use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::shader::{ShaderRef, load_shader_library};
 use glam::{DQuat, DVec3};
-use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, FAR_AWAY, Instance, Level, Visual};
+use open_racing_track::{
+    AlphaMode as TrackAlpha, DetailMask, FAR_AWAY, Instance, Level, PlantLook, Visual,
+};
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
 pub fn to_bevy(v: DVec3) -> Vec3 {
@@ -47,7 +57,72 @@ pub struct TrackModelPlugin;
 impl Plugin for TrackModelPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "track_material.wgsl");
-        app.add_plugins(MaterialPlugin::<TrackMaterial>::default());
+        embedded_asset!(app, "track_vertex.wgsl");
+        embedded_asset!(app, "track_prepass.wgsl");
+        load_shader_library!(app, "track_bindings.wgsl");
+        load_shader_library!(app, "track_plant.wgsl");
+        app.init_resource::<Wind>().add_plugins((
+            MaterialPlugin::<TrackMaterial>::default(),
+            ExtractResourcePlugin::<Wind>::default(),
+        ));
+        let texel = Image::new_fill(
+            Extent3d::default(),
+            TextureDimension::D2,
+            &[0; 8],
+            TextureFormat::Rgba16Float,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(&WIND_TEXTURE, texel)
+            .expect("the wind's texture");
+        if let Some(render) = app.get_sub_app_mut(RenderApp) {
+            render.add_systems(Render, write_wind.in_set(RenderSystems::PrepareResources));
+        }
+    }
+}
+
+/// The wind plants sway in, 10 m above the ground: m/s along the simulation's x and
+/// y. The app follows its weather's, the editor the project's sky's.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, ExtractResource)]
+pub struct Wind(pub [f32; 2]);
+
+/// The texture the wind reaches plants' shaders in: one texel of (x, z) in Bevy's
+/// axes. Written each frame on the GPU as it is, so that the materials reading it
+/// never change.
+pub const WIND_TEXTURE: Handle<Image> = uuid_handle!("6d3e2a0c-3c6b-4d3f-9b8e-2f5a0f4c7e11");
+
+fn write_wind(wind: Res<Wind>, images: Res<RenderAssets<GpuImage>>, queue: Res<RenderQueue>) {
+    let Some(image) = images.get(&WIND_TEXTURE) else {
+        return;
+    };
+    let [x, y] = wind.0;
+    let texel = [half(x), half(-y), 0, 0];
+    let bytes: Vec<u8> = texel.iter().flat_map(|h| h.to_le_bytes()).collect();
+    queue.write_texture(
+        image.texture.as_image_copy(),
+        &bytes,
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: None,
+        },
+        Extent3d::default(),
+    );
+}
+
+/// IEEE half-precision bits of a float of a size winds have.
+fn half(x: f32) -> u16 {
+    let sign = if x < 0.0 { 0x8000 } else { 0 };
+    let bits = x.abs().to_bits();
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mantissa = ((bits >> 13) & 0x3ff) as u16;
+    sign | if exp <= 0 {
+        0
+    } else if exp >= 31 {
+        0x7bff
+    } else {
+        (exp as u16) << 10 | mantissa
     }
 }
 
@@ -63,6 +138,10 @@ const SURFACE: u32 = 8;
 const BASE_ALPHA_MASK: u32 = 16;
 /// The detail normal map is present.
 const DETAIL_NORMAL_MAP: u32 = 32;
+/// A plant's leaves: they take each copy's leaf colour, and fall when it is bare.
+const LEAVES: u32 = 64;
+/// Moves in the wind.
+const WIND: u32 = 128;
 
 #[derive(ShaderType, Clone, Debug, Default, Reflect)]
 pub struct TrackParams {
@@ -73,10 +152,13 @@ pub struct TrackParams {
     flags: u32,
     detail_normal_scale: f32,
     detail_normal_strength: f32,
+    sway: f32,
+    flutter: f32,
 }
 
 /// The package's surface texture, normal map, reflection of the surroundings and detail
-/// layers, see `track_material.wgsl`. Bindings start at 100, after the standard
+/// layers, see `track_material.wgsl`, and plants moving in the wind with each copy's
+/// leaf colour, see `track_plant.wgsl`. Bindings start at 100, after the standard
 /// material's. The standard material's own normal mapping would need vertex tangents; this
 /// derives the frame from the UVs instead.
 ///
@@ -84,7 +166,7 @@ pub struct TrackParams {
 /// in few calls: the index table is at binding 120 and the parameters at 121.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[data(100, TrackParams, binding_array(121))]
-#[bindless(index_table(range(100..117), binding(120)))]
+#[bindless(index_table(range(100..118), binding(120)))]
 pub struct TrackExtension {
     params: TrackParams,
     #[texture(101)]
@@ -111,6 +193,30 @@ pub struct TrackExtension {
     #[texture(115)]
     #[sampler(116)]
     detail_normal: Option<Handle<Image>>,
+    /// `WIND_TEXTURE`, for plants.
+    #[texture(117, visibility(vertex, fragment))]
+    wind: Option<Handle<Image>>,
+}
+
+impl TrackExtension {
+    /// Makes it a plant's (see `open_racing_track::PlantLook`), or none.
+    pub fn set_plant(&mut self, plant: Option<PlantLook>) {
+        let p = &mut self.params;
+        p.flags &= !(LEAVES | WIND);
+        (p.sway, p.flutter) = (0.0, 0.0);
+        self.wind = None;
+        let Some(plant) = plant else {
+            return;
+        };
+        if plant.leaves {
+            p.flags |= LEAVES;
+        }
+        if plant.sway > 0.0 || plant.flutter > 0.0 {
+            p.flags |= WIND;
+            (p.sway, p.flutter) = (plant.sway, plant.flutter);
+            self.wind = Some(WIND_TEXTURE);
+        }
+    }
 }
 
 impl From<&TrackExtension> for TrackParams {
@@ -120,6 +226,14 @@ impl From<&TrackExtension> for TrackParams {
 }
 
 impl MaterialExtension for TrackExtension {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://open_racing_track_render/track_vertex.wgsl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://open_racing_track_render/track_prepass.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://open_racing_track_render/track_material.wgsl".into()
     }
@@ -205,7 +319,7 @@ pub fn spawn_visual(
             for (tile, copies) in tiles(&set.copies) {
                 let (at, parts) = merge_tile(&visual.shapes[shape].meshes, &copies, tile);
                 for (m, part) in parts.into_iter().zip(&shapes[shape]) {
-                    spawn_tile(commands, meshes, part, m, at, *level, extra.clone());
+                    spawn_tile(commands, meshes.add(m), part, at, *level, extra.clone());
                 }
             }
         }
@@ -278,6 +392,7 @@ pub fn spawn_copies(
             Mesh3d(part.mesh.clone()),
             MeshMaterial3d(part.material.clone()),
             instance_transform(c),
+            MeshTag(u32::from_le_bytes(c.leaves)),
             extra.clone(),
         ));
         if let Some(range) = &range {
@@ -322,12 +437,13 @@ pub fn tiles(copies: &[Instance]) -> Vec<([i32; 2], Vec<Instance>)> {
 
 /// The copies in a tile merged: each of the shape's meshes at every copy, about the
 /// tile's middle, and where the middle is, whose distance from the camera the tile
-/// shows by.
+/// shows by. Each copy's leaves' look is its vertices' second UVs (see
+/// `track_plant.wgsl`).
 pub fn merge_tile(
     meshes: &[open_racing_track::Mesh],
     copies: &[Instance],
     tile: [i32; 2],
-) -> (Transform, Vec<open_racing_track::Mesh>) {
+) -> (Transform, Vec<Mesh>) {
     let z = copies.iter().map(|c| c.pos[2]).sum::<f32>() / copies.len().max(1) as f32;
     let middle = Vec3::new(
         (tile[0] as f32 + 0.5) * TILE,
@@ -355,7 +471,16 @@ pub fn merge_tile(
                 m.uvs.extend(&part.uvs);
                 m.indices.extend(part.indices.iter().map(|i| i + base));
             }
-            m
+            let looks: Vec<[f32; 2]> = copies
+                .iter()
+                .flat_map(|c| {
+                    let [r, g, b, a] = c.leaves.map(f32::from);
+                    std::iter::repeat_n([r + 256.0 * g, b + 256.0 * a], part.positions.len())
+                })
+                .collect();
+            let mut mesh = to_mesh(m);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, looks);
+            mesh
         })
         .collect();
     let [x, y, z] = middle.to_array();
@@ -379,18 +504,16 @@ pub fn tile_range(level: Level) -> Option<VisibilityRange> {
 
 /// Spawns a tile of a far level: one of its shape's meshes merged at every copy in it
 /// (`merge_tile`), in the look of `part`.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_tile(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    mesh: Handle<Mesh>,
     part: &ShapePart,
-    mesh: open_racing_track::Mesh,
     at: Transform,
     level: Level,
     extra: impl Bundle,
 ) -> Entity {
     let mut e = commands.spawn((
-        Mesh3d(meshes.add(to_mesh(mesh))),
+        Mesh3d(mesh),
         MeshMaterial3d(part.material.clone()),
         at,
         extra,
@@ -458,6 +581,7 @@ pub fn add_materials(
                 ..default()
             };
             extension.params.reflection = m.reflection;
+            extension.set_plant(m.plant);
             if extension.normal_map.is_some() {
                 extension.params.flags |= NORMAL_MAP;
             }

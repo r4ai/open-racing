@@ -7,7 +7,7 @@ use std::path::Path;
 use glam::{DMat3, DVec3, Mat3, Mat4, Vec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track::texture::{self, Image};
-use open_racing_track::{AlphaMode, Material, Mesh, Texture, Visual, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, PlantLook, Texture, Visual, VisualBuilder};
 
 use crate::Error;
 use crate::project::Prop;
@@ -91,6 +91,10 @@ pub fn load(path: &Path) -> Result<Model, Error> {
                 gltf::material::AlphaMode::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided(),
+            plant: leaves(&m).then_some(PlantLook {
+                leaves: true,
+                ..Default::default()
+            }),
             ..Default::default()
         });
     }
@@ -166,6 +170,16 @@ pub fn load(path: &Path) -> Result<Model, Error> {
         triangles,
         bounds,
     })
+}
+
+/// Whether a material of a plant's model is its leaves: cut out by its alpha, as leaf
+/// cards are, or named as leaves.
+fn leaves(m: &gltf::Material) -> bool {
+    let name = m.name().unwrap_or_default().to_lowercase();
+    m.alpha_mode() != gltf::material::AlphaMode::Opaque
+        || ["leaf", "leav", "foliage", "needle", "grass", "canopy", "frond", "twig"]
+            .iter()
+            .any(|w| name.contains(w))
 }
 
 /// Vertex normals averaged from the faces round each vertex.

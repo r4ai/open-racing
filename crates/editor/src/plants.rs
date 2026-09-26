@@ -656,6 +656,7 @@ mod tests {
             shadows: true,
             detail: 150.0,
             draw: 2000.0,
+            variety: open_racing_track_project::project::VARIETY,
             strokes: vec![],
             removed: vec![],
             placed: vec![],

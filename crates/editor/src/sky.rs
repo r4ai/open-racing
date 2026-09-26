@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use glam::DVec3;
 use open_racing_sim::Sky;
 use open_racing_track::Environment;
-use open_racing_track_render::to_bevy;
+use open_racing_track_render::{Wind, to_bevy};
 
 use crate::state::Editor;
 use crate::viewport::{EditorCamera, Tool};
@@ -95,6 +95,13 @@ pub fn lighting(e: &Environment, latitude: f64) -> Lighting {
         background,
         visibility,
     }
+}
+
+/// The wind plants sway in: the mean wind of the project's sky, from the south-west.
+pub fn wind(editor: Res<Editor>, mut wind: ResMut<Wind>) {
+    let speed = editor.project.environment.sky.wind() as f32;
+    let towards = Vec2::ONE.normalize() * speed;
+    wind.set_if_neq(Wind(towards.to_array()));
 }
 
 /// Lights the view by the project's sky and light, when they or the switch change.

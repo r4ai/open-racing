@@ -680,7 +680,7 @@ fn print_summary(s: &inspect::Summary) {
     }
     let e = &s.environment;
     println!(
-        "sky and light: {} at {:02}:{:02} in month {}{}, exposure {:+.1} EV, haze {:.2}",
+        "sky and light: {} at {:02}:{:02} in month {}{}, exposure {:+.1} EV, haze {:.2}{}",
         e.sky.name(),
         (e.hour.floor() as u32) % 24,
         ((e.hour.fract() * 60.0).round() as u32).min(59),
@@ -688,7 +688,9 @@ fn print_summary(s: &inspect::Summary) {
         e.latitude
             .map_or(String::new(), |l| format!(" at {l:.1}° latitude")),
         e.exposure,
-        e.haze
+        e.haze,
+        e.season
+            .map_or(String::new(), |s| format!(", plants in {s:?}").to_lowercase())
     );
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);

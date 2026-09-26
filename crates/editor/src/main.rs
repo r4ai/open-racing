@@ -380,6 +380,7 @@ fn main() {
             viewport::gizmos,
             viewport::place_camera,
             sky::light,
+            sky::wind,
             auto_screenshot,
         )
             .chain(),

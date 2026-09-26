@@ -3,7 +3,7 @@
 
 use open_racing_track_project::ops::StrokeTarget;
 use open_racing_track_project::project::{
-    MAX_LAYERS, MaterialSlot, Scatter, ScatterModel, Terrain,
+    Foliage, MAX_LAYERS, MaterialSlot, Scatter, ScatterModel, Terrain,
 };
 
 use super::*;
@@ -237,6 +237,36 @@ fn model_details(
 ) -> bool {
     let mut changed = false;
     let (_, materials) = names(&c.editor.project);
+    let kind = |f: Foliage| match f {
+        Foliage::Rigid => "not a plant",
+        Foliage::Evergreen => "evergreen",
+        Foliage::Deciduous => "broadleaf",
+        Foliage::Grass => "grass",
+    };
+    row(ui, "Plant", |ui| {
+        egui::ComboBox::from_id_salt(("scatter foliage", &s.name, i))
+            .selected_text(kind(m.foliage()))
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for f in [
+                    Foliage::Evergreen,
+                    Foliage::Deciduous,
+                    Foliage::Grass,
+                    Foliage::Rigid,
+                ] {
+                    if ui
+                        .selectable_label(m.foliage() == f, kind(f))
+                        .clicked()
+                        && m.foliage() != f
+                    {
+                        m.foliage = Some(f);
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How it moves in the wind and changes with the seasons (the World tab): evergreens sway and stay green, broadleaf trees turn in autumn and are bare in winter, grass bends far and dries to straw; what is not a plant stands still")
+    });
     let far_label = match &m.far {
         Some(p) => crate::assets::model_name(p),
         None => "pictures of it (made)".into(),
@@ -410,6 +440,11 @@ fn scatter_ui(
     changed |= drag(ui, "Steepest °", &mut s.max_slope, 0.5, 0.0..=90.0);
     changed |= check(ui, &mut s.collide, "Cars collide with them");
     changed |= check(ui, &mut s.shadows, "They cast shadows");
+    changed |= row(ui, "Variety", |ui| {
+        ui.add(egui::Slider::new(&mut s.variety, 0.0..=1.0).max_decimals(2))
+            .on_hover_text("How much the copies' leaf colours differ from each other: 0 all alike")
+            .changed()
+    });
     ui.label("Level of detail");
     changed |= drag(ui, "In full to m", &mut s.detail, 1.0, 0.0..=5000.0);
     changed |= drag(ui, "Drawn to m", &mut s.draw, 5.0, 0.0..=20000.0);

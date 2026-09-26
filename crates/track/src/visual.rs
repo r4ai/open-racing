@@ -14,7 +14,7 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
 /// Stored for an absent texture index.
@@ -64,6 +64,22 @@ pub struct Material {
     /// Render back faces too.
     pub double_sided: bool,
     pub detail: Option<Detail>,
+    /// A plant's: it moves in the wind, and its leaves take each copy's colour.
+    pub plant: Option<PlantLook>,
+}
+
+/// How a plant's material moves in the wind and takes its copies' looks. The wind
+/// comes from the game's weather; a copy's leaf colour is its `Instance::leaves`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlantLook {
+    /// How far it bends away from a 10 m/s wind at 1 m above the copy's foot, m; it
+    /// bends with the square of the height, and with the square of the wind.
+    pub sway: f32,
+    /// How far its leaves flutter in a 10 m/s wind, m.
+    pub flutter: f32,
+    /// It is leaves: they take each copy's leaf colour, and none are drawn of a bare
+    /// copy.
+    pub leaves: bool,
 }
 
 impl Default for Material {
@@ -80,6 +96,7 @@ impl Default for Material {
             alpha_mode: AlphaMode::Opaque,
             double_sided: false,
             detail: None,
+            plant: None,
         }
     }
 }
@@ -184,7 +201,14 @@ pub struct Instance {
     /// A unit quaternion (x, y, z, w).
     pub rotation: [f32; 4],
     pub scale: f32,
+    /// Its leaves' look (for materials of plants' leaves): an sRGB colour and how much
+    /// of it (0 to 254 for 0 to 1) is mixed into their own, keeping their brightness
+    /// as the colour's is to a luminance of 0.2; or `BARE` (255) for none at all.
+    pub leaves: [u8; 4],
 }
+
+/// `Instance::leaves` of a copy with its leaves fallen.
+pub const BARE: [u8; 4] = [0, 0, 0, 255];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Visual {
@@ -229,6 +253,11 @@ impl VisualBuilder {
     pub fn add_material(&mut self, material: Material) -> u32 {
         self.visual.materials.push(material);
         (self.visual.materials.len() - 1) as u32
+    }
+
+    /// A material added before.
+    pub fn material(&self, i: u32) -> &Material {
+        &self.visual.materials[i as usize]
     }
 
     /// Adds a model's shape, to draw copies of; returns its index.
@@ -364,6 +393,15 @@ impl Visual {
                 AlphaMode::Blend => (w.u8(2), w.f32(0.0)),
             };
             w.u8(m.double_sided.into());
+            match &m.plant {
+                None => w.u8(0),
+                Some(p) => {
+                    w.u8(1);
+                    w.f32(p.sway);
+                    w.f32(p.flutter);
+                    w.u8(p.leaves.into());
+                }
+            }
             match &m.detail {
                 None => w.u8(0),
                 Some(d) => {
@@ -418,6 +456,12 @@ impl Visual {
                 })
                 .collect();
             w.vecs(&copies);
+            let leaves: Vec<u32> = i
+                .copies
+                .iter()
+                .map(|c| u32::from_le_bytes(c.leaves))
+                .collect();
+            w.u32s(&leaves);
         }
         w.finish()
     }
@@ -443,6 +487,14 @@ impl Visual {
                 (a, _) => return Err(Error::Format(format!("visual: unknown alpha mode {a}"))),
             };
             let double_sided = r.u8()? != 0;
+            let plant = match r.u8()? {
+                0 => None,
+                _ => Some(PlantLook {
+                    sway: r.f32()?,
+                    flutter: r.f32()?,
+                    leaves: r.u8()? != 0,
+                }),
+            };
             let detail = match r.u8()? {
                 0 => None,
                 kind => {
@@ -482,6 +534,7 @@ impl Visual {
                 alpha_mode,
                 double_sided,
                 detail,
+                plant,
             });
         }
         let meshes = |r: &mut Reader| -> Result<Vec<Mesh>, Error> {
@@ -518,13 +571,19 @@ impl Visual {
                     fade_out: [f[2], f[3]],
                 });
             }
-            let copies = r
-                .vecs::<8>()?
+            let places = r.vecs::<8>()?;
+            let leaves = r.u32s()?;
+            if leaves.len() != places.len() {
+                return Err(Error::Format("visual: copies' looks miscounted".into()));
+            }
+            let copies = places
                 .into_iter()
-                .map(|[x, y, z, a, b, d, e, scale]| Instance {
+                .zip(leaves)
+                .map(|([x, y, z, a, b, d, e, scale], leaves)| Instance {
                     pos: [x, y, z],
                     rotation: [a, b, d, e],
                     scale,
+                    leaves: leaves.to_le_bytes(),
                 })
                 .collect();
             v.instances.push(Instances { levels, copies });
@@ -580,7 +639,14 @@ mod tests {
     #[test]
     fn copies_of_shapes_round_trip() {
         let mut b = VisualBuilder::new();
-        let m = b.add_material(Material::default());
+        let m = b.add_material(Material {
+            plant: Some(PlantLook {
+                sway: 0.01,
+                flutter: 0.02,
+                leaves: true,
+            }),
+            ..Default::default()
+        });
         add(&mut b, m, 0.0);
         let shape = b.add_shape(Shape {
             meshes: vec![Mesh {
@@ -596,6 +662,7 @@ mod tests {
             pos: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 0.6, 0.8],
             scale: 1.5,
+            leaves: [200, 120, 30, 180],
         };
         b.add_instances(Instances {
             levels: vec![Level {

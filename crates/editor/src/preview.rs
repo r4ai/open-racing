@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::image::CompressedImageFormatSupport;
 use bevy::light::NotShadowCaster;
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use open_racing_sim::GroundMesh;
@@ -17,7 +18,7 @@ use open_racing_track_project::corners::{self, Corner};
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::inspect::{self, Issue};
 use open_racing_track_project::model::{Model, Placement};
-use open_racing_track_project::project::MaterialDef;
+use open_racing_track_project::project::{Foliage, MaterialDef};
 use open_racing_track_project::road::MeshData;
 use open_racing_track_project::terrain::{PaintMask, TerrainBuild};
 use open_racing_track_project::{Cache, Project, bake};
@@ -195,10 +196,11 @@ struct ScatterPart {
     /// The scatter's name, and which of its models.
     scatter: String,
     model: usize,
-    /// Names the model's look for the renderer: its path, the project's materials used
-    /// for some of its own, and whether it casts shadows.
+    /// Names the model's look for the renderer: its path, its kind of plant, the
+    /// project's materials used for some of its own, and whether it casts shadows.
     near_look: String,
     near: Arc<Model>,
+    foliage: Foliage,
     /// The project's materials used for some of the model's own: (its material, the
     /// project's).
     materials: Vec<(usize, usize)>,
@@ -314,6 +316,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
     let ground = Arc::new(scene.ground.build(&surfaces));
     // The scatters' copies, on the ground as it is now, near and far.
     let keepout = open_racing_track_project::scatter::Keepout::new(&scene.roads);
+    let month = bake::plant_month(&project);
     let (mut scatter, mut scattered, mut all_copies, mut sizes, mut colours) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for s in &project.scatter {
@@ -334,7 +337,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
         };
         let copies = open_racing_track_project::scatter::copies(s, &keepout, &ground);
         scattered.push(copies.len());
-        let lists = open_racing_track_project::scatter::instances(s.models.len(), &copies);
+        let lists = open_racing_track_project::scatter::instances(s, month, &copies);
         sizes.push(
             near.iter()
                 .map(|m| {
@@ -358,15 +361,22 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
                 .iter()
                 .filter_map(|x| Some((x.slot, project.material_index(&x.material)?)))
                 .collect();
+            let foliage = def.foliage();
             scatter.push(ScatterPart {
                 scatter: s.name.clone(),
                 model: m,
-                near_look: format!("{}|{materials:?}|{}", def.model.display(), s.shadows),
+                near_look: format!(
+                    "{}|{foliage:?}|{materials:?}|{}",
+                    def.model.display(),
+                    s.shadows
+                ),
                 near: near[m].clone(),
+                foliage,
                 materials,
-                far: far[m]
-                    .clone()
-                    .map(|f| (format!("far {:p}|{}", Arc::as_ptr(&f), s.shadows), f)),
+                far: far[m].clone().map(|f| {
+                    let look = format!("far {:p}|{foliage:?}|{}", Arc::as_ptr(&f), s.shadows);
+                    (look, f)
+                }),
                 levels: open_racing_track_project::scatter::fades(s, far[m].is_some()),
                 shadows: s.shadows,
                 copies: list,
@@ -522,6 +532,7 @@ pub fn rebuild(
                     shape_parts(
                         model,
                         look,
+                        part.foliage,
                         slots,
                         part.shadows,
                         &mut state,
@@ -598,18 +609,20 @@ pub fn rebuild(
 }
 
 /// The name of a model's own materials among those made for models: its path (or
-/// what names its far model), without the project's materials used for some of them.
+/// what names its far model) and its kind of plant, without the project's materials
+/// used for some of them.
 fn model_look(look: &str) -> String {
-    look.split('|').next().unwrap_or(look).to_string()
+    look.split('|').take(2).collect::<Vec<_>>().join("|")
 }
 
-/// A model's meshes ready to draw copies of: its own materials, made once for the
-/// model, with the project's used for some of them (`slots`: the model's material, the
-/// project's).
+/// A model's meshes ready to draw copies of: its own materials as a plant of
+/// `foliage`, made once for the model and the kind, with the project's used for some
+/// of them (`slots`: the model's material, the project's), made the plant's too.
 #[allow(clippy::too_many_arguments)]
 fn shape_parts(
     model: &Model,
     look: &str,
+    foliage: Foliage,
     slots: &[(usize, usize)],
     shadows: bool,
     state: &mut Rebuild,
@@ -618,10 +631,11 @@ fn shape_parts(
     materials: &mut Assets<TrackMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<ShapePart> {
+    let plant = open_racing_track_project::scatter::plant_look(model, foliage);
     let own = state
         .wall_looks
         .entry(model_look(look))
-        .or_insert_with(|| render::add_materials(&model.look, formats, 16, materials, images))
+        .or_insert_with(|| render::add_materials(&plant, formats, 16, materials, images))
         .clone();
     let fallback = state.handles.first().cloned().unwrap_or_default();
     model
@@ -629,12 +643,18 @@ fn shape_parts(
         .iter()
         .map(|m| {
             let slot = m.material as usize;
-            let material = slots
+            let project = slots
                 .iter()
                 .find(|(s, _)| *s == slot)
                 .and_then(|(_, i)| state.handles.get(*i))
-                .or(own.get(slot))
-                .cloned()
+                .and_then(|h| {
+                    let as_plant = plant.materials.get(slot)?.plant;
+                    let mut material = materials.get(h)?.clone();
+                    material.extension.set_plant(as_plant);
+                    Some(materials.add(material))
+                });
+            let material = project
+                .or(own.get(slot).cloned())
                 .unwrap_or(fallback.clone());
             ShapePart {
                 mesh: meshes.add(render::to_mesh(m.clone())),
@@ -719,7 +739,9 @@ impl Scattered {
                 Some(old) => {
                     let t = render::instance_transform(c);
                     for &e in &g.entities[i] {
-                        commands.entity(e).insert(t);
+                        commands
+                            .entity(e)
+                            .insert((t, MeshTag(u32::from_le_bytes(c.leaves))));
                     }
                     dirty.extend([render::tile_of(old), render::tile_of(c)]);
                 }
@@ -759,7 +781,8 @@ impl Scattered {
                 .into_iter()
                 .zip(&far.parts)
                 .map(|(m, part)| {
-                    render::spawn_tile(commands, meshes, part, m, at, far.level, ChildOf(g.entity))
+                    let mesh = meshes.add(m);
+                    render::spawn_tile(commands, mesh, part, at, far.level, ChildOf(g.entity))
                 })
                 .collect();
             far.tiles.insert(tile, entities);
@@ -794,6 +817,7 @@ fn spawn_copy(
                 Mesh3d(part.mesh.clone()),
                 MeshMaterial3d(part.material.clone()),
                 t,
+                MeshTag(u32::from_le_bytes(c.leaves)),
                 ChildOf(group),
             ));
             if let Some(range) = &range {

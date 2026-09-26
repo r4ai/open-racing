@@ -358,6 +358,7 @@ impl Cache {
                     Alpha::Mask(c) => Some(c),
                     Alpha::Blend => Some(0.5),
                 },
+                leaves: paint.leaves,
             };
         }
         Ok(paints)
@@ -489,19 +490,16 @@ pub fn materials(project: &Project, dir: &Path, cache: &mut Cache) -> Result<Vis
     Ok(visual.build())
 }
 
-/// Adds a model's textures and materials to `visual`; returns the new index of each
-/// of its materials.
-pub fn add_look(model: &Model, visual: &mut VisualBuilder) -> Vec<u32> {
-    let textures: Vec<u32> = model
-        .look
+/// Adds a model's textures and materials (its `look`) to `visual`; returns the new
+/// index of each of its materials.
+pub fn add_look(look: &Visual, visual: &mut VisualBuilder) -> Vec<u32> {
+    let textures: Vec<u32> = look
         .textures
         .iter()
         .map(|t| visual.add_texture(t.clone()))
         .collect();
     let remap = |i: Option<u32>| i.map(|i| textures[i as usize]);
-    model
-        .look
-        .materials
+    look.materials
         .iter()
         .map(|m| {
             visual.add_material(Material {
@@ -528,7 +526,7 @@ pub fn add_props(
         let model = cache.model(dir, &prop.model)?;
         let materials = looks
             .entry(prop.model.as_path())
-            .or_insert_with(|| add_look(&model, visual));
+            .or_insert_with(|| add_look(&model.look, visual));
         let at = Placement::of(prop, under);
         for m in &model.meshes {
             let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| at.point(p)).collect();
@@ -561,7 +559,7 @@ pub fn add_model_walls(
         let model = cache.model(dir, &line.run.model)?;
         let materials = looks
             .entry(line.run.model.clone())
-            .or_insert_with(|| add_look(&model, visual));
+            .or_insert_with(|| add_look(&model.look, visual));
         for m in model::along(&model, line) {
             visual.add_mesh(
                 materials[m.material as usize],
@@ -632,26 +630,36 @@ fn add_ground_layers(
     }))
 }
 
-/// The materials of a scatter's model in `visual`: its own, added once for the model,
-/// with the project's used in place of some of them.
+/// The materials of a scatter's model in `visual`: its own as a plant of its kind,
+/// added once for the model and the kind, with the project's used in place of some of
+/// them (as the plant's, when it is one).
 fn scatter_look(
     project: &Project,
     m: &ScatterModel,
     model: &Model,
-    looks: &mut HashMap<PathBuf, Vec<u32>>,
+    looks: &mut HashMap<String, Vec<u32>>,
     visual: &mut VisualBuilder,
 ) -> Vec<u32> {
+    let foliage = m.foliage();
+    let own = crate::scatter::plant_look(model, foliage);
     let mut materials = looks
-        .entry(m.model.clone())
-        .or_insert_with(|| add_look(model, visual))
+        .entry(format!("{}|{foliage:?}", m.model.display()))
+        .or_insert_with(|| add_look(&own, visual))
         .clone();
     for slot in &m.materials {
-        if let (Some(to), Some(i)) = (
+        let (Some(to), Some(i)) = (
             materials.get_mut(slot.slot),
             project.material_index(&slot.material),
-        ) {
-            *to = i as u32;
-        }
+        ) else {
+            continue;
+        };
+        *to = match own.materials[slot.slot].plant {
+            None => i as u32,
+            plant => visual.add_material(Material {
+                plant,
+                ..visual.material(i as u32).clone()
+            }),
+        };
     }
     materials
 }
@@ -684,18 +692,26 @@ pub fn add_scatter(
     ground: &mut Ground,
 ) -> Result<(), Error> {
     let keepout = crate::scatter::Keepout::new(roads);
-    let mut looks: HashMap<PathBuf, Vec<u32>> = HashMap::new();
-    // Shapes by the model, the project's materials used in its own, and shadows.
+    let mut looks: HashMap<String, Vec<u32>> = HashMap::new();
+    // Shapes by the model, its kind of plant, the project's materials used in its own,
+    // and shadows.
     let mut shapes: HashMap<String, u32> = HashMap::new();
+    let month = plant_month(project);
     for s in &project.scatter {
         let (near, far) = cache.scatter_models(project, dir, s)?;
         let copies = crate::scatter::copies(s, &keepout, under);
-        let lists = crate::scatter::instances(s.models.len(), &copies);
+        let lists = crate::scatter::instances(s, month, &copies);
         for (i, (m, list)) in s.models.iter().zip(lists).enumerate() {
             if list.is_empty() {
                 continue;
             }
-            let key = format!("{}|{:?}|{}", m.model.display(), m.materials, s.shadows);
+            let foliage = m.foliage();
+            let key = format!(
+                "{}|{foliage:?}|{:?}|{}",
+                m.model.display(),
+                m.materials,
+                s.shadows
+            );
             let model = &near[i];
             let near_shape = *shapes.entry(key).or_insert_with(|| {
                 let materials = scatter_look(project, m, model, &mut looks, visual);
@@ -705,9 +721,9 @@ pub fn add_scatter(
             first.shape = near_shape;
             let mut levels = vec![first];
             if let Some(f) = &far[i] {
-                let key = format!("far {:p}|{}", Arc::as_ptr(f), s.shadows);
+                let key = format!("far {:p}|{foliage:?}|{}", Arc::as_ptr(f), s.shadows);
                 second.shape = *shapes.entry(key).or_insert_with(|| {
-                    let materials = add_look(f, visual);
+                    let materials = add_look(&crate::scatter::plant_look(f, foliage), visual);
                     visual.add_shape(shape(f, &materials, s.shadows))
                 });
                 levels.push(second);
@@ -726,6 +742,13 @@ pub fn add_scatter(
         }
     }
     Ok(())
+}
+
+/// The time of year the project's plants show (see `Environment::plant_month`).
+pub fn plant_month(project: &Project) -> f64 {
+    project
+        .environment
+        .plant_month(project.geo.map_or(48.0, |g| g.lat))
 }
 
 /// Bakes the project into a package. Textures and models are read from the project's directory

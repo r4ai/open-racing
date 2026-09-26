@@ -209,6 +209,7 @@ pub fn builtin() -> Vec<Kind> {
                         } else {
                             2500.0
                         },
+                        variety: open_racing_track_project::project::VARIETY,
                         strokes: vec![],
                         removed: vec![],
                         placed: vec![],
