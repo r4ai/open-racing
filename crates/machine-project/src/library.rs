@@ -49,8 +49,7 @@ fn pretty() -> ron::ser::PrettyConfig {
     ron::ser::PrettyConfig::default()
         .depth_limit(12)
         .struct_names(false)
-        .new_line("
-".to_string())
+        .new_line("\n".to_string())
         .indentor("    ".to_string())
 }
 
