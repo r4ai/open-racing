@@ -32,22 +32,30 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
         row(ui, "Nodes", |ui| ui.label(before.nodes.len().to_string()));
     });
     section(ui, "Shape", ("spline shape", i), true, |ui| {
-        // Its type: any strip type makes it a band, any wall type a wall.
-        let band = matches!(sp.shape, Shape::Band { .. });
+        // Its type: any strip type makes it a band, any wall type a wall; an area takes
+        // a strip type's surface and material.
+        let kind = match sp.shape {
+            Shape::Band { .. } => "band",
+            Shape::Area { .. } => "area",
+            Shape::Wall { .. } => "wall",
+        };
         let mut style = sp.style.clone();
-        let options: Vec<String> = strip_styles
-            .iter()
-            .map(|s| format!("{s} (band)"))
-            .chain(wall_styles.iter().map(|s| format!("{s} (wall)")))
-            .collect();
-        let mut shown = style
-            .as_ref()
-            .map(|s| format!("{s} ({})", if band { "band" } else { "wall" }));
+        let options: Vec<String> = if kind == "area" {
+            strip_styles.iter().map(|s| format!("{s} (area)")).collect()
+        } else {
+            strip_styles
+                .iter()
+                .map(|s| format!("{s} (band)"))
+                .chain(wall_styles.iter().map(|s| format!("{s} (wall)")))
+                .collect()
+        };
+        let mut shown = style.as_ref().map(|s| format!("{s} ({kind})"));
         if row(ui, "Type", |ui| {
             style_combo(ui, ("sptype", i), &mut shown, &options, "custom")
         }) {
             style = shown.as_ref().map(|s| {
                 s.trim_end_matches(" (band)")
+                    .trim_end_matches(" (area)")
                     .trim_end_matches(" (wall)")
                     .to_string()
             });
@@ -81,6 +89,16 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                             material,
                             lift: *lift,
                             model,
+                        },
+                        (
+                            Shape::Area { lift, .. },
+                            Shape::Band {
+                                surface, material, ..
+                            },
+                        ) => Shape::Area {
+                            surface,
+                            material,
+                            lift: *lift,
                         },
                         (_, shape) => shape,
                     };
@@ -120,6 +138,16 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 model_ui(ui, ("spline", i), model, library, Along::Strip);
                 changed |= drag(ui, "Lift m", lift, 0.005, -1.0..=1.0);
             }
+            Shape::Area {
+                surface,
+                material,
+                lift,
+            } => {
+                ui.weak("Fills its closed line: a gravel trap, a paddock, a car park.");
+                combo_row(ui, "Surface", ("sp surface", i), surface, &surfaces);
+                combo_row(ui, "Material", ("sp material", i), material, &materials);
+                changed |= drag(ui, "Lift m", lift, 0.005, -1.0..=1.0);
+            }
             Shape::Wall {
                 height,
                 thickness,
@@ -142,6 +170,9 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 model,
                 ..
             } => format!("{profile:?} {surface} {material} {model:?}"),
+            Shape::Area {
+                surface, material, ..
+            } => format!("{surface} {material}"),
             Shape::Wall {
                 height,
                 thickness,
@@ -229,14 +260,9 @@ pub(super) fn prop_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, librar
                 .selected_text(p.model.to_string_lossy())
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
-                    for a in library.models() {
-                        changed |= ui
-                            .selectable_value(
-                                &mut p.model,
-                                a.path.clone(),
-                                a.path.to_string_lossy(),
-                            )
-                            .changed();
+                    for m in library.model_paths() {
+                        let label = m.to_string_lossy().into_owned();
+                        changed |= ui.selectable_value(&mut p.model, m, label).changed();
                     }
                 });
         });

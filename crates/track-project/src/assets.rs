@@ -84,9 +84,16 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for (m, user) in run_models(project) {
         refs.push((portable(&m.model), user));
     }
+    for s in &project.scatter {
+        for m in &s.models {
+            refs.push((portable(&m.model), format!("scatter {}", s.name)));
+        }
+    }
     if let Some(r) = &project.reference {
         refs.push((portable(&r.image), "reference image".into()));
     }
+    // Built-in models are made, not read from a file.
+    refs.retain(|(path, _)| crate::shapes::name(path).is_none());
     refs
 }
 
@@ -357,6 +364,15 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
         {
             *model = m;
             ops.push(Op::PutSpline { spline: sp });
+        }
+    }
+    for s in &project.scatter {
+        if s.models.iter().any(|m| portable(&m.model) == from) {
+            let mut s = s.clone();
+            for m in s.models.iter_mut().filter(|m| portable(&m.model) == from) {
+                m.model = to.clone();
+            }
+            ops.push(Op::PutScatter { scatter: s });
         }
     }
     if let Some(r) = &project.reference

@@ -44,6 +44,17 @@ pub fn start_modal(
     by_drag: bool,
 ) {
     let target = match hit {
+        // A spline's nodes' radii: its width, or its wall's height, there.
+        _ if mode == Mode::Width && editor.selection.spline().is_some() => {
+            let picked = editor.picked_nodes();
+            let Some((name, nodes, _)) = editor.line() else {
+                return;
+            };
+            Target::Radius {
+                line: name.to_string(),
+                start: picked.iter().map(|&i| (i, nodes[i].radius)).collect(),
+            }
+        }
         _ if matches!(mode, Mode::Width | Mode::Tilt) => {
             let Some(r) = editor
                 .selection
@@ -290,6 +301,15 @@ pub fn start_modal(
             let c = nodes.iter().map(|&n| all[n].pos).sum::<DVec3>() / nodes.len().max(1) as f64;
             (mode, c)
         }
+        Target::Radius { start, .. } => {
+            let Some((_, nodes, _)) = editor.line() else {
+                return;
+            };
+            let item = editor.selection.item.expect("a spline");
+            let c =
+                start.iter().map(|&(n, _)| nodes[n].pos).sum::<DVec3>() / start.len().max(1) as f64;
+            (mode, shown_pos(editor, built, item, c))
+        }
     };
     if !by_drag || !editor.dragging {
         editor.begin_drag();
@@ -531,6 +551,7 @@ pub(super) fn transform_ops(
         Target::Line { .. } => line_ops(editor, built, m, p),
         Target::StripKey { .. } => strip_key_ops(editor, built, m, p),
         Target::Shape { .. } => shape_ops(m, p),
+        Target::Radius { .. } => radius_ops(m, p),
         Target::Prop { .. } => prop_ops(editor, m, p),
         Target::Marker { .. } => marker_ops(editor, built, m, p),
         Target::Landform { .. } => landform_ops(editor, m, p),
@@ -1058,6 +1079,28 @@ fn range_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
     }
     let at = caught.map_or(String::new(), |(_, what)| format!(" → on {what}"));
     (vec![op], format!("u {u:.2}, s {:.0} m{at}", f.s))
+}
+
+/// A spline's radius scaled at the selected nodes (Alt S): its kerb wider or narrower
+/// there, or its wall higher or lower.
+fn radius_ops(m: &Modal, p: &Gesture) -> (Vec<Op>, String) {
+    let Target::Radius { line, start } = &m.target else {
+        return (vec![], String::new());
+    };
+    let k = p.stretch(m);
+    let ops = start
+        .iter()
+        .map(|&(index, r)| Op::SetNodeRadius {
+            line: line.clone(),
+            index,
+            radius: (r * k).max(0.0),
+        })
+        .collect();
+    let first = start.first().map_or(1.0, |s| s.1 * k);
+    (
+        ops,
+        format!("radius ×{k:.3} (node: ×{first:.2} its own size)"),
+    )
 }
 
 /// A road's width scaled (Alt S) or its bank tilted (Ctrl T) at the selected nodes.

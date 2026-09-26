@@ -279,6 +279,42 @@ pub fn add_materials(
         .collect()
 }
 
+/// A material blending up to four textures by a mask, as painted ground: `base` with its
+/// colour and roughness, the layers' textures and repetitions per metre laid by the
+/// world's x and y, and `mask` (linear RGBA, laid by the mesh's UVs) weighing them.
+pub fn layered_material(
+    base: StandardMaterial,
+    mask: Handle<Image>,
+    layers: [Option<(Handle<Image>, f32)>; 4],
+) -> TrackMaterial {
+    let mut extension = TrackExtension {
+        mask: Some(mask),
+        ..default()
+    };
+    extension.params.flags = DETAIL | WORLD_UV;
+    extension.params.multiplier = 1.0;
+    extension.params.scales = Vec4::from_array(std::array::from_fn(|i| {
+        layers[i].as_ref().map_or(1.0, |l| l.1)
+    }));
+    extension.params.enabled = Vec4::from_array(std::array::from_fn(|i| {
+        if layers[i].is_some() { 1.0 } else { 0.0 }
+    }));
+    let [r, g, b, a] = layers.map(|l| l.map(|l| l.0));
+    (
+        extension.layer_r,
+        extension.layer_g,
+        extension.layer_b,
+        extension.layer_a,
+    ) = (r, g, b, a);
+    TrackMaterial {
+        base: StandardMaterial {
+            base_color_texture: None,
+            ..base
+        },
+        extension,
+    }
+}
+
 /// A Bevy mesh from a package mesh, whose positions and normals are in the simulation's
 /// Z-up axes.
 pub fn to_mesh(m: open_racing_track::Mesh) -> Mesh {

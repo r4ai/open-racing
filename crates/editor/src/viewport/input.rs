@@ -44,6 +44,7 @@ pub fn input(
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
+    time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
 ) {
@@ -98,8 +99,38 @@ pub fn input(
         }
     }
     camera_input(
-        &mut orbit, tool, &buttons, &motion, &scroll, over, t, alt, shift, ctrl,
+        &mut orbit,
+        tool,
+        &buttons,
+        &keys,
+        &motion,
+        &scroll,
+        over,
+        t,
+        time.delta_secs(),
+        alt,
+        shift,
+        ctrl,
     );
+    // Flying takes the keys.
+    if tool.flying.is_some() {
+        return;
+    }
+    // Circle select: painting over nodes or items selects them.
+    if tool.circle.is_some() {
+        circle(
+            editor,
+            tool,
+            &built,
+            view,
+            &buttons,
+            &keys,
+            scroll.delta.y,
+            over,
+            shift,
+        );
+        return;
+    }
 
     // A transform in progress takes every input.
     if tool.modal.is_some() {
@@ -143,7 +174,19 @@ pub fn input(
         return;
     }
 
-    let hover = over.and_then(|at| {
+    // A brush paints with the left button; the right button and the keys work as
+    // ever, unless a stroke is being painted.
+    if tool.active.is_brush() {
+        crate::brush::input(
+            editor, tool, &built, &buttons, &keys, over, anywhere, keys_free,
+        );
+        tool.press = None;
+        tool.boxing = None;
+        if tool.brush.stroke.is_some() || tool.brush.adjust.is_some() {
+            return;
+        }
+    }
+    let hover = over.filter(|_| !tool.active.is_brush()).and_then(|at| {
         pick_gizmo(editor, &built, view, tool.active, at)
             .map(Hit::Gizmo)
             .or_else(|| {
@@ -156,7 +199,7 @@ pub fn input(
     tool.hover = hover;
 
     // Left button: a click selects, a drag grabs what it began on or draws a box.
-    if buttons.just_pressed(MouseButton::Left) {
+    if buttons.just_pressed(MouseButton::Left) && !tool.active.is_brush() {
         tool.press = over.map(|at| (at, hover, alt));
     }
     if let Some((from, hit, orbiting)) = tool.press {
@@ -297,6 +340,12 @@ pub fn input(
         editor.hide_selected();
     } else if pressed(KeyCode::NumpadDivide) || pressed(KeyCode::Slash) {
         toggle_local(editor, &mut orbit);
+    } else if pressed(KeyCode::KeyC) && !ctrl && !alt && !shift {
+        tool.circle = Some(if tool.circle_radius > 0.0 {
+            tool.circle_radius
+        } else {
+            40.0
+        });
     } else if pressed(KeyCode::KeyO) && !ctrl && !alt {
         editor.status = tool.toggle_proportional();
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
@@ -307,6 +356,114 @@ pub fn input(
         crate::edit::select_less(editor);
     } else if pressed(KeyCode::Escape) {
         editor.selection.nodes.clear();
+    }
+}
+
+/// Circle select (C), as Blender's: the left button paints over what to select, Shift
+/// or the middle button over what not to; the wheel sizes the circle; a right click,
+/// Esc or Enter ends it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn circle(
+    editor: &mut Editor,
+    tool: &mut Tool,
+    built: &Built,
+    view: View,
+    buttons: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
+    wheel: f32,
+    over: Option<Vec2>,
+    shift: bool,
+) {
+    let mut r = tool.circle.expect("selecting with a circle");
+    if wheel != 0.0 {
+        r = (r * 1.15f32.powf(wheel.signum())).clamp(4.0, 400.0);
+    }
+    tool.circle = Some(r);
+    tool.circle_radius = r;
+    tool.press = None;
+    tool.boxing = None;
+    tool.hint = "Circle select: paint over nodes or items · Shift or middle button: deselect · wheel: size · right click, Esc or Enter: done".into();
+    if buttons.just_pressed(MouseButton::Right)
+        || keys.any_just_pressed([KeyCode::Escape, KeyCode::Enter, KeyCode::NumpadEnter])
+    {
+        tool.circle = None;
+        tool.right_press = None;
+        return;
+    }
+    let Some(at) = over else { return };
+    let remove =
+        buttons.pressed(MouseButton::Middle) || (shift && buttons.pressed(MouseButton::Left));
+    if remove || buttons.pressed(MouseButton::Left) {
+        circle_select(editor, built, view, at, r, remove, tool.edit);
+    }
+}
+
+/// Selects (or with `remove`, deselects) what lies within `r` of `at` on screen: the
+/// edited line's nodes in edit mode, else roads, splines and props.
+pub(super) fn circle_select(
+    editor: &mut Editor,
+    built: &Built,
+    view: View,
+    at: Vec2,
+    r: f32,
+    remove: bool,
+    edit: bool,
+) {
+    let within = |p: DVec3| {
+        view.screen(p + DVec3::Z * LIFT)
+            .is_some_and(|s| s.distance(at) <= r)
+    };
+    if edit {
+        let Some(item) = editor.selection.item else {
+            return;
+        };
+        let Some((_, nodes, _)) = item_line(&editor.project, item) else {
+            return;
+        };
+        let hits: Vec<usize> = (0..nodes.len())
+            .filter(|&i| within(shown_pos(editor, built, item, nodes[i].pos)))
+            .collect();
+        let sel = &mut editor.selection.nodes;
+        for n in hits {
+            if remove {
+                sel.retain(|&x| x != n);
+            } else if !sel.contains(&n) {
+                sel.push(n);
+            }
+        }
+        return;
+    }
+    // Lines anywhere along them, props where they stand.
+    let mut hits: Vec<Item> = items(editor)
+        .filter(|&i| editor.pickable(i))
+        .filter(|&i| {
+            let smp = match i {
+                Item::Road(r) => built.roads.get(r),
+                Item::Spline(s) => built.splines.get(s),
+                Item::Prop(_) => None,
+            };
+            smp.is_some_and(|s| s.frames.iter().any(|f| within(f.pos)))
+        })
+        .collect();
+    for (i, prop) in editor.project.props.iter().enumerate() {
+        if editor.pickable(Item::Prop(i))
+            && within(Placement::of(prop, built.ground.as_deref()).pos)
+        {
+            hits.push(Item::Prop(i));
+        }
+    }
+    let sel = &mut editor.selection;
+    for item in hits {
+        if remove {
+            sel.others.retain(|&o| o != item);
+            if sel.item == Some(item) {
+                sel.item = sel.others.pop();
+            }
+        } else if sel.item.is_none() {
+            sel.select(item);
+        } else if !sel.has(item) {
+            sel.others.push(item);
+        }
     }
 }
 
@@ -838,13 +995,42 @@ pub(super) fn draw(
     tool.draw_at = tool
         .pointer
         .map(|p| draw_point(editor, built, &kind, p, ctrl, &tool.snapping));
-    tool.hint = "Draw: click to add points · Backspace removes the last · Enter or right click finishes · Esc cancels · Ctrl: no snapping".into();
+    let area = matches!(&kind, DrawKind::Spline(p) if p.is_area());
+    tool.hint = format!(
+        "Draw: click to add points, or drag to sketch · Backspace removes the last · Enter or right click finishes{} · Esc cancels · Ctrl: no snapping",
+        if area { " (closing the area)" } else { "" }
+    );
     let d = tool.draw.as_mut().expect("drawing");
     if over.is_some()
         && buttons.just_pressed(MouseButton::Left)
         && let Some(p) = tool.draw_at
     {
         d.points.push(p);
+        d.sketch = over.map(|at| (d.points.len() - 1, at));
+    }
+    // Dragging sketches: a point every few pixels, simplified once let go to the nodes
+    // that keep the line's shape.
+    if let Some((first, last)) = d.sketch {
+        if buttons.pressed(MouseButton::Left) {
+            if let (Some(at), Some(p)) = (over, tool.draw_at)
+                && at.distance(last) >= SKETCH_STEP
+            {
+                d.points.push(p);
+                d.sketch = Some((first, at));
+            }
+        } else {
+            d.sketch = None;
+            if d.points.len() - first > 2 {
+                let sketched = d.points.split_off(first);
+                let span = sketched
+                    .windows(2)
+                    .map(|w| w[0].distance(w[1]))
+                    .sum::<f64>();
+                // Finer for short sketches (a kerb round an apex) than long ones.
+                let tolerance = (span * 0.004).clamp(0.08, 1.5);
+                d.points.extend(simplify(&sketched, tolerance));
+            }
+        }
     }
     if keys_free && keys.just_pressed(KeyCode::Backspace) {
         d.points.pop();
@@ -858,9 +1044,10 @@ pub(super) fn draw(
     if !finish {
         return;
     }
-    if tool.draw.as_ref().is_some_and(|d| d.points.len() < 2) {
+    let fewest = if area { 3 } else { 2 };
+    if tool.draw.as_ref().is_some_and(|d| d.points.len() < fewest) {
         // Keep drawing: a stray Enter or right click should not lose the first point.
-        editor.status = "a line needs at least two points (Esc cancels)".into();
+        editor.status = format!("it needs at least {fewest} points (Esc cancels)");
         return;
     }
     let d = tool.draw.take().expect("drawing");

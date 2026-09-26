@@ -35,6 +35,8 @@ pub enum PropTab {
     Track,
     Markers,
     Terrain,
+    /// Woods, bushes and rocks painted over the ground.
+    Scatter,
     Reference,
     /// Strip and wall types, materials and surfaces.
     Library,
@@ -53,8 +55,8 @@ impl PropTab {
     pub fn named(name: &str) -> Option<Self> {
         use PropTab::*;
         [
-            Track, Markers, Terrain, Reference, Library, Object, Corners, Strips, Lines, Barriers,
-            Rows,
+            Track, Markers, Terrain, Scatter, Reference, Library, Object, Corners, Strips, Lines,
+            Barriers, Rows,
         ]
         .into_iter()
         .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
@@ -269,7 +271,7 @@ pub fn ui(
         shell,
         pointer,
     };
-    let (start_corner, start_tab, start_distance) = start;
+    let (start_corner, start_tab, start_distance, on_ground) = start;
     if c.built.count > 0 {
         if let Some(n) = start_corner {
             crate::corners::step_to(&mut c, n.0);
@@ -282,6 +284,18 @@ pub fn ui(
         if let Some(d) = start_distance {
             c.orbit.distance = d.0;
             cmds.remove_resource::<crate::StartDistance>();
+        }
+        if on_ground.is_some() {
+            let p = open_racing_track_render::from_bevy(c.orbit.focus);
+            if let Some(h) = c
+                .built
+                .ground
+                .as_ref()
+                .and_then(|g| g.raycast_down(p.with_z(1e4), 2e4))
+            {
+                c.orbit.focus = open_racing_track_render::to_bevy(h.point);
+            }
+            cmds.remove_resource::<crate::StartOnGround>();
         }
     }
     commands::shortcuts(&ctx, &mut c, over_view);
@@ -780,7 +794,7 @@ fn checks(ui: &mut egui::Ui, c: &mut Ctx) {
 /// What the mouse does over what the pointer is on, Blender's status bar hints.
 fn mouse_hints(c: &Ctx) -> String {
     let t = &*c.tool;
-    if t.modal.is_some() || t.draw.is_some() || t.place.is_some() {
+    if t.modal.is_some() || t.draw.is_some() || t.place.is_some() || t.active.is_brush() {
         return t.hint.clone();
     }
     let name = |item| {

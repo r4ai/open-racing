@@ -52,6 +52,11 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 })
                 .response
                 .on_hover_text("The tool a click or drag in the view uses (toolbar: T)");
+            // A brush's settings, as Blender's tool settings in the header.
+            if c.tool.active.is_brush() {
+                ui.separator();
+                crate::brush::settings_ui(ui, c, true);
+            }
             ui.separator();
             ui.menu_button("View", |ui| view_menu(ui, c));
             ui.menu_button("Select", |ui| {
@@ -88,7 +93,8 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 }
                 None => {}
             }
-            if !c.tool.hint.is_empty() {
+            // A brush's hint is in the status bar: the header has its settings.
+            if !c.tool.hint.is_empty() && !c.tool.active.is_brush() {
                 ui.separator();
                 ui.colored_label(egui::Color32::from_rgb(255, 215, 30), &c.tool.hint);
             }
@@ -168,7 +174,13 @@ pub fn add_menu(ui: &mut egui::Ui, c: &mut Ctx) {
     }
     ui.weak("Walls & fences");
     for (i, p) in list.iter().enumerate() {
-        if !p.is_band() {
+        if !p.is_band() && !p.is_area() {
+            entry(ui, c, Cmd::DrawSpline(i));
+        }
+    }
+    ui.weak("Areas: gravel traps, paddocks");
+    for (i, p) in list.iter().enumerate() {
+        if p.is_area() {
             entry(ui, c, Cmd::DrawSpline(i));
         }
     }
@@ -185,6 +197,9 @@ fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
         ui.separator();
         entry(ui, c, Cmd::Width);
         entry(ui, c, Cmd::Tilt);
+    } else {
+        ui.separator();
+        commands::button_as(ui, c, Cmd::Width, "Radius (kerb's width, wall's height)");
     }
     ui.separator();
     for cmd in [Cmd::Extrude, Cmd::Subdivide, Cmd::Delete] {
@@ -270,6 +285,21 @@ pub fn overlay(ctx: &egui::Context, c: &mut Ctx) {
             0.0,
             egui::Stroke::new(1.0, egui::Color32::WHITE),
             egui::StrokeKind::Inside,
+        );
+    }
+
+    // The circle of circle select, round the pointer.
+    if let Some(r) = c.tool.circle {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            "circle select".into(),
+        ));
+        let at = egui::pos2(c.pointer.x, c.pointer.y);
+        painter.circle_stroke(at, r, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        painter.circle_stroke(
+            at,
+            r + 1.5,
+            egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
         );
     }
 

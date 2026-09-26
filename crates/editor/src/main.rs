@@ -8,6 +8,7 @@
 
 mod assets;
 mod batch;
+mod brush;
 mod clipboard;
 mod commands;
 mod corners;
@@ -71,6 +72,12 @@ struct Args {
     /// How far the camera stands from what it looks at, m.
     #[arg(long)]
     distance: Option<f32>,
+    /// Look at this place, x,y in metres (on the ground there).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    at: Option<Vec<f64>>,
+    /// Start with this tool: select, move, rotate, scale, sculpt, paint or scatter.
+    #[arg(long)]
+    tool: Option<String>,
     /// How far above the horizon the camera looks down from, degrees (90 from above).
     #[arg(long)]
     pitch: Option<f32>,
@@ -127,11 +134,16 @@ fn auto_screenshot(
 #[derive(Resource)]
 pub struct StartDistance(pub f32);
 
+/// The place looked at from the command line is put on the ground once it is built.
+#[derive(Resource)]
+pub struct StartOnGround;
+
 /// What the command line asks the UI to do once the track is first built.
 pub type Start<'w> = (
     Option<Res<'w, StartCorner>>,
     Option<Res<'w, StartTab>>,
     Option<Res<'w, StartDistance>>,
+    Option<Res<'w, StartOnGround>>,
 );
 
 fn main() {
@@ -180,6 +192,7 @@ fn main() {
         _ => false,
     };
     let mut orbit = viewport::Orbit::default();
+    let mut app_focus_ground = false;
     viewport::frame_selection(&editor, &mut orbit);
     if args.top {
         viewport::look(&mut orbit, viewport::ViewDir::Top);
@@ -192,7 +205,29 @@ fn main() {
         // south).
         orbit.yaw = -y.to_radians();
     }
+    if let Some([x, y]) = args
+        .at
+        .as_deref()
+        .and_then(|a| <[f64; 2]>::try_from(a).ok())
+    {
+        orbit.focus = open_racing_track_render::to_bevy(glam::DVec3::new(x, y, 0.0));
+        app_focus_ground = true;
+    }
     let mut tool = viewport::Tool::editing(edit_mode);
+    if let Some(name) = &args.tool {
+        match viewport::ToolKind::ALL.into_iter().find(|t| {
+            t.label()
+                .split(' ')
+                .next()
+                .is_some_and(|w| w.eq_ignore_ascii_case(name))
+        }) {
+            Some(t) => tool.active = t,
+            None => {
+                eprintln!("no tool \"{name}\"");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.clean {
         tool.overlays = viewport::Overlays {
             lines: false,
@@ -201,6 +236,7 @@ fn main() {
             markers: false,
             stretches: false,
             props: false,
+            scatter: true,
         };
     }
 
@@ -210,6 +246,9 @@ fn main() {
     }
     if let Some(d) = args.distance {
         app.insert_resource(StartDistance(d));
+    }
+    if app_focus_ground {
+        app.insert_resource(StartOnGround);
     }
     if let Some(name) = &args.tab {
         match ui::PropTab::named(name) {
@@ -245,6 +284,7 @@ fn main() {
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()
+    .init_resource::<preview::GroundPaint>()
     .init_resource::<preview::SharedCache>()
     .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
@@ -265,6 +305,7 @@ fn main() {
             assets::dropped,
             reference::show,
             viewport::input,
+            brush::live,
             viewport::view_input,
             preview::rebuild,
             preview::props,

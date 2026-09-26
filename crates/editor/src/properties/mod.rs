@@ -19,6 +19,7 @@ use crate::state::{Editor, Item};
 use crate::ui::{Focus, PropTab};
 
 mod library;
+mod nature;
 mod object;
 mod road;
 mod track;
@@ -26,6 +27,7 @@ mod track;
 pub use track::model_button;
 
 use library::*;
+use nature::*;
 pub use object::*;
 use road::*;
 use track::*;
@@ -57,7 +59,16 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
             "🚩",
             "Race markers: start, sectors, grid, pit lane",
         ),
-        (PropTab::Terrain, "🗻", "Terrain round the roads"),
+        (
+            PropTab::Terrain,
+            "🗻",
+            "Terrain round the roads: sculpting and painted layers",
+        ),
+        (
+            PropTab::Scatter,
+            "🌳",
+            "Scatter: woods, bushes and rocks painted over the ground",
+        ),
         (
             PropTab::Reference,
             "🗺",
@@ -128,7 +139,7 @@ pub fn show(
         )
         .show(ui, |ui| {
             for (i, (tab, icon, tip)) in tabs.iter().enumerate() {
-                if i == 5 {
+                if i == 6 {
                     ui.separator();
                 }
                 let button = egui::Button::selectable(c.shell.tab == *tab, *icon);
@@ -180,6 +191,7 @@ pub fn show(
                 PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor, state, library),
                 PropTab::Terrain => terrain_tab(ui, c),
+                PropTab::Scatter => scatter_tab(ui, c, library),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Library => library_tab(ui, c.editor, state, library),
                 PropTab::Object => match c.editor.selection.item {
@@ -867,11 +879,11 @@ fn model_ui(
                     *model = None;
                     changed = true;
                 }
-                for a in library.models() {
-                    let on = model.as_ref().is_some_and(|m| m.model == a.path);
-                    if ui.selectable_label(on, a.path.to_string_lossy()).clicked() && !on {
+                for path in library.model_paths() {
+                    let on = model.as_ref().is_some_and(|m| m.model == path);
+                    if ui.selectable_label(on, path.to_string_lossy()).clicked() && !on {
                         *model = Some(ModelRun {
-                            model: a.path.clone(),
+                            model: path,
                             length: 0.0,
                             bend: true,
                             flip: false,

@@ -38,6 +38,9 @@ pub struct Project {
     /// 3D models placed in the scene: grandstands, signs, trees, buildings.
     #[serde(default)]
     pub props: Vec<Prop>,
+    /// Models painted over the ground: woods, bushes, rocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scatter: Vec<Scatter>,
     /// Kinds of kerbs, gravel traps and verges to lay.
     #[serde(default = "crate::builtin::strip_styles")]
     pub strip_styles: Vec<StripStyle>,
@@ -295,6 +298,15 @@ pub struct Node {
     pub pos: DVec3,
     #[serde(default, skip_serializing_if = "NodeHandles::is_auto")]
     pub handles: NodeHandles,
+    /// A spline's size here, times its own, as Blender's curve radius: a kerb's or
+    /// band's width, a wall's height. It eases from node to node. Roads leave it at 1:
+    /// their widths are keyed along them.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub radius: f64,
+}
+
+fn is_one(v: &f64) -> bool {
+    *v == 1.0
 }
 
 impl Node {
@@ -302,6 +314,7 @@ impl Node {
         Self {
             pos,
             handles: NodeHandles::Auto,
+            radius: 1.0,
         }
     }
 
@@ -1096,7 +1109,12 @@ pub fn split_segment(nodes: &[Node], closed: bool, i: usize) -> Vec<Node> {
                 outgoing: bc - mid,
                 incoming_length: (ab - mid).length(),
             },
+            radius: 1.0,
         }
+    };
+    let node = Node {
+        radius: 0.5 * (nodes[i].radius + nodes[j].radius),
+        ..node
     };
     out.insert(i + 1, node);
     out
@@ -1129,6 +1147,15 @@ pub enum Shape {
         /// A model repeated along it in place of its plain look.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelRun>,
+    },
+    /// A drivable area filling a closed line: a gravel trap, a paddock, a car park, a
+    /// patch of run-off. It lies on what is under it (draped) or at the nodes' heights.
+    Area {
+        surface: SurfaceId,
+        material: MaterialId,
+        /// Height above the ground or the nodes, m, so that it shows over what is under.
+        #[serde(default)]
+        lift: f64,
     },
     /// A wall, guard rail or fence standing on the line.
     Wall {
@@ -1171,7 +1198,17 @@ pub struct Spline {
 impl Spline {
     pub fn material(&self) -> &str {
         match &self.shape {
-            Shape::Band { material, .. } | Shape::Wall { material, .. } => material,
+            Shape::Band { material, .. }
+            | Shape::Area { material, .. }
+            | Shape::Wall { material, .. } => material,
+        }
+    }
+
+    /// The surface cars drive on, for bands and areas.
+    pub fn surface(&self) -> Option<&str> {
+        match &self.shape {
+            Shape::Band { surface, .. } | Shape::Area { surface, .. } => Some(surface),
+            Shape::Wall { .. } => None,
         }
     }
 }
@@ -1264,6 +1301,184 @@ pub struct Terrain {
     /// Hills, banks and hollows raised or dug, and level pads, away from the roads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landforms: Vec<Landform>,
+    /// Brush strokes sculpting the ground away from the roads, applied in order after
+    /// the landforms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sculpt: Vec<Stroke>,
+    /// Up to three materials painted over the ground's own (dirt, gravel, sand), each
+    /// with the grip of its surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<GroundLayer>,
+    /// Brush strokes painting the layers, in order: each paints its layer over what
+    /// was painted before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paint: Vec<LayerStroke>,
+    /// Size of the painted layers' texels, m.
+    #[serde(default = "one")]
+    pub paint_texel: f64,
+}
+
+/// Most ground layers painted over the ground's own material.
+pub const MAX_LAYERS: usize = 3;
+
+/// A material painted over the ground with a brush.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GroundLayer {
+    pub name: String,
+    pub surface: SurfaceId,
+    pub material: MaterialId,
+}
+
+/// A stroke painting a ground layer: `layer` names one of the terrain's layers, or
+/// is `None` to paint the ground's own material back.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerStroke {
+    #[serde(default)]
+    pub layer: Option<String>,
+    pub stroke: Stroke,
+}
+
+/// A brush stroke over the ground, seen from above: the path its middle took, how far
+/// it reached and how strongly it acted. It acts fully within half its radius of its
+/// path and less beyond, easing smoothly to nothing at `radius`; a stroke acts once
+/// wherever it passes, however often it crossed itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Stroke {
+    pub brush: Brush,
+    /// How far from its path it reaches, m.
+    pub radius: f64,
+    /// How strongly it acts: metres raised (`Raise`, negative lowers) or of roughness
+    /// (`Noise`), or the share of the way to its target, 0 to 1 (`Smooth`, `Flatten`,
+    /// `Paint`, `Erase`).
+    pub strength: f64,
+    /// Its path, m.
+    pub points: Vec<DVec2>,
+}
+
+/// What a stroke does.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Brush {
+    /// Sculpting: raises the ground by `strength` m on its path.
+    Raise,
+    /// Sculpting: evens the ground out towards the mean round each point.
+    Smooth,
+    /// Sculpting: levels the ground towards this height, m.
+    Flatten(f64),
+    /// Sculpting: roughens the ground by up to `strength` m, the same way every build.
+    Noise,
+    /// Painting a ground layer, or scattering: adds it.
+    Paint,
+    /// Scattering: takes it away.
+    Erase,
+}
+
+impl Brush {
+    /// Whether it shapes the ground rather than paints on it.
+    pub fn sculpts(self) -> bool {
+        matches!(
+            self,
+            Brush::Raise | Brush::Smooth | Brush::Flatten(_) | Brush::Noise
+        )
+    }
+}
+
+impl Stroke {
+    /// The corners of the box round everything it reaches.
+    pub fn bounds(&self) -> (DVec2, DVec2) {
+        let r = DVec2::splat(self.radius.max(0.0));
+        self.points.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(*p - r), hi.max(*p + r)),
+        )
+    }
+
+    /// How much it acts at `p`: fully within half its radius of its path, easing
+    /// smoothly to nothing at `radius` from it.
+    pub fn weight(&self, p: DVec2) -> f64 {
+        let d = distance_to_path(&self.points, p);
+        if self.radius <= 0.0 || d >= self.radius {
+            return 0.0;
+        }
+        let t = ((self.radius - d) / (0.5 * self.radius)).min(1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let strength = match self.brush {
+            Brush::Raise | Brush::Noise => self.strength.is_finite(),
+            Brush::Flatten(h) => h.is_finite() && (0.0..=1.0).contains(&self.strength),
+            Brush::Smooth | Brush::Paint | Brush::Erase => (0.0..=1.0).contains(&self.strength),
+        };
+        strength
+            && self.radius > 0.0
+            && self.radius.is_finite()
+            && !self.points.is_empty()
+            && self.points.iter().all(|p| p.is_finite())
+    }
+}
+
+/// Distance from `p` to the path through `points` (to the point, if it is one).
+pub fn distance_to_path(points: &[DVec2], p: DVec2) -> f64 {
+    match points {
+        [] => f64::INFINITY,
+        [a] => a.distance(p),
+        _ => points
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let ab = b - a;
+                let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                p.distance(a + ab * t)
+            })
+            .fold(f64::INFINITY, f64::min),
+    }
+}
+
+/// Models scattered over the ground where brush strokes painted them: trees, bushes,
+/// rocks, spectators. Copies stand about `spacing` apart where fully painted and fewer
+/// where the strokes were light, varying in size and turn, the same way every build.
+/// They keep off the roads and their strips, and off ground too steep.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Scatter {
+    pub name: String,
+    /// The models, each picked in proportion to its weight.
+    pub models: Vec<ScatterModel>,
+    /// Distance between neighbouring copies where fully painted, m.
+    pub spacing: f64,
+    /// The smallest and largest size, times the model's own.
+    pub scale: [f64; 2],
+    /// How far copies lean with the slope they stand on: 0 upright, 1 square to it.
+    #[serde(default)]
+    pub tilt: f64,
+    /// How far copies keep from the roads' outer edges (strips included), m.
+    #[serde(default)]
+    pub clearance: f64,
+    /// The steepest ground copies stand on, degrees.
+    #[serde(default = "steepest")]
+    pub max_slope: f64,
+    /// Whether cars collide with them.
+    #[serde(default)]
+    pub collide: bool,
+    /// Where they were painted and wiped out (`Paint` and `Erase`), in order.
+    #[serde(default)]
+    pub strokes: Vec<Stroke>,
+    /// The collection it is kept in, as the editor's outliner shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+fn steepest() -> f64 {
+    35.0
+}
+
+/// A model of a scatter, and how often it is picked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScatterModel {
+    /// A glTF file relative to the project's directory, or a built-in model
+    /// (`builtin:pine`, see `model::BUILTIN`).
+    pub model: PathBuf,
+    #[serde(default = "one")]
+    pub weight: f64,
 }
 
 /// A shape given to the ground away from the roads: round about `center`, or, with
@@ -1416,12 +1631,17 @@ impl Project {
                 heights: None,
                 heights_offset: 0.0,
                 landforms: vec![],
+                sculpt: vec![],
+                layers: vec![],
+                paint: vec![],
+                paint_texel: 1.0,
             },
             surfaces,
             materials,
             roads: vec![road],
             splines: vec![],
             props: vec![],
+            scatter: vec![],
             strip_styles: crate::builtin::strip_styles(),
             wall_styles: crate::builtin::wall_styles(),
             main_road: "circuit".into(),
@@ -1493,6 +1713,11 @@ impl Project {
             ),
             ("surface", self.surfaces.iter().map(|s| &s.name).collect()),
             ("prop", self.props.iter().map(|p| &p.name).collect()),
+            ("scatter", self.scatter.iter().map(|s| &s.name).collect()),
+            (
+                "ground layer",
+                self.terrain.layers.iter().map(|l| &l.name).collect(),
+            ),
             ("material", self.materials.iter().map(|m| &m.name).collect()),
             (
                 "strip type",
@@ -1545,7 +1770,7 @@ impl Project {
             }
             if r.nodes
                 .iter()
-                .any(|n| !n.pos.is_finite() || !n.handles.is_valid())
+                .any(|n| !n.pos.is_finite() || !n.handles.is_valid() || !n.radius.is_finite())
             {
                 return invalid(format!("road \"{}\": invalid node or handle", r.name));
             }
@@ -1644,19 +1869,25 @@ impl Project {
         }
         for sp in &self.splines {
             let invalid = |what: &str| invalid(format!("spline \"{}\": {what}", sp.name));
-            if let Shape::Band { surface, width, .. } = &sp.shape {
-                if self.surface_index(surface).is_none() {
-                    return invalid(&format!("no surface named \"{surface}\""));
-                }
-                if *width < 0.0 {
-                    return invalid("negative width");
-                }
+            if let Some(surface) = sp.surface()
+                && self.surface_index(surface).is_none()
+            {
+                return invalid(&format!("no surface named \"{surface}\""));
+            }
+            if let Shape::Band { width, .. } = &sp.shape
+                && *width < 0.0
+            {
+                return invalid("negative width");
+            }
+            if matches!(sp.shape, Shape::Area { .. }) && (!sp.closed || sp.nodes.len() < 3) {
+                return invalid("an area must be a closed line of at least 3 nodes");
             }
             if self.material_index(sp.material()).is_none() {
                 return invalid(&format!("no material named \"{}\"", sp.material()));
             }
             let styled = match &sp.shape {
                 Shape::Band { profile, .. } => self.check_strip_style(sp.style.as_deref(), profile),
+                Shape::Area { .. } => self.check_strip_style(sp.style.as_deref(), &Profile::Flat),
                 Shape::Wall { model, .. } => {
                     self.check_wall_style(sp.style.as_deref(), model.as_ref())
                 }
@@ -1667,12 +1898,14 @@ impl Project {
             if sp.nodes.len() < 2 {
                 return invalid("needs at least 2 nodes");
             }
-            if sp
-                .nodes
-                .iter()
-                .any(|n| !n.pos.is_finite() || !n.handles.is_valid())
-            {
-                return invalid("invalid node or handle");
+            if sp.nodes.iter().any(|n| {
+                !n.pos.is_finite()
+                    || !n.handles.is_valid()
+                    || n.radius < 0.0
+                    || n.radius.is_nan()
+                    || !n.radius.is_finite()
+            }) {
+                return invalid("invalid node, handle or radius");
             }
             if sp.resolution < 0.1 {
                 return invalid("resolution under 0.1 m");
@@ -1728,6 +1961,80 @@ impl Project {
             }
             if self.terrain.landforms[..i].iter().any(|o| o.name == l.name) {
                 return invalid(format!("two landforms are named \"{}\"", l.name));
+            }
+        }
+        self.validate_brushes()
+    }
+
+    /// The terrain's sculpting and painting, and the scatters.
+    fn validate_brushes(&self) -> Result<(), Error> {
+        let invalid = |msg: String| Err(Error::Invalid(msg));
+        let t = &self.terrain;
+        if t.sculpt.iter().any(|s| !s.is_valid() || !s.brush.sculpts()) {
+            return invalid(
+                "terrain: a sculpting stroke needs points, a radius and a sculpting brush (Raise, Smooth, Flatten or Noise; Smooth and Flatten of strength 0 to 1)".into(),
+            );
+        }
+        if t.layers.len() > MAX_LAYERS {
+            return invalid(format!(
+                "terrain: at most {MAX_LAYERS} ground layers are painted over the ground's own"
+            ));
+        }
+        for l in &t.layers {
+            if self.surface_index(&l.surface).is_none()
+                || self.material_index(&l.material).is_none()
+            {
+                return invalid(format!(
+                    "ground layer \"{}\": undefined surface or material",
+                    l.name
+                ));
+            }
+        }
+        if !(t.paint_texel >= 0.1 && t.paint_texel <= 50.0) {
+            return invalid("terrain: painted texels must be 0.1 to 50 m".into());
+        }
+        for p in &t.paint {
+            if let Some(name) = &p.layer
+                && !t.layers.iter().any(|l| &l.name == name)
+            {
+                return invalid(format!(
+                    "terrain: no ground layer named \"{name}\" to paint"
+                ));
+            }
+            if !p.stroke.is_valid() || p.stroke.brush != Brush::Paint {
+                return invalid(
+                    "terrain: a painting stroke needs points, a radius, the Paint brush and a strength of 0 to 1".into(),
+                );
+            }
+        }
+        for s in &self.scatter {
+            let invalid = |what: &str| invalid(format!("scatter \"{}\": {what}", s.name));
+            if s.models.is_empty()
+                || s.models
+                    .iter()
+                    .any(|m| m.weight.is_nan() || m.weight <= 0.0)
+            {
+                return invalid("needs a model or more, each of a weight above 0");
+            }
+            if !(s.spacing >= 0.2 && s.spacing.is_finite()) {
+                return invalid("copies must be 0.2 m apart or more");
+            }
+            if !(s.scale[0] > 0.0 && s.scale[1] >= s.scale[0] && s.scale[1].is_finite()) {
+                return invalid("its sizes must be above 0, the smallest first");
+            }
+            if !((0.0..=1.0).contains(&s.tilt)
+                && s.clearance.is_finite()
+                && (0.0..=90.0).contains(&s.max_slope))
+            {
+                return invalid("tilt 0 to 1, a clearance and a steepest slope of 0 to 90°");
+            }
+            if s.strokes
+                .iter()
+                .any(|k| !k.is_valid() || !matches!(k.brush, Brush::Paint | Brush::Erase))
+            {
+                return invalid(
+                    "a stroke needs points, a radius, the Paint or Erase brush and a strength of 0 to 1",
+                );
             }
         }
         Ok(())

@@ -121,6 +121,13 @@ pub enum Op {
         line: String,
         index: usize,
     },
+    /// Sets a spline node's radius: its kerb's width or its wall's height there, times
+    /// its own.
+    SetNodeRadius {
+        line: String,
+        index: usize,
+        radius: f64,
+    },
     /// Splits each of the segments (segment `i` runs from node `i` to the next) in two
     /// at its middle, with a node that keeps the line's shape; keys, stretches and
     /// markers stay where they were on it.
@@ -266,6 +273,36 @@ pub enum Op {
     RemoveLandform {
         name: String,
     },
+    /// Adds a brush stroke: sculpting the ground, painting a ground layer, or painting or
+    /// wiping out a scatter.
+    AddStroke {
+        to: StrokeTarget,
+        stroke: crate::project::Stroke,
+    },
+    /// Removes every stroke of a target: the sculpting, one layer's painting, or a
+    /// scatter's.
+    ClearStrokes {
+        of: StrokeTarget,
+    },
+    /// Adds a ground layer, or replaces the one of the same name.
+    PutGroundLayer {
+        layer: crate::project::GroundLayer,
+    },
+    /// Removes a ground layer and the strokes that painted it.
+    RemoveGroundLayer {
+        name: String,
+    },
+    /// Adds a scatter of models over the ground, or replaces the one of the same name.
+    PutScatter {
+        scatter: crate::project::Scatter,
+    },
+    RemoveScatter {
+        name: String,
+    },
+    RenameScatter {
+        name: String,
+        to: String,
+    },
     /// Sets or removes the reference image the editor shows to trace over.
     SetReference {
         reference: Option<Reference>,
@@ -310,6 +347,18 @@ pub enum Op {
     FitCorners {
         road: String,
     },
+}
+
+/// What a brush stroke works on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum StrokeTarget {
+    /// The ground's shape.
+    Sculpt,
+    /// A ground layer painted over the ground, by name; `None` paints the ground's own
+    /// material back.
+    Paint(Option<String>),
+    /// A scatter of models, by name.
+    Scatter(String),
 }
 
 fn missing(what: &str, name: &str) -> Error {
@@ -399,6 +448,16 @@ fn remap_markers(p: &mut Project, road: &str, f: Option<ParamMap>) {
     {
         pit.boxes.iter_mut().for_each(|u| *u = f(*u));
     }
+}
+
+fn scatter_mut<'a>(
+    p: &'a mut Project,
+    name: &str,
+) -> Result<&'a mut crate::project::Scatter, Error> {
+    p.scatter
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| missing("scatter", name))
 }
 
 fn line_mut<'a>(p: &'a mut Project, name: &str) -> Result<Line<'a>, Error> {
@@ -581,12 +640,22 @@ impl Op {
             Op::ReverseLine { line } => crate::lines::reverse(p, &line)?,
             Op::AddNode { line, pos, before } => {
                 let mut l = line_mut(p, &line)?;
-                let node = Node::new(pos);
                 // At the end through `insert` too, so that a closed road's keys and
                 // ranges on its closing segment move onto the new one.
                 let at = before.unwrap_or(l.nodes().len());
                 if at > l.nodes().len() {
                     l.node_index(&line, at)?;
+                }
+                // As big as the nodes it comes between.
+                let nodes = l.nodes();
+                let near: Vec<f64> = [at.checked_sub(1), Some(at)]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| nodes.get(i).map(|n| n.radius))
+                    .collect();
+                let mut node = Node::new(pos);
+                if !near.is_empty() {
+                    node.radius = near.iter().sum::<f64>() / near.len() as f64;
                 }
                 let map = l.insert(at, node);
                 remap_markers(p, &line, map);
@@ -613,6 +682,15 @@ impl Op {
                 let i = l.node_index(&line, index)?;
                 let map = l.remove(i);
                 remap_markers(p, &line, map);
+            }
+            Op::SetNodeRadius {
+                line,
+                index,
+                radius,
+            } => {
+                let mut l = line_mut(p, &line)?;
+                let i = l.node_index(&line, index)?;
+                l.nodes()[i].radius = radius;
             }
             Op::Subdivide { line, segments } => {
                 let mut l = line_mut(p, &line)?;
@@ -800,6 +878,35 @@ impl Op {
             Op::RemoveLandform { name } => {
                 remove(&mut p.terrain.landforms, "landform", &name, |l| &l.name)?
             }
+            Op::AddStroke { to, stroke } => match to {
+                StrokeTarget::Sculpt => p.terrain.sculpt.push(stroke),
+                StrokeTarget::Paint(layer) => {
+                    p.terrain
+                        .paint
+                        .push(crate::project::LayerStroke { layer, stroke });
+                }
+                StrokeTarget::Scatter(name) => scatter_mut(p, &name)?.strokes.push(stroke),
+            },
+            Op::ClearStrokes { of } => match of {
+                StrokeTarget::Sculpt => p.terrain.sculpt.clear(),
+                StrokeTarget::Paint(layer) => p.terrain.paint.retain(|s| s.layer != layer),
+                StrokeTarget::Scatter(name) => scatter_mut(p, &name)?.strokes.clear(),
+            },
+            Op::PutGroundLayer { layer } => put(&mut p.terrain.layers, layer, |l| &l.name, None),
+            Op::RemoveGroundLayer { name } => {
+                remove(&mut p.terrain.layers, "ground layer", &name, |l| &l.name)?;
+                p.terrain
+                    .paint
+                    .retain(|s| s.layer.as_deref() != Some(name.as_str()));
+            }
+            Op::PutScatter { scatter } => put(&mut p.scatter, scatter, |s| &s.name, None),
+            Op::RemoveScatter { name } => remove(&mut p.scatter, "scatter", &name, |s| &s.name)?,
+            Op::RenameScatter { name, to } => {
+                if p.scatter.iter().any(|s| s.name == to) {
+                    return Err(Error::Invalid(format!("a scatter named \"{to}\" exists")));
+                }
+                scatter_mut(p, &name)?.name = to;
+            }
             Op::SetReference { reference } => p.reference = reference,
             Op::SetGeo { geo } => p.geo = geo,
             Op::PutSurface { surface } => put(&mut p.surfaces, surface, |s| &s.name, None),
@@ -820,18 +927,26 @@ impl Op {
                     if sp.style.as_deref() != Some(&style.name) {
                         continue;
                     }
-                    if let Shape::Band {
-                        profile,
-                        surface,
-                        material,
-                        model,
-                        ..
-                    } = &mut sp.shape
-                    {
-                        *profile = style.profile.clone();
-                        *surface = style.surface.clone();
-                        *material = style.material.clone();
-                        *model = style.model.clone();
+                    match &mut sp.shape {
+                        Shape::Band {
+                            profile,
+                            surface,
+                            material,
+                            model,
+                            ..
+                        } => {
+                            *profile = style.profile.clone();
+                            *surface = style.surface.clone();
+                            *material = style.material.clone();
+                            *model = style.model.clone();
+                        }
+                        Shape::Area {
+                            surface, material, ..
+                        } => {
+                            *surface = style.surface.clone();
+                            *material = style.material.clone();
+                        }
+                        Shape::Wall { .. } => {}
                     }
                 }
                 put(&mut p.strip_styles, style, |s| &s.name, None);
@@ -948,6 +1063,7 @@ impl Op {
             Op::MoveNode { .. } => "MoveNode",
             Op::SetNodeHandles { .. } => "SetNodeHandles",
             Op::RemoveNode { .. } => "RemoveNode",
+            Op::SetNodeRadius { .. } => "SetNodeRadius",
             Op::Subdivide { .. } => "Subdivide",
             Op::SetNodes { .. } => "SetNodes",
             Op::SetProfile { .. } => "SetProfile",
@@ -975,6 +1091,13 @@ impl Op {
             Op::SetTerrain { .. } => "SetTerrain",
             Op::PutLandform { .. } => "PutLandform",
             Op::RemoveLandform { .. } => "RemoveLandform",
+            Op::AddStroke { .. } => "AddStroke",
+            Op::ClearStrokes { .. } => "ClearStrokes",
+            Op::PutGroundLayer { .. } => "PutGroundLayer",
+            Op::RemoveGroundLayer { .. } => "RemoveGroundLayer",
+            Op::PutScatter { .. } => "PutScatter",
+            Op::RemoveScatter { .. } => "RemoveScatter",
+            Op::RenameScatter { .. } => "RenameScatter",
             Op::SetReference { .. } => "SetReference",
             Op::SetGeo { .. } => "SetGeo",
             Op::PutSurface { .. } => "PutSurface",

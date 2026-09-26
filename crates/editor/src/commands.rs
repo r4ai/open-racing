@@ -230,7 +230,7 @@ impl Cmd {
             Grab => "Move".into(),
             Rotate => "Rotate".into(),
             Scale => "Scale".into(),
-            Width => "Road Width".into(),
+            Width => "Width / Radius".into(),
             Tilt => "Road Bank (Tilt)".into(),
             Extrude => "Extrude Node".into(),
             Subdivide => "Subdivide".into(),
@@ -354,7 +354,8 @@ impl Cmd {
             Subdivide | ToggleClosed | SmoothHeights | SmoothShape | Flatten => line,
             EvenGrade => line && sel.nodes.len() >= 2,
             Extrude | Handles(_) | HandleMenu => node,
-            Width | Tilt => sel.road().is_some(),
+            Width => sel.road().is_some() || sel.spline().is_some(),
+            Tilt => sel.road().is_some(),
             Duplicate | Copy | MirrorMenu | Mirror(_) => sel.item.is_some(),
             MoveToCollection => {
                 !c.tool.edit
@@ -401,10 +402,7 @@ pub fn handle_label(mode: HandleMode) -> &'static str {
 }
 
 fn start_draw(tool: &mut Tool, kind: DrawKind) {
-    tool.draw = Some(Draw {
-        kind,
-        points: Vec::new(),
-    });
+    tool.draw = Some(Draw::new(kind));
     tool.menu = None;
 }
 

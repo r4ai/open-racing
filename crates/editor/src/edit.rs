@@ -429,6 +429,7 @@ pub fn select_similar(editor: &mut Editor, by: crate::commands::Similar) {
             (Similar::Type, Item::Spline(s)) => p.splines.get(s).map(|s| {
                 s.style.clone().unwrap_or_else(|| match &s.shape {
                     Shape::Band { .. } => "band".into(),
+                    Shape::Area { .. } => "area".into(),
                     Shape::Wall { .. } => "wall".into(),
                 })
             }),

@@ -679,14 +679,9 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                     .selected_text(w.model.to_string_lossy())
                     .width(ui.available_width())
                     .show_ui(ui, |ui| {
-                        for a in library.models() {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut w.model,
-                                    a.path.clone(),
-                                    a.path.to_string_lossy(),
-                                )
-                                .changed();
+                        for m in library.model_paths() {
+                            let label = m.to_string_lossy().into_owned();
+                            changed |= ui.selectable_value(&mut w.model, m, label).changed();
                         }
                     });
             });
@@ -756,20 +751,11 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
             );
         }
     }
-    let models: Vec<_> = library.models().collect();
-    if models.is_empty() {
-        ui.weak("Import a glTF model under Assets to lay rows of it.");
-        return;
-    }
+    let models = library.model_paths();
     ui.horizontal_wrapped(|ui| {
         ui.label("Add a row of");
-        for a in models {
-            let stem = a
-                .path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
+        for model in models {
+            let stem = crate::assets::model_name(&model);
             if ui
                 .small_button(format!("+ {stem}"))
                 .on_hover_text(format!(
@@ -781,7 +767,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                 let n = crate::presets::free_name(&stem, |n| road.rows.iter().any(|w| w.name == n));
                 let row = open_racing_track_project::project::PropRow {
                     name: n,
-                    model: a.path.clone(),
+                    model: model.clone(),
                     side: Side::Left,
                     offset: 8.0,
                     spacing: 20.0,

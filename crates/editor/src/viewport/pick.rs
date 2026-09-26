@@ -326,9 +326,18 @@ pub(super) fn body_at(editor: &Editor, built: &Built, p: DVec3) -> Option<Item> 
         if smp.frames.is_empty() || !editor.pickable(Item::Spline(i)) {
             continue;
         }
+        let widest = sp.nodes.iter().map(|n| n.radius).fold(0.0, f64::max);
         let half = match &sp.shape {
-            Shape::Band { width, .. } => 0.5 * width,
+            Shape::Band { width, .. } => 0.5 * width * widest,
             Shape::Wall { thickness, .. } => 0.5 * thickness,
+            // Anywhere inside an area, or on its outline.
+            Shape::Area { .. } => {
+                let outline: Vec<DVec2> = smp.frames.iter().map(|f| f.pos.truncate()).collect();
+                if inside(&outline, p2) {
+                    return Some(Item::Spline(i));
+                }
+                0.0
+            }
         }
         .max(1.0);
         let (d, f) = lateral(smp);
@@ -352,6 +361,19 @@ pub(super) fn body_at(editor: &Editor, built: &Built, p: DVec3) -> Option<Item> 
         }
     }
     best.map(|(i, _)| Item::Road(i))
+}
+
+/// Whether `p` is inside the polygon `outline` (even-odd).
+pub(super) fn inside(outline: &[DVec2], p: DVec2) -> bool {
+    let n = outline.len();
+    let mut odd = false;
+    for k in 0..n {
+        let (a, b) = (outline[k], outline[(k + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            odd = !odd;
+        }
+    }
+    odd
 }
 
 pub(super) fn distance_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {

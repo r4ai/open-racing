@@ -122,6 +122,65 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
         strip,
         at: Some(0),
     });
+    // Sculpting, a painted ground layer, woods, a gravel area and a kerb whose width
+    // changes at a node.
+    let stroke = |brush, points: &[(f64, f64)]| open_racing_track_project::project::Stroke {
+        brush,
+        radius: 20.0,
+        strength: 1.0,
+        points: points
+            .iter()
+            .map(|&(x, y)| glam::DVec2::new(x, y))
+            .collect(),
+    };
+    use open_racing_track_project::ops::StrokeTarget;
+    use open_racing_track_project::project::Brush;
+    ops.push(Op::AddStroke {
+        to: StrokeTarget::Sculpt,
+        stroke: stroke(Brush::Raise, &[(150.0, 130.0), (200.0, 140.0)]),
+    });
+    ops.push(Op::PutGroundLayer {
+        layer: open_racing_track_project::project::GroundLayer {
+            name: "dirt".into(),
+            surface: "dirt".into(),
+            material: "dirt".into(),
+        },
+    });
+    ops.push(Op::AddStroke {
+        to: StrokeTarget::Paint(Some("dirt".into())),
+        stroke: stroke(Brush::Paint, &[(150.0, 100.0)]),
+    });
+    ops.push(Op::PutScatter {
+        scatter: open_racing_track_project::project::Scatter {
+            name: "woods".into(),
+            models: vec![open_racing_track_project::project::ScatterModel {
+                model: open_racing_track_project::shapes::path("pine"),
+                weight: 1.0,
+            }],
+            spacing: 8.0,
+            scale: [0.8, 1.2],
+            tilt: 0.0,
+            clearance: 3.0,
+            max_slope: 35.0,
+            collide: false,
+            strokes: vec![stroke(Brush::Paint, &[(-300.0, -100.0)])],
+            group: None,
+        },
+    });
+    let area = crate::presets::list(&e.project)
+        .into_iter()
+        .find(|p| p.is_area())
+        .unwrap()
+        .spline(
+            &e.project,
+            vec![
+                DVec3::new(300.0, 60.0, 0.0),
+                DVec3::new(340.0, 60.0, 0.0),
+                DVec3::new(330.0, 90.0, 0.0),
+            ],
+        )
+        .unwrap();
+    ops.push(Op::PutSpline { spline: area });
     ops.push(Op::PutProp {
         prop: Prop {
             group: Some("stands".into()),
@@ -185,6 +244,7 @@ fn every_panel_draws_for_every_selection() {
         PropTab::Track,
         PropTab::Markers,
         PropTab::Terrain,
+        PropTab::Scatter,
         PropTab::Reference,
         PropTab::Library,
         PropTab::Object,
@@ -199,6 +259,7 @@ fn every_panel_draws_for_every_selection() {
         Some((Item::Road(0), vec![])),
         Some((Item::Road(0), vec![1, 2])),
         Some((Item::Spline(0), vec![0])),
+        Some((Item::Spline(1), vec![])),
         Some((Item::Prop(0), vec![])),
     ];
     for selection in selections {
@@ -227,6 +288,14 @@ fn every_panel_draws_for_every_selection() {
                         c.shell.sidebar_tab = t;
                         sidebar::show(ui, &mut c);
                     }
+                    // Every brush's settings, as the Tool tab and the header show them.
+                    for active in crate::viewport::ToolKind::ALL {
+                        c.tool.active = active;
+                        c.shell.sidebar_tab = sidebar::Tab::Tool;
+                        sidebar::show(ui, &mut c);
+                        ui.horizontal(|ui| crate::brush::settings_ui(ui, &mut c, true));
+                    }
+                    c.tool.active = crate::viewport::ToolKind::Select;
                 });
             }
         }

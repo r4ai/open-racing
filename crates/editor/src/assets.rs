@@ -43,6 +43,18 @@ impl Library {
         self.list.iter().filter(|a| a.kind == Kind::Model)
     }
 
+    /// Every model a project can use: its model files, then the built-in models.
+    pub fn model_paths(&self) -> Vec<PathBuf> {
+        self.models()
+            .map(|a| a.path.clone())
+            .chain(
+                open_racing_track_project::shapes::BUILTIN
+                    .iter()
+                    .map(|(name, _)| open_racing_track_project::shapes::path(name)),
+            )
+            .collect()
+    }
+
     /// Looks at the files again now.
     pub fn refresh(&mut self) {
         self.last = None;
@@ -100,6 +112,16 @@ pub fn dropped(
             }
             Err(e) => editor.status = e.to_string(),
         }
+    }
+}
+
+/// A model's short name: a built-in one's, or its file's without the extension.
+pub fn model_name(path: &Path) -> String {
+    match open_racing_track_project::shapes::name(path) {
+        Some(name) => name.to_string(),
+        None => path
+            .file_stem()
+            .map_or("model".into(), |s| s.to_string_lossy().into_owned()),
     }
 }
 

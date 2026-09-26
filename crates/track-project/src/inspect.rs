@@ -483,6 +483,7 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
             name: sp.name.clone(),
             shape: match sp.shape {
                 crate::project::Shape::Band { .. } => "Band",
+                crate::project::Shape::Area { .. } => "Area",
                 crate::project::Shape::Wall { .. } => "Wall",
             },
             material: sp.material().to_string(),

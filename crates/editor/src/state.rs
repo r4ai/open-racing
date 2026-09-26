@@ -141,6 +141,8 @@ pub struct Shown {
     /// Collections hidden, and locked.
     pub hidden_groups: HashSet<String>,
     pub locked_groups: HashSet<String>,
+    /// Scatters hidden, by name.
+    pub hidden_scatter: HashSet<String>,
 }
 
 /// A step of the undo history: the project to go back (or on) to, and what the step

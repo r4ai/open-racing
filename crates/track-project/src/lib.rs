@@ -29,6 +29,8 @@ pub mod preview;
 pub mod project;
 pub mod road;
 pub mod rows;
+pub mod scatter;
+pub mod shapes;
 pub mod spline;
 pub mod terrain;
 pub mod validate;

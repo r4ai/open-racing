@@ -308,12 +308,7 @@ pub fn model_button(
     tip: &str,
     then: impl FnOnce(&std::path::Path),
 ) {
-    let models: Vec<_> = library.models().map(|a| a.path.clone()).collect();
-    if models.is_empty() {
-        ui.add_enabled(false, egui::Button::new(label))
-            .on_disabled_hover_text("Import a glTF model under Assets first");
-        return;
-    }
+    let models = library.model_paths();
     let mut chosen = None;
     ui.menu_button(label, |ui| {
         for m in &models {
@@ -561,6 +556,8 @@ pub(super) fn terrain_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             }
         }
     });
+    changed |= sculpt_ui(ui, c, &mut t);
+    changed |= layers_ui(ui, c, &mut t);
     section(ui, "Landforms", "terrain landforms", true, |ui| {
         ui.weak("Hills and banks raised, hollows dug and pads levelled, away from the roads. Drag their middles and edges in the view while this tab is open.");
         let mut remove = None;

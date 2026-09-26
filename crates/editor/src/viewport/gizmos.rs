@@ -337,7 +337,18 @@ pub fn gizmos(
     // The draw tool's points so far and the next one.
     if let Some(d) = &tool.draw {
         let next = tool.draw_at;
-        let pts: Vec<Vec3> = d.points.iter().copied().chain(next).map(lift).collect();
+        // An area closes back to its first point.
+        let close = matches!(&d.kind, DrawKind::Spline(p) if p.is_area())
+            .then(|| d.points.first().copied())
+            .flatten();
+        let pts: Vec<Vec3> = d
+            .points
+            .iter()
+            .copied()
+            .chain(next)
+            .chain(close)
+            .map(lift)
+            .collect();
         gizmos.linestrip(pts, Color::srgb(1.0, 0.95, 0.3));
         for &p in &d.points {
             gizmos.sphere(
@@ -395,6 +406,8 @@ pub fn gizmos(
             }
         }
     }
+
+    crate::brush::draw(&tool, &built, &mut gizmos);
 
     // The last test lap: where the car went, coloured by its speed (blue slow, yellow
     // fast; darker where it brakes), red where it was off the track, and the car itself

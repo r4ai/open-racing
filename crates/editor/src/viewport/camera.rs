@@ -145,23 +145,86 @@ pub(super) fn set_viewport(cam: &mut Camera, rect: &ViewRect, window: &Window) {
     }
 }
 
+/// The keys that fly the camera while the right button is held: forward, back, left,
+/// right, down and up.
+const FLY_KEYS: [KeyCode; 6] = [
+    KeyCode::KeyW,
+    KeyCode::KeyS,
+    KeyCode::KeyA,
+    KeyCode::KeyD,
+    KeyCode::KeyQ,
+    KeyCode::KeyE,
+];
+
+/// Where the camera is: `distance` from the focus, along the orbit's direction.
+fn orbit_dir(orbit: &Orbit) -> Vec3 {
+    Vec3::new(
+        orbit.pitch.cos() * orbit.yaw.cos(),
+        orbit.pitch.sin(),
+        orbit.pitch.cos() * orbit.yaw.sin(),
+    )
+}
+
+/// Turns the view about the camera itself rather than about the focus, as a head turns.
+fn look_by(orbit: &mut Orbit, yaw: f32, pitch: f32) {
+    let eye = orbit.focus + orbit_dir(orbit) * orbit.distance;
+    orbit_by(orbit, yaw, pitch);
+    orbit.focus = eye - orbit_dir(orbit) * orbit.distance;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn camera_input(
     orbit: &mut Orbit,
-    tool: &Tool,
+    tool: &mut Tool,
     buttons: &ButtonInput<MouseButton>,
+    keys: &ButtonInput<KeyCode>,
     motion: &AccumulatedMouseMotion,
     scroll: &AccumulatedMouseScroll,
     over: Option<Vec2>,
     t: &GlobalTransform,
+    dt: f32,
     alt: bool,
     shift: bool,
     ctrl: bool,
 ) {
     let d = motion.delta;
-    let middle = buttons.pressed(MouseButton::Middle) && tool.middle_press;
+    // The middle button deselects while selecting with a circle.
+    let middle = buttons.pressed(MouseButton::Middle) && tool.middle_press && tool.circle.is_none();
     let right =
         buttons.pressed(MouseButton::Right) && tool.right_press.is_some() && tool.modal.is_none();
+    // Flying, as in a game editor: the right button held with W A S D (Q, E down and
+    // up). The mouse turns the view about the camera, the wheel sets the speed.
+    if right && (tool.flying.is_some() || keys.any_pressed(FLY_KEYS)) {
+        let speed = tool
+            .flying
+            .get_or_insert((orbit.distance * 0.5).clamp(5.0, 400.0));
+        if scroll.delta.y != 0.0 {
+            *speed = (*speed * 1.25f32.powf(scroll.delta.y.signum())).clamp(0.5, 5000.0);
+        }
+        let speed = *speed * if shift { 4.0 } else { 1.0 };
+        let forward = -orbit_dir(orbit);
+        let side = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+        let axis = |k: KeyCode| if keys.pressed(k) { 1.0 } else { 0.0 };
+        let step = forward * (axis(KeyCode::KeyW) - axis(KeyCode::KeyS))
+            + side * (axis(KeyCode::KeyD) - axis(KeyCode::KeyA))
+            + Vec3::Y * (axis(KeyCode::KeyE) - axis(KeyCode::KeyQ));
+        orbit.focus += step.normalize_or_zero() * speed * dt;
+        if d != Vec2::ZERO {
+            look_by(orbit, d.x * 0.003, d.y * 0.003);
+        }
+        // Letting the button go after flying opens no menu.
+        if let Some((_, travel)) = &mut tool.right_press {
+            *travel = f32::INFINITY;
+        }
+        tool.hint = format!(
+            "Flying at {:.0} m/s · W/S forward and back · A/D sideways · Q/E down and up · mouse: look · wheel: speed · Shift: faster",
+            speed
+        );
+        return;
+    }
+    if !buttons.pressed(MouseButton::Right) {
+        tool.flying = None;
+    }
     let alt_left = alt && tool.press.is_some_and(|p| p.2) && buttons.pressed(MouseButton::Left);
     let dragging = middle || right || alt_left;
     if (over.is_some() || dragging) && d != Vec2::ZERO && dragging {
@@ -176,11 +239,19 @@ pub(super) fn camera_input(
             orbit_by(orbit, d.x * 0.005, d.y * 0.005);
         }
     }
-    // While transforming with proportional editing the wheel sets its reach.
-    let wheel_taken = tool.modal.is_some() && tool.proportional.on;
+    // While transforming with proportional editing the wheel sets its reach, and while
+    // selecting with a circle its size.
+    let wheel_taken = (tool.modal.is_some() && tool.proportional.on) || tool.circle.is_some();
     if over.is_some() && scroll.delta.y != 0.0 && !wheel_taken {
-        orbit.distance =
-            (orbit.distance * (1.0 - 0.1 * scroll.delta.y.signum())).clamp(2.0, 15_000.0);
+        let before = orbit.distance;
+        orbit.distance = (before * (1.0 - 0.1 * scroll.delta.y.signum())).clamp(2.0, 15_000.0);
+        // Towards what the pointer is over, so that it stays under the pointer.
+        if orbit.zoom_to_pointer
+            && let Some(p) = tool.pointer
+        {
+            let k = 1.0 - orbit.distance / before;
+            orbit.focus += (to_bevy(p) - orbit.focus) * k;
+        }
     }
 }
 
@@ -280,7 +351,7 @@ pub fn look(orbit: &mut Orbit, dir: ViewDir) {
 }
 
 /// Numpad views, framing and switching the projection; also called from the menus.
-pub fn view_keys(editor: &Editor, orbit: &mut Orbit, keys: &ButtonInput<KeyCode>) {
+pub fn view_keys(editor: &Editor, orbit: &mut Orbit, keys: &ButtonInput<KeyCode>, brush: bool) {
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     let side = |a, b| if ctrl { b } else { a };
     if keys.just_pressed(KeyCode::Numpad1) {
@@ -314,7 +385,8 @@ pub fn view_keys(editor: &Editor, orbit: &mut Orbit, keys: &ButtonInput<KeyCode>
     if !ctrl && keys.just_pressed(KeyCode::NumpadSubtract) {
         orbit.distance = (orbit.distance * 1.2).min(15_000.0);
     }
-    if keys.any_just_pressed([KeyCode::NumpadDecimal, KeyCode::KeyF]) {
+    // F sets a brush's radius instead.
+    if keys.just_pressed(KeyCode::NumpadDecimal) || (!brush && keys.just_pressed(KeyCode::KeyF)) {
         frame_selection(editor, orbit);
     }
     if keys.just_pressed(KeyCode::Home) {
@@ -429,7 +501,7 @@ pub fn view_input(
         return;
     }
     if free {
-        view_keys(&editor, &mut orbit, &keys);
+        view_keys(&editor, &mut orbit, &keys, tool.active.is_brush());
     }
 }
 

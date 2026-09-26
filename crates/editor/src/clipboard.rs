@@ -46,7 +46,7 @@ impl Uses {
                 let Some(s) = p.splines.get(s) else { return };
                 self.materials.insert(s.material().to_string());
                 match &s.shape {
-                    Shape::Band { surface, .. } => {
+                    Shape::Band { surface, .. } | Shape::Area { surface, .. } => {
                         self.surfaces.insert(surface.clone());
                         self.strips.extend(s.style.clone());
                     }

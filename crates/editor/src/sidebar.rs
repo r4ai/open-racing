@@ -110,6 +110,10 @@ fn item_tab(ui: &mut egui::Ui, c: &mut Ctx) {
         section(ui, "Width & Bank", "sidebar shape", true, |ui| {
             shape_ui(ui, c, r, &title, selected.first().copied());
         });
+    } else {
+        section(ui, "Radius", "sidebar radius", true, |ui| {
+            radius_ui(ui, c, &name, &nodes, &picked, &title);
+        });
     }
     if let Some(n) = c.editor.selection.node().filter(|&n| n < nodes.len()) {
         section(ui, "Handles", "sidebar handles", true, |ui| {
@@ -163,6 +167,36 @@ fn shape_ui(ui: &mut egui::Ui, c: &mut Ctx, r: usize, title: &str, first: Option
         );
     }
     ui.weak("Alt S: width · Ctrl T: bank, with the mouse in the view. Positive bank raises the right edge.");
+}
+
+/// A spline's radius at the selected nodes (all with none selected): its kerb's width
+/// or its wall's height there, times its own, as Blender's curve radius.
+fn radius_ui(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    name: &str,
+    nodes: &[open_racing_track_project::Node],
+    picked: &[usize],
+    title: &str,
+) {
+    ui.weak(title);
+    let Some(&first) = picked.first() else {
+        return;
+    };
+    let mut r = nodes[first].radius;
+    if row(ui, "Radius", |ui| number(ui, &mut r, 0.01, "×")) {
+        let ops = picked
+            .iter()
+            .map(|&index| Op::SetNodeRadius {
+                line: name.to_string(),
+                index,
+                radius: r.max(0.0),
+            })
+            .collect();
+        c.editor
+            .apply(ops, Some(&format!("radius {name} {picked:?}")));
+    }
+    ui.weak("A kerb's width or a wall's height here, easing to the next node's. Alt S with the mouse in the view.");
 }
 
 /// The active node's handles: their kind and offsets.
@@ -232,10 +266,16 @@ fn tool_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                 ToolKind::Scale => "Scale: drag the gizmo's handles",
                 ToolKind::AddNode => "Add Node: click to add to the selected line",
                 ToolKind::Measure => "Measure: click two points",
+                ToolKind::Sculpt => "Sculpt Terrain: drag to raise, dig, smooth or level",
+                ToolKind::Paint => "Paint Ground: drag to paint dirt, gravel, sand",
+                ToolKind::Scatter => "Scatter: drag to plant woods, bushes, rocks",
             };
             ui.radio_value(&mut c.tool.active, t, text);
         }
     });
+    if c.tool.active.is_brush() {
+        crate::brush::sidebar(ui, c);
+    }
     if c.tool.active == ToolKind::Measure {
         section(ui, "Measure", "sidebar measure", true, |ui| {
             measure_ui(ui, c);
@@ -391,6 +431,12 @@ fn view_tab(ui: &mut egui::Ui, c: &mut Ctx) {
         if row(ui, "Tilt", |ui| number(ui, &mut pitch, 1.0, "°")) {
             c.orbit.pitch = (pitch.to_radians() as f32).clamp(-1.5695, 1.5695);
         }
+        row(ui, "", |ui| {
+            ui.checkbox(&mut c.orbit.zoom_to_pointer, "Zoom to the pointer")
+                .on_hover_text(
+                    "The wheel zooms towards what the pointer is over, not the view's middle",
+                )
+        });
         let mut ortho = c.orbit.ortho;
         if row(ui, "", |ui| {
             ui.checkbox(&mut ortho, "Orthographic").changed()
@@ -413,4 +459,5 @@ pub fn overlay_checks(ui: &mut egui::Ui, c: &mut Ctx) {
     ui.checkbox(&mut o.markers, "Race markers and grid");
     ui.checkbox(&mut o.stretches, "Stretches of strips and barriers");
     ui.checkbox(&mut o.props, "Props");
+    ui.checkbox(&mut o.scatter, "Scattered models (woods, bushes)");
 }

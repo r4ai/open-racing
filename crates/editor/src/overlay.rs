@@ -254,6 +254,8 @@ enum Icon {
     Move,
     Scale,
     Road,
+    /// A paintbrush.
+    Brush,
 }
 
 /// Paints a drawn icon in a button's square.
@@ -297,6 +299,22 @@ fn paint_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: egui
                 painter.line_segment([c + egui::vec2(0.0, a), c + egui::vec2(0.0, b)], stroke);
             }
         }
+        Icon::Brush => {
+            // The handle, the ferrule and the bristles, and a stroke of paint.
+            painter.line_segment(
+                [c + egui::vec2(9.0, -9.0), c + egui::vec2(1.0, -1.0)],
+                egui::Stroke::new(2.4, color),
+            );
+            painter.circle_filled(c + egui::vec2(-2.0, 2.0), 3.6, color);
+            painter.line_segment(
+                [c + egui::vec2(-5.0, 5.0), c + egui::vec2(-8.0, 8.5)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-9.0, 10.0), c + egui::vec2(-1.0, 10.0)],
+                stroke,
+            );
+        }
     }
 }
 
@@ -337,6 +355,9 @@ fn toolbar(ctx: &egui::Context, r: egui::Rect, c: &mut Ctx) {
                         (ToolKind::Scale, Icon::Scale, "Scale\nDrag the gizmo's handles (S scales at any time)"),
                         (ToolKind::AddNode, Icon::Glyph("✚"), "Add Node\nClick: add a node to the selected road or spline (Ctrl+click at any time)"),
                         (ToolKind::Measure, Icon::Glyph("📏"), "Measure\nClick two points for the distance between them; scale the reference image by it in the sidebar (N)"),
+                        (ToolKind::Sculpt, Icon::Glyph("🗻"), "Sculpt Terrain\nDrag to raise, dig, smooth, level or roughen the ground · Ctrl: the other way · Shift: smooth · F: radius"),
+                        (ToolKind::Paint, Icon::Brush, "Paint Ground\nDrag to paint dirt, gravel or sand over the terrain, each with its grip · Ctrl: the ground's own back"),
+                        (ToolKind::Scatter, Icon::Glyph("🌲"), "Scatter\nDrag to plant woods, bushes and rocks · Ctrl: wipe them out · F: radius"),
                     ] {
                         if tool_button(ui, c.tool.active == t, icon, tip).clicked() {
                             c.tool.active = t;

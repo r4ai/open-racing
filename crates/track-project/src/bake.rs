@@ -21,7 +21,7 @@ use crate::model::{self, Model, Placement};
 use crate::project::{Alpha, MaterialDef, Project, TextureSource};
 use crate::road::{self, RoadBuild, Solid, SolidPart};
 use crate::spline::{self, SplineBuild};
-use crate::terrain::{self, TerrainBuild};
+use crate::terrain::{self, Grid, TerrainBuild};
 
 /// Spacing of the centreline's points, m. The simulation eases between them.
 const CENTRELINE_SPACING: f64 = 4.0;
@@ -29,7 +29,7 @@ const CENTRELINE_SPACING: f64 = 4.0;
 /// Everything the project's meshes are built into.
 pub struct Scene {
     pub roads: Vec<RoadBuild>,
-    pub terrain: Option<TerrainBuild>,
+    pub terrain: Option<Arc<TerrainBuild>>,
     pub splines: Vec<SplineBuild>,
     /// Every physics mesh: roads, terrain and splines.
     pub ground: Ground,
@@ -77,6 +77,9 @@ pub struct BuildCache {
     lists: Option<(Vec<crate::project::NamedSurface>, Vec<MaterialDef>)>,
     /// Each road as it was, and its build before overlaps were resolved.
     roads: Vec<(crate::project::Road, RoadBuild)>,
+    /// The terrain's grid before sculpting, with the settings, roads and elevation
+    /// data it was built from.
+    base: Option<BaseKey>,
     /// The terrain's settings, the roads and elevation data it was built round, and
     /// the terrain.
     terrain: Option<TerrainKey>,
@@ -95,7 +98,14 @@ type TerrainKey = (
     crate::project::Terrain,
     Vec<crate::project::Road>,
     Option<Arc<crate::dem::Heights>>,
-    Option<TerrainBuild>,
+    Option<Arc<TerrainBuild>>,
+);
+
+type BaseKey = (
+    crate::project::Terrain,
+    Vec<crate::project::Road>,
+    Option<Arc<crate::dem::Heights>>,
+    Option<Arc<Grid>>,
 );
 
 /// Builds the roads, then the terrain under them, then the splines over both. Without
@@ -145,6 +155,7 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
     if cache.lists.as_ref() != Some(&lists) {
         cache.lists = Some(lists);
         cache.roads.clear();
+        cache.base = None;
         cache.terrain = None;
     }
     let mut failed = Vec::new();
@@ -183,7 +194,28 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
             built.clone()
         }
         _ => {
-            let built = terrain::build(project, &roads, heights.as_deref());
+            // The grid before sculpting changes only with the settings it is made
+            // from: a brush stroke builds on the one made last.
+            let base = match &cache.base {
+                Some((t, r, h, base))
+                    if terrain::same_base(t, &project.terrain)
+                        && *r == project.roads
+                        && same_heights(h) =>
+                {
+                    base.clone()
+                }
+                _ => {
+                    let base = terrain::base(project, &roads, heights.as_deref()).map(Arc::new);
+                    cache.base = Some((
+                        project.terrain.clone(),
+                        project.roads.clone(),
+                        heights.clone(),
+                        base.clone(),
+                    ));
+                    base
+                }
+            };
+            let built = base.map(|g| Arc::new(terrain::finish(project, &roads, &g)));
             cache.terrain = Some((
                 project.terrain.clone(),
                 project.roads.clone(),
@@ -197,14 +229,14 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
     let mut ground = Ground::default();
     add_solids(&mut ground, roads.iter().flat_map(|b| &b.solid));
     if let Some(t) = &terrain {
-        let s = &t.solid;
-        let surface = project.surface_index(&project.terrain.surface).unwrap_or(0);
-        ground.add(
-            PatchKind::Ground(surface as u16),
-            &s.positions,
-            &s.normals,
-            &s.indices,
-        );
+        for (surface, m) in &t.solid {
+            ground.add(
+                PatchKind::Ground(*surface as u16),
+                &m.positions,
+                &m.normals,
+                &m.indices,
+            );
+        }
     }
     let under = project
         .splines
@@ -264,8 +296,18 @@ impl Cache {
         Ok(self.textures.get(source).map(|(_, d)| d.as_slice()))
     }
 
-    /// A model, read from `path` relative to `dir`.
+    /// A model, read from `path` relative to `dir`, or made if it is a built-in one.
     pub fn model(&mut self, dir: &Path, path: &Path) -> Result<Arc<Model>, Error> {
+        if let Some(name) = crate::shapes::name(path) {
+            if let Some((_, m)) = self.models.get(path) {
+                return Ok(m.clone());
+            }
+            let m = crate::shapes::model(name)
+                .ok_or_else(|| Error::Invalid(format!("there is no built-in model \"{name}\"")))?;
+            let m = Arc::new(m);
+            self.models.insert(path.to_path_buf(), (None, m.clone()));
+            return Ok(m);
+        }
         let full = dir.join(path);
         let stamp = modified(&full);
         if let Some((s, m)) = self.models.get(path)
@@ -427,6 +469,105 @@ pub fn add_model_walls(
     Ok(())
 }
 
+/// Adds the terrain's material with its painted layers: the ground's own texture and
+/// each layer's, laid by the world's x and y at their materials' tiling, blended by the
+/// mask. Returns the material's index.
+fn add_ground_layers(
+    project: &Project,
+    mask: &terrain::PaintMask,
+    dir: &Path,
+    cache: &mut Cache,
+    visual: &mut VisualBuilder,
+) -> Result<u32, Error> {
+    use open_racing_track::{Detail, DetailLayer, DetailMask};
+    let t = &project.terrain;
+    let own = project.material_index(&t.material).unwrap_or(0);
+    let materials = std::iter::once(own).chain(
+        t.layers
+            .iter()
+            .map(|l| project.material_index(&l.material).unwrap_or(own)),
+    );
+    let mut layers = [None; 4];
+    for (slot, m) in layers.iter_mut().zip(materials) {
+        let def = &project.materials[m];
+        let Some(data) = cache.texture(&def.texture, dir)? else {
+            continue;
+        };
+        let texture = visual.add_texture(Texture {
+            data: data.to_vec(),
+        });
+        *slot = Some(DetailLayer {
+            texture,
+            scale: 1.0 / def.tile[0].max(1e-3),
+        });
+    }
+    let mask = visual.add_texture(Texture {
+        data: texture::encode(texture::Image {
+            width: mask.width,
+            height: mask.height,
+            pixels: mask.rgba.clone(),
+        }),
+    });
+    let def = &project.materials[own];
+    let [r, g, b] = def.color.map(srgb_to_linear);
+    Ok(visual.add_material(Material {
+        base_color: [r, g, b, 1.0],
+        roughness: def.roughness,
+        reflectance: def.reflectance,
+        detail: Some(Detail {
+            mask: DetailMask::Texture(mask),
+            layers,
+            multiplier: 1.0,
+            world_uv: true,
+            normal: None,
+        }),
+        ..Default::default()
+    }))
+}
+
+/// Adds the scatters' copies: each model's look once, and the copies merged into
+/// meshes; those of scatters cars collide with to `ground` as well.
+pub fn add_scatter(
+    project: &Project,
+    roads: &[RoadBuild],
+    under: &GroundMesh,
+    dir: &Path,
+    cache: &mut Cache,
+    visual: &mut VisualBuilder,
+    ground: &mut Ground,
+) -> Result<(), Error> {
+    let keepout = crate::scatter::Keepout::new(roads);
+    let mut looks: HashMap<PathBuf, Vec<u32>> = HashMap::new();
+    for s in &project.scatter {
+        let models = s
+            .models
+            .iter()
+            .map(|m| cache.model(dir, &m.model))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (m, model) in s.models.iter().zip(&models) {
+            looks
+                .entry(m.model.clone())
+                .or_insert_with(|| add_look(model, visual));
+        }
+        let copies = crate::scatter::copies(s, &keepout, under);
+        for (k, mesh) in crate::scatter::meshes(&models, &copies) {
+            let materials = &looks[&s.models[k].model];
+            visual.add_mesh(
+                materials[mesh.material as usize],
+                mesh.cast_shadows,
+                &mesh.positions,
+                &mesh.normals,
+                &mesh.uvs,
+                &mesh.indices,
+            );
+            if s.collide {
+                ground.add(PatchKind::Wall, &mesh.positions, &[], &mesh.indices);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Bakes the project into a package. Textures and models are read from the project's directory
 /// `dir`.
 pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPackage, Error> {
@@ -455,6 +596,16 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
         &mut scene.ground,
     )?;
     add_model_walls(&scene, dir, cache, &mut visual)?;
+    let ground_now = scene.ground.build(&surface_props(project));
+    add_scatter(
+        project,
+        &scene.roads,
+        &ground_now,
+        dir,
+        cache,
+        &mut visual,
+        &mut scene.ground,
+    )?;
     for part in scene.visual_parts() {
         let m = &part.mesh;
         visual.add_mesh(
@@ -467,12 +618,15 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
         );
     }
     if let Some(t) = &scene.terrain {
-        let material = project
-            .material_index(&project.terrain.material)
-            .unwrap_or(0);
+        let material = match &t.mask {
+            Some(mask) => add_ground_layers(project, mask, dir, cache, &mut visual)?,
+            None => project
+                .material_index(&project.terrain.material)
+                .unwrap_or(0) as u32,
+        };
         for m in &t.chunks {
             visual.add_mesh(
-                material as u32,
+                material,
                 false,
                 &m.positions,
                 &m.normals,

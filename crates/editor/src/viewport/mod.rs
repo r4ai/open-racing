@@ -1,13 +1,15 @@
 //! The 3D view, driven like Blender's.
 //!
 //! - Camera: middle drag orbits (or right drag, or Alt + left drag), Shift + middle pans,
-//!   Ctrl + middle and the wheel zoom. Numpad 1, 3 and 7 look from the front, the right
-//!   and the top (with Ctrl, from the other side); numpad 5 switches between perspective
-//!   and orthographic; numpad . (or F) frames the selection, Home everything.
+//!   Ctrl + middle and the wheel zoom (towards the pointer). Holding the right button with
+//!   W A S D (Q, E down and up) flies, the mouse looking round and the wheel setting the
+//!   speed. Numpad 1, 3 and 7 look from the front, the right and the top (with Ctrl, from
+//!   the other side); numpad 5 switches between perspective and orthographic; numpad .
+//!   (or F) frames the selection, Home everything.
 //! - Selecting: left click picks a node, a handle, a road or a spline; Shift + click adds
 //!   nodes to the selection; dragging over empty space draws a box; A selects all of the
-//!   selected road's or spline's nodes (in object mode every item), Alt + A none. In
-//!   object mode, dragging an item moves it.
+//!   selected road's or spline's nodes (in object mode every item), Alt + A none; C
+//!   selects by painting with a circle. In object mode, dragging an item moves it.
 //! - Changing: G grabs, R rotates, S scales what is selected, and dragging a node, handle
 //!   or marker grabs it. While transforming, X, Y and Z hold to an axis, Shift is fine,
 //!   Ctrl snaps, typed numbers give exact values; a click or Enter confirms, a right
@@ -17,8 +19,11 @@
 //!   a click adds a node to the selected road or spline.
 //! - Building: E extrudes the active node, Ctrl + click (left or right) adds a node at
 //!   the pointer, X or Delete deletes, Shift + D duplicates a spline, Shift + A opens the
-//!   add menu to draw a road, kerb, wall or fence, and a right click opens a menu for
-//!   what is under the pointer.
+//!   add menu to draw a road, kerb, wall, fence or area (click points, or drag to
+//!   sketch), Alt + S sets a kerb's width or a wall's height at its nodes, and a right
+//!   click opens a menu for what is under the pointer.
+//! - Brushes (the toolbar): Sculpt Terrain, Paint Ground and Scatter paint strokes over
+//!   the ground, see `crate::brush`.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{CameraOutputMode, ScalingMode, Viewport};
@@ -93,6 +98,8 @@ pub struct Orbit {
     pub replay: Option<f64>,
     /// Where the view was before local view: focus, yaw, pitch and distance.
     pub before_local: Option<(Vec3, f32, f32, f32)>,
+    /// The wheel zooms towards what the pointer is over, not the view's middle.
+    pub zoom_to_pointer: bool,
 }
 
 impl Default for Orbit {
@@ -107,6 +114,7 @@ impl Default for Orbit {
             walk: None,
             replay: None,
             before_local: None,
+            zoom_to_pointer: true,
         }
     }
 }
@@ -204,7 +212,8 @@ pub enum Mode {
     Grab,
     Rotate,
     Scale,
-    /// Alt + S: a road's width at its nodes (Blender's shrink/fatten).
+    /// Alt + S: a road's width at its nodes, or a spline's radius (Blender's
+    /// shrink/fatten).
     Width,
     /// Ctrl + T: a road's bank at its nodes (Blender's tilt).
     Tilt,
@@ -291,6 +300,13 @@ enum Target {
         /// The other side's width, for setting both alike.
         other: StationCurve,
     },
+    /// A spline's radius at some of its nodes (Alt S): its kerb's width or its wall's
+    /// height there.
+    Radius {
+        line: String,
+        /// Each node and its radius as it was.
+        start: Vec<(usize, f64)>,
+    },
     /// A road's width or bank at some of its nodes.
     Shape {
         road: String,
@@ -348,6 +364,58 @@ pub enum DrawKind {
 pub struct Draw {
     pub kind: DrawKind,
     pub points: Vec<DVec3>,
+    /// Sketching freehand while the button is held: the first point of the sketch, and
+    /// where the pointer was on screen when the last point went down.
+    pub sketch: Option<(usize, Vec2)>,
+}
+
+impl Draw {
+    pub fn new(kind: DrawKind) -> Self {
+        Self {
+            kind,
+            points: Vec::new(),
+            sketch: None,
+        }
+    }
+}
+
+/// How far the pointer moves on screen between the points of a sketch, logical pixels.
+const SKETCH_STEP: f32 = 6.0;
+
+/// The fewest points that keep a sketched line within `tolerance` of every point of it,
+/// its ends kept: Ramer, Douglas and Peucker's simplification, in plan.
+pub fn simplify(points: &[DVec3], tolerance: f64) -> Vec<DVec3> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut stack = vec![(0, points.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (pa, pb) = (points[a].truncate(), points[b].truncate());
+        let ab = pb - pa;
+        let far = (a + 1..b)
+            .map(|i| {
+                let p = points[i].truncate();
+                let t = ((p - pa).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                (i, p.distance(pa + ab * t))
+            })
+            .max_by(|x, y| x.1.total_cmp(&y.1));
+        if let Some((i, d)) = far
+            && d > tolerance
+        {
+            keep[i] = true;
+            stack.push((a, i));
+            stack.push((i, b));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(p, _)| *p)
+        .collect()
 }
 
 /// A menu opened in the view, where it was opened.
@@ -373,16 +441,25 @@ pub enum ToolKind {
     AddNode,
     /// Clicks measure the distance between two points.
     Measure,
+    /// Strokes shape the terrain.
+    Sculpt,
+    /// Strokes paint the terrain's ground layers.
+    Paint,
+    /// Strokes paint models over the ground: woods, bushes, rocks.
+    Scatter,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 6] = [
+    pub const ALL: [ToolKind; 9] = [
         ToolKind::Select,
         ToolKind::Move,
         ToolKind::Rotate,
         ToolKind::Scale,
         ToolKind::AddNode,
         ToolKind::Measure,
+        ToolKind::Sculpt,
+        ToolKind::Paint,
+        ToolKind::Scatter,
     ];
 
     pub fn label(self) -> &'static str {
@@ -393,6 +470,9 @@ impl ToolKind {
             ToolKind::Scale => "Scale",
             ToolKind::AddNode => "Add Node",
             ToolKind::Measure => "Measure",
+            ToolKind::Sculpt => "Sculpt Terrain",
+            ToolKind::Paint => "Paint Ground",
+            ToolKind::Scatter => "Scatter",
         }
     }
 
@@ -402,8 +482,13 @@ impl ToolKind {
             ToolKind::Move => Some(Mode::Grab),
             ToolKind::Rotate => Some(Mode::Rotate),
             ToolKind::Scale => Some(Mode::Scale),
-            ToolKind::Select | ToolKind::AddNode | ToolKind::Measure => None,
+            _ => None,
         }
+    }
+
+    /// Whether it is a brush: dragging paints strokes over the ground.
+    pub fn is_brush(self) -> bool {
+        matches!(self, ToolKind::Sculpt | ToolKind::Paint | ToolKind::Scatter)
     }
 }
 
@@ -420,6 +505,8 @@ pub struct Overlays {
     /// Stretches of the selected road's strips and barriers.
     pub stretches: bool,
     pub props: bool,
+    /// The scatters' models (woods, bushes): off, the view is lighter to work in.
+    pub scatter: bool,
 }
 
 impl Default for Overlays {
@@ -431,6 +518,7 @@ impl Default for Overlays {
             markers: true,
             stretches: true,
             props: true,
+            scatter: true,
         }
     }
 }
@@ -654,6 +742,14 @@ pub struct Tool {
     pub place: Option<PathBuf>,
     /// The points the measure tool was clicked at: none, the start, or both ends.
     pub measure: Vec<DVec3>,
+    /// The brushes' settings and the stroke being painted.
+    pub brush: crate::brush::Brushes,
+    /// Flying with the right button and W A S D: the speed, m/s.
+    pub flying: Option<f32>,
+    /// Circle select (C): the circle's radius on screen, logical pixels.
+    pub circle: Option<f32>,
+    /// The circle's radius as last set, for the next time.
+    pub circle_radius: f32,
     /// Where the left button went down, on what, and whether it went down with Alt
     /// (orbiting).
     press: Option<(Vec2, Option<Hit>, bool)>,
@@ -714,6 +810,7 @@ impl Tool {
             snap: self.snap,
             snapping: self.snapping,
             proportional: self.proportional,
+            brush: self.brush.settings(),
             ..default()
         };
     }
