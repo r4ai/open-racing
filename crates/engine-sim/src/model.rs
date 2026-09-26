@@ -552,7 +552,11 @@ impl Model {
         let err = e.idle_rpm - rpm;
         // Never below half the idle air: a shut plate would starve the manifold and stall.
         let (lo, hi) = (-0.5 * e.idle_opening, e.idle_authority);
-        self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(lo, hi);
+        // Only with the pedal up: revving, the speed is the driver's, and an integral
+        // wound down meanwhile would let the engine dip under idle when it comes back.
+        if c.pedal < 0.01 {
+            self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(lo, hi);
+        }
         let idle = e.idle_opening + (self.ecu.idle + 0.5 * e.idle_gain * err).clamp(lo, hi);
         self.throttle = c.pedal.clamp(0.0, 1.0).max(idle);
         if rpm > e.limiter_rpm {
