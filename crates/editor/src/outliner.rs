@@ -126,7 +126,53 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                     ui.weak("   Place models from Assets");
                 }
             });
+            let scatters: Vec<(usize, String)> = c
+                .editor
+                .project
+                .scatter
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| shown(&s.name))
+                .map(|(i, s)| (i, s.name.clone()))
+                .collect();
+            category(ui, "Scatters", scatters.len(), |ui| {
+                for (i, name) in &scatters {
+                    ui.horizontal(|ui| scatter_row(ui, c, *i, name));
+                }
+                if scatters.is_empty() && filter.is_empty() {
+                    ui.weak("   Woods, bushes, rocks: the Scatter tool");
+                }
+            });
         });
+}
+
+/// A scatter: its eye, and its name, which picks it to paint.
+fn scatter_row(ui: &mut egui::Ui, c: &mut Ctx, i: usize, name: &str) {
+    ui.add_space(18.0);
+    let hidden = c.editor.shown.hidden_scatter.contains(name);
+    let eye = if hidden { "◌" } else { "👁" };
+    if ui
+        .add(egui::Button::new(eye).frame(false))
+        .on_hover_text("Show or hide it in the view")
+        .clicked()
+        && !c.editor.shown.hidden_scatter.remove(name)
+    {
+        c.editor.shown.hidden_scatter.insert(name.to_string());
+    }
+    let copies = c.built.scattered.get(i).copied().unwrap_or(0);
+    let painting = c.tool.active == crate::viewport::ToolKind::Scatter
+        && c.tool.brush.scatter.as_deref() == Some(name);
+    if ui
+        .selectable_label(painting, format!("🌲 {name}"))
+        .on_hover_text(format!(
+            "{copies} copies · click to paint it (Scatter tool)"
+        ))
+        .clicked()
+    {
+        c.tool.active = crate::viewport::ToolKind::Scatter;
+        c.tool.brush.scatter = Some(name.to_string());
+        c.shell.tab = crate::ui::PropTab::Scatter;
+    }
 }
 
 /// A group of the tree, open by default.

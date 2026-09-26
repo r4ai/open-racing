@@ -237,6 +237,7 @@ fn main() {
             stretches: false,
             props: false,
             scatter: true,
+            xray: false,
         };
     }
 
@@ -312,6 +313,7 @@ fn main() {
             preview::show_items,
             preview::rows,
             jobs::poll,
+            viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
             auto_screenshot,

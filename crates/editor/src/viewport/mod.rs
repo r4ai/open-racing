@@ -507,6 +507,9 @@ pub struct Overlays {
     pub props: bool,
     /// The scatters' models (woods, bushes): off, the view is lighter to work in.
     pub scatter: bool,
+    /// Lines, nodes and handles drawn through the ground and what stands on it, as
+    /// Blender's X-ray (Alt Z): nodes under a sculpted hill stay in sight.
+    pub xray: bool,
 }
 
 impl Default for Overlays {
@@ -519,6 +522,7 @@ impl Default for Overlays {
             stretches: true,
             props: true,
             scatter: true,
+            xray: false,
         }
     }
 }

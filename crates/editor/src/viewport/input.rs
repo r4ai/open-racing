@@ -340,6 +340,9 @@ pub fn input(
         editor.hide_selected();
     } else if pressed(KeyCode::NumpadDivide) || pressed(KeyCode::Slash) {
         toggle_local(editor, &mut orbit);
+    } else if pressed(KeyCode::KeyZ) && alt {
+        tool.overlays.xray = !tool.overlays.xray;
+        editor.status = format!("X-ray {}", if tool.overlays.xray { "on" } else { "off" });
     } else if pressed(KeyCode::KeyC) && !ctrl && !alt && !shift {
         tool.circle = Some(if tool.circle_radius > 0.0 {
             tool.circle_radius

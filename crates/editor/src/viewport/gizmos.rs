@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// X-ray (Alt Z): what the view draws over the track shows through the ground.
+pub fn xray(tool: Res<Tool>, mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
+    let bias = if tool.overlays.xray { -1.0 } else { 0.0 };
+    if config.depth_bias != bias {
+        config.depth_bias = bias;
+    }
+}
+
 /// Lines, nodes, handles, markers, and what the tools are doing.
 pub fn gizmos(
     editor: Res<Editor>,

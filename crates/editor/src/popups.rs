@@ -427,6 +427,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Home", "Frame all"),
             ("Page Up / Page Down", "Previous / next corner"),
             ("`", "View pie"),
+            ("Alt Z", "X-ray: lines and nodes through the ground"),
             ("T / N", "Toolbar / Sidebar"),
             ("Ctrl Space", "Maximize the 3D view"),
         ],

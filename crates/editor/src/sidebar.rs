@@ -460,4 +460,8 @@ pub fn overlay_checks(ui: &mut egui::Ui, c: &mut Ctx) {
     ui.checkbox(&mut o.stretches, "Stretches of strips and barriers");
     ui.checkbox(&mut o.props, "Props");
     ui.checkbox(&mut o.scatter, "Scattered models (woods, bushes)");
+    ui.checkbox(
+        &mut o.xray,
+        "X-ray: lines and nodes through the ground (Alt Z)",
+    );
 }
