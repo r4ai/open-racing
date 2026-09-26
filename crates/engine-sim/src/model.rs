@@ -18,6 +18,7 @@ use crate::crank::{SliderCrank, firing_angles};
 use crate::gas::Gas;
 use crate::pipe::{End, Pipe};
 use crate::spec::{Cut, EngineSpec, throttle_area};
+use crate::turbo::Turbo;
 
 /// Most parts a step is split into for the CFL condition.
 const MAX_SPLIT: usize = 16;
@@ -196,6 +197,15 @@ impl Lump {
         self.dmf = 0.0;
     }
 
+    /// Adds flows in (negative: out), per second, over the current step: mass, energy,
+    /// burned mass and fuel.
+    pub(crate) fn add_rates(&mut self, dm: f64, de: f64, dmy: f64, dmf: f64) {
+        self.dm += dm;
+        self.de += de;
+        self.dmy += dmy;
+        self.dmf += dmf;
+    }
+
     /// Burns its unburned fuel as a flame crossing it would, over `dt` (call `derive`
     /// after); returns the heat released, J.
     ///
@@ -292,6 +302,18 @@ pub enum Opening {
     },
     /// A cylinder's intake (true) or exhaust valves.
     Valves { cylinder: usize, intake: bool },
+    /// A turbocharger's wastegate: its area when fully open, m², opened as far as the
+    /// turbocharger's `wastegate` says.
+    Wastegate { turbo: usize, area: f64 },
+    /// A blow-off valve: its area when fully open, m², opened as far as the link's
+    /// `position` says; it opens `opens` Pa (fully `span` Pa further) over the
+    /// `reference` volume's pressure.
+    BlowOff {
+        area: f64,
+        reference: usize,
+        opens: f64,
+        span: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +325,21 @@ pub struct Link {
     pub flow: f64,
     /// Face velocity at a pipe end the step before, the next search's start, m/s.
     pub guess: f64,
+    /// How far open a valve worked by the gas (a blow-off valve) is, 0..1.
+    pub position: f64,
+}
+
+impl Link {
+    pub fn new(a: Port, b: Port, opening: Opening) -> Self {
+        Self {
+            a,
+            b,
+            opening,
+            flow: 0.0,
+            guess: 0.0,
+            position: 0.0,
+        }
+    }
 }
 
 /// A pipe's mouth to the air, a source of sound.
@@ -494,6 +531,7 @@ pub struct Model {
     pub links: Vec<Link>,
     pub cylinders: Vec<Cylinder>,
     pub mouths: Vec<Mouth>,
+    pub turbos: Vec<Turbo>,
     /// The fuel's burning outside the flame.
     pub chem: Chemistry,
     /// Heat released by fuel burning outside the cylinders' flames (in the pipes and
@@ -567,6 +605,7 @@ impl Model {
             links: Vec::new(),
             cylinders: Vec::new(),
             mouths: Vec::new(),
+            turbos: Vec::new(),
             kinematics: kin,
             angle: 0.0,
             omega: 0.0,
@@ -731,6 +770,36 @@ impl Model {
         {
             self.throttle = self.throttle.max(pops.throttle);
         }
+        // Wastegates' diaphragms, pushed by the boost at their compressors' outlets
+        // against their springs; they settle in some 50 ms.
+        let amb = self.ambient.pressure;
+        let lag = 1.0 - (-self.dt / 0.05).exp();
+        for t in &mut self.turbos {
+            let gate = t.turbine.as_ref().and_then(|t| t.wastegate.as_ref());
+            let target = gate.filter(|_| t.compressor.is_some()).map_or(0.0, |w| {
+                let boost = self.lumps[t.compressor_ports[1]].p - amb;
+                ((boost - w.opens) / (w.open - w.opens).max(1.0)).clamp(0.0, 1.0)
+            });
+            t.wastegate += lag * (target - t.wastegate);
+        }
+        // Blow-off valves: light poppets, open in a few milliseconds.
+        let lag = 1.0 - (-self.dt / 0.005).exp();
+        for li in 0..self.links.len() {
+            if let Opening::BlowOff {
+                reference,
+                opens,
+                span,
+                ..
+            } = self.links[li].opening
+            {
+                let from = match self.links[li].a {
+                    Port::Volume(v) => self.lumps[v].p,
+                    _ => amb,
+                };
+                let target = ((from - self.lumps[reference].p - opens) / span).clamp(0.0, 1.0);
+                self.links[li].position += lag * (target - self.links[li].position);
+            }
+        }
         // Cam lobes: the spool valve follows the ECU, the oil after it.
         if let Some(sw) = &e.cam_switch {
             let want = if self.ecu.cam_want {
@@ -808,7 +877,7 @@ impl Model {
         }
     }
 
-    fn cda(&self, o: &Opening, pipe_area: f64) -> f64 {
+    fn cda(&self, o: &Opening, pipe_area: f64, position: f64) -> f64 {
         match *o {
             Opening::Open => pipe_area,
             Opening::Fixed(a) => a,
@@ -817,6 +886,8 @@ impl Model {
                 shaft,
                 closed_angle_deg,
             } => 0.85 * throttle_area(bore, shaft, closed_angle_deg, self.throttle),
+            Opening::Wastegate { turbo, area } => area * self.turbos[turbo].wastegate,
+            Opening::BlowOff { area, .. } => area * position,
             Opening::Valves { cylinder, intake } => {
                 let deg = self.cycle_deg(cylinder);
                 let v = if intake {
@@ -867,7 +938,7 @@ impl Model {
                     let cda = if other == Port::Closed {
                         0.0
                     } else {
-                        self.cda(&opening, area)
+                        self.cda(&opening, area, self.links[li].position)
                     };
                     let res = self.reservoir(other);
                     let mouth = if other == Port::Ambient {
@@ -911,9 +982,29 @@ impl Model {
                     }
                 }
                 (x, y) => {
-                    let cda = self.cda(&opening, f64::INFINITY);
+                    let cda = self.cda(&opening, f64::INFINITY, self.links[li].position);
                     let (rx, ry) = (self.reservoir(x), self.reservoir(y));
                     let f = reservoir_to_reservoir(cda, &rx, &ry);
+                    // A volume venting to the air (a blow-off valve) is a sound source: its
+                    // jet, at the vena contracta's speed.
+                    if let Some(k) = self.mouths.iter().position(|m| m.link == li) {
+                        let (out, src) = if y == Port::Ambient {
+                            (f[0], &rx)
+                        } else {
+                            (-f[0], &ry)
+                        };
+                        let rho = if out >= 0.0 {
+                            src.density()
+                        } else {
+                            self.ambient_res.density()
+                        };
+                        let m = &mut self.mouths[k];
+                        let c = (src.gamma * src.r * src.t).sqrt();
+                        m.flow += out / rho * h / self.dt;
+                        m.velocity += (out / (rho * cda.max(1e-9))).clamp(-c, c) * h / self.dt;
+                        m.density += rho * h / self.dt;
+                        m.area = cda.max(1e-7);
+                    }
                     let hot = if f[0] >= 0.0 { rx.t } else { ry.t } > IGNITION;
                     for (port, sign) in [(x, -1.0), (y, 1.0)] {
                         if let Some(l) = self.lump_of(port) {
@@ -943,6 +1034,9 @@ impl Model {
                     acc.exhaust_mass -= into * h;
                 }
             }
+        }
+        for t in &mut self.turbos {
+            t.advance(&self.gas, &mut self.lumps, h);
         }
         for p in &mut self.pipes {
             self.afterfire += p.update_reacting(&self.gas, &self.chem, h);

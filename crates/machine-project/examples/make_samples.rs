@@ -508,6 +508,7 @@ fn main() {
             wall_temperature: wall,
             roughness: 1e-4,
             friction: 1.0,
+            heat: 1.0,
             a,
             b,
         }
@@ -563,6 +564,216 @@ fn main() {
             ],
             vec![],
             Design::Exhaust(ExhaustPart { network: merged }),
+        ),
+    );
+    put(
+        "engine/i4_18_vtec",
+        part(
+            "1.8 l inline four with switched cam lobes, 81 × 87.2 mm: a mild low lobe, and a long high one from 5200 rpm to an 8400 rpm limiter.",
+            vec![
+                b("block", [0.45, 0.35, 0.45], [0.0, 0.0, 0.25], 95.0, METAL),
+                cyl(
+                    "flywheel",
+                    0.13,
+                    0.03,
+                    Axis::X,
+                    [-0.26, 0.0, 0.14],
+                    7.5,
+                    DARK,
+                ),
+            ],
+            vec![
+                mount("base", [0.0; 3]),
+                mount("bellhousing", [-0.28, 0.0, 0.14]),
+                mount("intake", [0.0, 0.25, 0.4]),
+            ],
+            Design::Engine(EnginePart {
+                spec: samples::i4_vtec(),
+                cooling: Default::default(),
+                bench: Bench {
+                    intake: Some("intake/i4_vtec".into()),
+                    exhaust: Some("exhaust/i4_road".into()),
+                },
+            }),
+        ),
+    );
+    put(
+        "intake/i4_vtec",
+        part(
+            "Air box, 64 mm throttle, 2.5 l plenum and short 200 mm runners for high revs.",
+            vec![
+                b("air box", [0.35, 0.3, 0.2], [0.3, 0.1, 0.1], 3.0, DARK),
+                b("plenum", [0.4, 0.15, 0.15], [0.0, 0.0, 0.0], 3.5, METAL),
+            ],
+            vec![],
+            Design::Intake(IntakePart {
+                network: mouths(samples::i4_vtec_intake(), |_| [0.5, 0.25, 0.1]),
+                throttle: Default::default(),
+            }),
+        ),
+    );
+    put(
+        "engine/flat4_2l_turbo",
+        part(
+            "2.0 l turbocharged flat four, 92 × 75 mm, 8.0:1, intake cam phaser; about a bar of boost.",
+            vec![
+                b("block", [0.5, 0.7, 0.35], [0.0, 0.0, 0.2], 115.0, METAL),
+                cyl(
+                    "flywheel",
+                    0.14,
+                    0.035,
+                    Axis::X,
+                    [-0.3, 0.0, 0.16],
+                    9.0,
+                    DARK,
+                ),
+            ],
+            vec![
+                mount("base", [0.0; 3]),
+                mount("bellhousing", [-0.32, 0.0, 0.16]),
+                mount("intake", [0.0, 0.0, 0.45]),
+            ],
+            Design::Engine(EnginePart {
+                spec: samples::flat4_turbo(),
+                cooling: Default::default(),
+                bench: Bench {
+                    intake: Some("intake/flat4_turbo".into()),
+                    exhaust: Some("exhaust/flat4_turbo".into()),
+                },
+            }),
+        ),
+    );
+    put(
+        "intake/flat4_turbo",
+        part(
+            "Air box, turbocharger compressor, top-mounted intercooler, 65 mm throttle, plenum and runners; a blow-off valve venting to the air.",
+            vec![
+                b("air box", [0.35, 0.3, 0.2], [0.8, 0.3, 0.3], 3.0, DARK),
+                b(
+                    "intercooler",
+                    [0.35, 0.5, 0.08],
+                    [0.2, 0.0, 0.45],
+                    5.0,
+                    METAL,
+                ),
+            ],
+            vec![],
+            Design::Intake(IntakePart {
+                network: samples::flat4_turbo_intake(),
+                throttle: Default::default(),
+            }),
+        ),
+    );
+    put(
+        "exhaust/flat4_turbo",
+        part(
+            "Unequal-length headers into one turbine with a wastegate, downpipe, catalyst and silencer: the boxer rumble.",
+            vec![
+                b("headers", [0.4, 0.7, 0.15], [0.2, 0.0, -0.05], 7.0, METAL),
+                b(
+                    "turbocharger",
+                    [0.2, 0.2, 0.2],
+                    [0.35, 0.25, 0.3],
+                    8.0,
+                    METAL,
+                ),
+                cyl(
+                    "silencer",
+                    0.12,
+                    0.45,
+                    Axis::X,
+                    [-3.6, 0.35, 0.3],
+                    8.0,
+                    METAL,
+                ),
+            ],
+            vec![],
+            Design::Exhaust(ExhaustPart {
+                network: samples::flat4_turbo_exhaust(),
+            }),
+        ),
+    );
+    put(
+        "engine/v8_4l_tt",
+        part(
+            "4.0 l twin-turbocharged cross-plane V8, 83 × 92 mm, 8.6:1, firing 1-5-4-8-6-3-7-2; a turbocharger per bank.",
+            vec![
+                b("block", [0.6, 0.65, 0.55], [0.0, 0.0, 0.3], 190.0, METAL),
+                cyl(
+                    "flywheel",
+                    0.15,
+                    0.04,
+                    Axis::X,
+                    [-0.34, 0.0, 0.16],
+                    11.0,
+                    DARK,
+                ),
+            ],
+            vec![
+                mount("base", [0.0; 3]),
+                mount("bellhousing", [-0.34, 0.0, 0.16]),
+                mount("intake", [0.0, 0.0, 0.6]),
+            ],
+            Design::Engine(EnginePart {
+                spec: samples::v8_tt(),
+                cooling: Default::default(),
+                bench: Bench {
+                    intake: Some("intake/v8_tt".into()),
+                    exhaust: Some("exhaust/v8_tt".into()),
+                },
+            }),
+        ),
+    );
+    put(
+        "intake/v8_tt",
+        part(
+            "An air box and a compressor per bank, intercoolers, one 80 mm throttle, plenum and runners; a diverter valve back to a compressor inlet.",
+            vec![
+                b("air boxes", [0.3, 0.8, 0.2], [0.9, 0.0, 0.5], 4.0, DARK),
+                b("plenum", [0.5, 0.3, 0.15], [0.0, 0.0, 0.0], 6.0, METAL),
+            ],
+            vec![],
+            Design::Intake(IntakePart {
+                network: samples::v8_tt_intake(),
+                throttle: Default::default(),
+            }),
+        ),
+    );
+    put(
+        "exhaust/v8_tt",
+        part(
+            "Each bank's four primaries into its own turbine with a wastegate, then a catalyst and a silencer to its own tailpipe.",
+            vec![
+                b(
+                    "turbochargers",
+                    [0.25, 0.4, 0.2],
+                    [0.2, 0.0, 0.7],
+                    16.0,
+                    METAL,
+                ),
+                cyl(
+                    "silencer A",
+                    0.11,
+                    0.45,
+                    Axis::X,
+                    [-3.7, 0.45, 0.3],
+                    8.0,
+                    METAL,
+                ),
+                cyl(
+                    "silencer B",
+                    0.11,
+                    0.45,
+                    Axis::X,
+                    [-3.7, -0.45, 0.3],
+                    8.0,
+                    METAL,
+                ),
+            ],
+            vec![],
+            Design::Exhaust(ExhaustPart {
+                network: samples::v8_tt_exhaust(),
+            }),
         ),
     );
     put(

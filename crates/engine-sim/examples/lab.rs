@@ -1,6 +1,6 @@
 //! Sound lab: renders a preset of a sample engine and writes the WAV, a spectrogram PNG
 //! (log frequency, 20 Hz – 16 kHz, 70 dB) and the figures of `analysis` along it:
-//! `cargo run -p open-racing-engine-sim --example lab -- i4|vtec|v8 sweep out-prefix [draft|normal|high]`.
+//! `cargo run -p open-racing-engine-sim --example lab -- i4|vtec|v8|flat4t|v8tt sweep out-prefix [draft|normal|high]`.
 //! `FS=<Pa>` writes the WAV at a fixed full scale, for comparing recordings' levels;
 //! `POPS=spark,lambda,throttle,above` fits a pop map and `CUT=spark` a spark-cut limiter.
 use std::f64::consts::PI;
@@ -24,6 +24,16 @@ fn main() {
             samples::i4_vtec_intake(),
             samples::i4_exhaust(),
         ),
+        "flat4t" => (
+            samples::flat4_turbo(),
+            samples::flat4_turbo_intake(),
+            samples::flat4_turbo_exhaust(),
+        ),
+        "v8tt" => (
+            samples::v8_tt(),
+            samples::v8_tt_intake(),
+            samples::v8_tt_exhaust(),
+        ),
         _ => (samples::i4(), samples::i4_intake(), samples::i4_exhaust()),
     };
     // `POPS=spark,lambda,throttle,above` fits a pop map; `CUT=spark` a spark-cut limiter.
@@ -45,7 +55,22 @@ fn main() {
         .quality(q);
     let script = Script::preset(&preset, &e).expect("preset");
     let t = std::time::Instant::now();
-    let rec = render::render(&b, &script, None).unwrap();
+    let (m, _) = b.build().unwrap();
+    let mut sound = SoundSettings::near(&m, "tail");
+    // `MIC=turbo`: a metre from the first turbocharger's compressor instead.
+    if std::env::var("MIC").is_ok_and(|v| v == "turbo")
+        && let Some(t) = m.turbos.first()
+    {
+        let p = t.position;
+        sound.mics[0].position = [p[0] + 1.0, p[1], p[2]];
+    }
+    if let Some(k) = std::env::var("TURBO").ok().and_then(|v| v.parse().ok()) {
+        sound.turbo = k;
+    }
+    if let Some(k) = std::env::var("JET").ok().and_then(|v| v.parse().ok()) {
+        sound.flow_noise = k;
+    }
+    let rec = render::render(&b, &script, Some(sound)).unwrap();
     let el = t.elapsed().as_secs_f64();
     let fs = std::env::var("FS").ok().and_then(|v| v.parse().ok());
     rec.write_wav(format!("{out}.wav").as_ref(), -1.0, fs)

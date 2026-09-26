@@ -17,6 +17,15 @@
 //!   steeply with speed. It is what fills the spectrum between the engine orders above a
 //!   kilohertz or so, where the gas pulses themselves have little left.
 //!
+//! - A turbocharger's compressor sings (Raitor & Neise, *J. Sound Vib.* 314, 2008): a tone
+//!   at the blade passing frequency (and twice it, from the splitter blades); a narrow
+//!   band of tip clearance noise near half of it, the whistle that rises as the turbo
+//!   spools; and a broad "whoosh" of 4–12 kHz, loudest near surge (Evans & Ward, SAE
+//!   2005-01-2485). With the inducer's tip moving supersonically against the air its shock
+//!   pattern adds the shaft's orders: buzz-saw. Together they take a millionth or so of the
+//!   compressor's power, growing with the square of the tip Mach number. They are made at
+//!   the output rate, as their frequencies reach far above what the solver's step carries.
+//!
 //! A microphone sums them with their distances' delays and 1/r spreading, and outside
 //! hears each again off the ground (z = 0) as from its mirror image, weakened by the
 //! ground's reflection coefficient: the comb of reinforcements and notches every
@@ -28,7 +37,7 @@ use std::f64::consts::PI;
 use serde::{Deserialize, Serialize};
 
 use crate::combustion::Rng;
-use crate::dsp::{Biquad, DcBlocker, Delay, Resampler, Svf};
+use crate::dsp::{Biquad, DcBlocker, Delay, OUTPUT_RATE, Resampler, Svf};
 use crate::model::Model;
 
 /// A cylinder head's first structural modes: (Hz, Q, share of the strike).
@@ -69,6 +78,8 @@ pub struct SoundSettings {
     pub block: [f64; 3],
     /// Pressure reflection coefficient of the ground at z = 0 (asphalt ≈ 0.9, none: 0).
     pub ground: f64,
+    /// Turbochargers' compressor noise, as a share of its estimate.
+    pub turbo: f64,
 }
 
 impl Default for SoundSettings {
@@ -84,6 +95,7 @@ impl Default for SoundSettings {
             flow_noise: 1.0,
             block: [0.0; 3],
             ground: 0.9,
+            turbo: 1.0,
         }
     }
 }
@@ -126,6 +138,18 @@ impl SourcePath {
     }
 }
 
+/// A turbocharger's compressor as a source.
+struct TurboVoice {
+    /// Its shaft's angle, rad.
+    phase: f64,
+    tcn: Svf,
+    whoosh: Svf,
+    /// Amplitude and phase of each shaft order in the buzz-saw noise.
+    buzz: Vec<(f64, f64)>,
+    /// Its way to each microphone, at the output rate.
+    paths: Vec<SourcePath>,
+}
+
 struct MicState {
     mouths: Vec<SourcePath>,
     block: SourcePath,
@@ -144,6 +168,7 @@ pub struct Acoustics {
     /// at 1 Pa.
     valve_ring: Vec<(Biquad, f64)>,
     jet: Vec<Svf>,
+    turbos: Vec<TurboVoice>,
     rho_air: f64,
     rng: Rng,
     /// Scratch for one input sample's output.
@@ -160,22 +185,45 @@ impl Acoustics {
     pub fn new(model: &Model, settings: SoundSettings) -> Self {
         let rate = model.quality.rate() as f64;
         let rho = model.ambient.pressure / (crate::gas::R_AIR * model.ambient.temperature);
+        let path_at = |mic: &Mic, pos: [f64; 3], k: f64, rate: f64| {
+            let ground = if mic.cabin { 0.0 } else { settings.ground };
+            let r = dist(pos, mic.position);
+            let image = [pos[0], pos[1], -pos[2]];
+            let ri = dist(image, mic.position);
+            SourcePath {
+                delay: Delay::new(r / C_AIR * rate),
+                gain: k / r,
+                reflected: (ground != 0.0)
+                    .then(|| (Delay::new(ri / C_AIR * rate), ground * k / ri)),
+            }
+        };
+        let mut seed = Rng::new(0x7ab0);
+        let turbos = model
+            .turbos
+            .iter()
+            .map(|t| TurboVoice {
+                phase: 0.0,
+                tcn: Svf::default(),
+                whoosh: Svf::default(),
+                buzz: (0..t.compressor.as_ref().map_or(1, |c| c.blades.max(1)))
+                    .map(|_| (seed.uniform(), std::f64::consts::TAU * seed.uniform()))
+                    .collect(),
+                paths: settings
+                    .mics
+                    .iter()
+                    .map(|mic| {
+                        // Through the body, the cabin hears little of a whistle.
+                        let k = if mic.cabin { 0.1 } else { 1.0 };
+                        path_at(mic, t.position, k, OUTPUT_RATE as f64)
+                    })
+                    .collect(),
+            })
+            .collect();
         let mics = settings
             .mics
             .iter()
             .map(|mic| {
-                let ground = if mic.cabin { 0.0 } else { settings.ground };
-                let path = |pos: [f64; 3], k: f64| {
-                    let r = dist(pos, mic.position);
-                    let image = [pos[0], pos[1], -pos[2]];
-                    let ri = dist(image, mic.position);
-                    SourcePath {
-                        delay: Delay::new(r / C_AIR * rate),
-                        gain: k / r,
-                        reflected: (ground != 0.0)
-                            .then(|| (Delay::new(ri / C_AIR * rate), ground * k / ri)),
-                    }
-                };
+                let path = |pos: [f64; 3], k: f64| path_at(mic, pos, k, rate);
                 MicState {
                     mouths: model
                         .mouths
@@ -208,6 +256,7 @@ impl Acoustics {
                 .map(|&(f, q, w)| (Biquad::bandpass(f, rate, q), w * q * rate / (PI * f)))
                 .collect(),
             jet: vec![Svf::default(); model.mouths.len()],
+            turbos,
             rho_air: rho,
             rng: Rng::new(0x5eed),
             scratch: Vec::with_capacity(4),
@@ -265,6 +314,7 @@ impl Acoustics {
             let jet = self.jet[k].bandpass(x, f, q, self.rate);
             mouth[k] = dq + jet * four_pi / self.rho_air;
         }
+        let mut fresh = 0;
         for (i, mic) in self.mics.iter_mut().enumerate() {
             let mut p = 0.0;
             for (k, path) in mic.mouths.iter_mut().enumerate().take(n) {
@@ -281,6 +331,86 @@ impl Acoustics {
             self.scratch.clear();
             mic.out.process(p, &mut self.scratch);
             out[i].extend_from_slice(&self.scratch);
+            fresh = self.scratch.len();
+        }
+        self.turbo_sound(model, out, fresh);
+    }
+
+    /// Adds the turbochargers' compressor noise to the last `fresh` samples of each
+    /// microphone's output.
+    fn turbo_sound(&mut self, model: &Model, out: &mut [Vec<f64>], fresh: usize) {
+        if fresh == 0 || self.settings.turbo == 0.0 {
+            return;
+        }
+        let rate = OUTPUT_RATE as f64;
+        let nyquist = 0.45 * rate;
+        let tau = std::f64::consts::TAU;
+        for (t, v) in model.turbos.iter().zip(&mut self.turbos) {
+            let Some(c) = &t.compressor else {
+                continue;
+            };
+            let inlet = &model.lumps[t.compressor_ports[0]];
+            let a = (1.4 * crate::gas::R_AIR * inlet.t).sqrt();
+            let shaft = t.omega / tau;
+            // Relative Mach number at the inducer's tip.
+            let rho = inlet.mass / inlet.volume;
+            let inducer = PI * 0.25 * c.inducer * c.inducer;
+            let axial = t.compressor_flow.abs() / (rho * inducer);
+            let tip = t.omega * 0.5 * c.inducer;
+            let m_rel = (tip * tip + axial * axial).sqrt() / a;
+            let m_wheel = t.omega * 0.5 * c.wheel / a;
+            // Sound power, W, and the pressure at 1 m of it spread over a sphere.
+            let power = self.settings.turbo * 1e-6 * t.compressor_power.abs() * m_wheel * m_wheel;
+            let p1 = (power * self.rho_air * C_AIR / (4.0 * PI)).sqrt();
+            // Near surge the flow separates off the blades: the whoosh grows.
+            let phi = t.flow_coefficient;
+            let surge = if phi > 0.0 {
+                (c.surge_flow / phi).powi(2).min(4.0)
+            } else {
+                4.0
+            };
+            let z = c.blades as f64;
+            let bpf = z * shaft;
+            let (tone, tcn, whoosh) = (0.35 * p1, 0.35 * p1, 0.3 * p1 * surge.sqrt());
+            let buzz = ((m_rel - 1.0) * 3.0).clamp(0.0, 1.0) * 0.5 * p1;
+            let mut src = [0.0f64; 8];
+            let n = fresh.min(src.len());
+            for s in src.iter_mut().take(n) {
+                v.phase = (v.phase + tau * shaft / rate) % (tau * 64.0);
+                let mut x = 0.0;
+                for (k, amp) in [(z, 1.0), (2.0 * z, 0.5)] {
+                    if k * shaft < nyquist {
+                        x += tone * std::f64::consts::SQRT_2 * amp * (k * v.phase).sin();
+                    }
+                }
+                if buzz > 0.0 {
+                    for (o, &(amp, ph)) in v.buzz.iter().enumerate() {
+                        let k = (o + 1) as f64;
+                        if k * shaft < nyquist {
+                            x += buzz * amp * (k * v.phase + ph).sin();
+                        }
+                    }
+                }
+                let white = (self.rng.uniform() - 0.5) * 12f64.sqrt();
+                let (f, q) = ((0.55 * bpf).clamp(50.0, nyquist), 6.0);
+                let band = PI * f / (2.0 * q);
+                x += v
+                    .tcn
+                    .bandpass(white * tcn * (0.5 * rate / band).sqrt(), f, q, rate);
+                let white = (self.rng.uniform() - 0.5) * 12f64.sqrt();
+                let (f, q) = (7000.0, 0.8);
+                let band = PI * f / (2.0 * q);
+                x += v
+                    .whoosh
+                    .bandpass(white * whoosh * (0.5 * rate / band).sqrt(), f, q, rate);
+                *s = x;
+            }
+            for (i, path) in v.paths.iter_mut().enumerate() {
+                let len = out[i].len();
+                for (k, &x) in src.iter().take(n).enumerate() {
+                    out[i][len - fresh + k] += path.process(x);
+                }
+            }
         }
     }
 }

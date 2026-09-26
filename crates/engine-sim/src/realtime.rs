@@ -307,7 +307,11 @@ mod tests {
         }
         let t = rt.telemetry();
         rt.stop();
-        assert!(t.time > SETTLE + 0.3, "the engine thread ran ({} s)", t.time);
+        assert!(
+            t.time > SETTLE + 0.3,
+            "the engine thread ran ({} s)",
+            t.time
+        );
         assert!(peak_rpm > 1500.0, "revved to {peak_rpm}");
         assert!(buf.iter().any(|v| v.abs() > 1e-4));
     }

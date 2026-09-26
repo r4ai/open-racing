@@ -1,0 +1,141 @@
+(
+    description: "Air box, 64 mm throttle, 2.5 l plenum and short 200 mm runners for high revs.",
+    physical: (
+        shapes: [
+            (
+                name: "air box",
+                kind: Box(
+                    size: (0.35, 0.3, 0.2),
+                ),
+                at: (0.3, 0.1, 0.1),
+                mass: 3.0,
+                colour: (0.25, 0.25, 0.27),
+            ),
+            (
+                name: "plenum",
+                kind: Box(
+                    size: (0.4, 0.15, 0.15),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 3.5,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Intake((
+        network: (
+            volumes: [
+                (
+                    name: "airbox",
+                    volume: 0.008,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "plenum",
+                    volume: 0.0025,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "snorkel",
+                    length: 0.35,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 300.0,
+                    roughness: 0.0001,
+                    a: Ambient(
+                        at: (0.5, 0.25, 0.1),
+                    ),
+                    b: Volume(
+                        name: "airbox",
+                    ),
+                ),
+                (
+                    name: "zip",
+                    length: 0.3,
+                    diameter: [
+                        (0.0, 0.065),
+                    ],
+                    wall_temperature: 310.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Fixed(
+                            cd: 0.9,
+                            diameter: 0.075,
+                        )),
+                    ),
+                    b: Volume(
+                        name: "plenum",
+                        restriction: Some(Throttle(
+                            bore: 0.064,
+                            shaft: 0.008,
+                            closed_angle_deg: 7.0,
+                        )),
+                    ),
+                ),
+                (
+                    name: "runner.1",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.045),
+                        (1.0, 0.04),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.1"),
+                ),
+                (
+                    name: "runner.2",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.045),
+                        (1.0, 0.04),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.2"),
+                ),
+                (
+                    name: "runner.3",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.045),
+                        (1.0, 0.04),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.3"),
+                ),
+                (
+                    name: "runner.4",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.045),
+                        (1.0, 0.04),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.4"),
+                ),
+            ],
+            orifices: [],
+        ),
+        throttle: DriveByWire,
+    )),
+)

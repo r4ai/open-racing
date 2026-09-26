@@ -1,5 +1,6 @@
 //! The sample library (`assets/machine-src/`), built in: a GT3-class machine with a
-//! flat-plane V8, and an inline four with its intakes and exhausts to swap in. Tests use
+//! flat-plane V8, and an inline four with its intakes and exhausts to swap in, and a
+//! VTEC four, a turbocharged flat four and a twin-turbocharged V8 with theirs. Tests use
 //! it, and `machinectl init` writes it into a library directory.
 
 use std::path::{Path, PathBuf};
@@ -33,12 +34,28 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../../assets/machine-src/parts/electronics/gt3_paddle.ron"),
     ),
     (
+        "parts/engine/flat4_2l_turbo.ron",
+        include_str!("../../../assets/machine-src/parts/engine/flat4_2l_turbo.ron"),
+    ),
+    (
+        "parts/engine/i4_18_vtec.ron",
+        include_str!("../../../assets/machine-src/parts/engine/i4_18_vtec.ron"),
+    ),
+    (
         "parts/engine/i4_2l_na.ron",
         include_str!("../../../assets/machine-src/parts/engine/i4_2l_na.ron"),
     ),
     (
         "parts/engine/v8_4l_flatplane.ron",
         include_str!("../../../assets/machine-src/parts/engine/v8_4l_flatplane.ron"),
+    ),
+    (
+        "parts/engine/v8_4l_tt.ron",
+        include_str!("../../../assets/machine-src/parts/engine/v8_4l_tt.ron"),
+    ),
+    (
+        "parts/exhaust/flat4_turbo.ron",
+        include_str!("../../../assets/machine-src/parts/exhaust/flat4_turbo.ron"),
     ),
     (
         "parts/exhaust/i4_road.ron",
@@ -57,6 +74,10 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../../assets/machine-src/parts/exhaust/v8_race.ron"),
     ),
     (
+        "parts/exhaust/v8_tt.ron",
+        include_str!("../../../assets/machine-src/parts/exhaust/v8_tt.ron"),
+    ),
+    (
         "parts/frame/gt3_tub.ron",
         include_str!("../../../assets/machine-src/parts/frame/gt3_tub.ron"),
     ),
@@ -65,12 +86,24 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../../../assets/machine-src/parts/fuel_tank/gt3_120l.ron"),
     ),
     (
+        "parts/intake/flat4_turbo.ron",
+        include_str!("../../../assets/machine-src/parts/intake/flat4_turbo.ron"),
+    ),
+    (
         "parts/intake/i4_plenum.ron",
         include_str!("../../../assets/machine-src/parts/intake/i4_plenum.ron"),
     ),
     (
+        "parts/intake/i4_vtec.ron",
+        include_str!("../../../assets/machine-src/parts/intake/i4_vtec.ron"),
+    ),
+    (
         "parts/intake/v8_itb.ron",
         include_str!("../../../assets/machine-src/parts/intake/v8_itb.ron"),
+    ),
+    (
+        "parts/intake/v8_tt.ron",
+        include_str!("../../../assets/machine-src/parts/intake/v8_tt.ron"),
     ),
     (
         "parts/interior/gt3_cockpit.ron",
