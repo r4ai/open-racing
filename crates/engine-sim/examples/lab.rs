@@ -2,7 +2,8 @@
 //! (log frequency, 20 Hz – 16 kHz, 70 dB) and the figures of `analysis` along it:
 //! `cargo run -p open-racing-engine-sim --example lab -- i4|vtec|v8|flat4t|v8tt sweep out-prefix [draft|normal|high]`.
 //! `FS=<Pa>` writes the WAV at a fixed full scale, for comparing recordings' levels;
-//! `POPS=spark,lambda,throttle,above` fits a pop map and `CUT=spark` a spark-cut limiter.
+//! `POPS=spark,lambda,throttle,above` fits a pop map, `CUT=spark` a spark-cut limiter,
+//! `NOBOV=1` takes the blow-off valve away and `MIC=turbo` listens by the compressor.
 use std::f64::consts::PI;
 
 use open_racing_engine_sim::*;
@@ -48,6 +49,11 @@ fn main() {
     }
     if std::env::var("CUT").is_ok_and(|v| v == "spark") {
         e.ecu.limiter_cut = spec::Cut::Spark;
+    }
+    // `NOBOV=1`: without the intake's blow-off valve.
+    let mut i = i;
+    if std::env::var("NOBOV").is_ok() {
+        i.orifices.clear();
     }
     let b = Build::new(&e)
         .system("intake", &i)
