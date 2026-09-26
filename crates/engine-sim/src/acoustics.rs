@@ -8,7 +8,8 @@
 //! - The block radiates the combustion: each cylinder's rate of pressure rise through the
 //!   structure's attenuation, a high pass (Austen & Priede's structure attenuation curve,
 //!   simplified).
-//! - The valves strike their seats: a click ringing at the head's resonance.
+//! - The valves strike their seats: the cam's closing ramp lands them at a speed that grows
+//!   with the engine's, and each strike rings the head's first few structural modes.
 //! - The jet leaving a mouth is turbulent. Lighthill's acoustic efficiency of a subsonic
 //!   jet, η ≈ 10⁻⁴·M⁵ of its kinetic power ½ρU³A, radiated round the mouth, in a broad
 //!   band peaking at a Strouhal number fD/U ≈ 0.25 (Tam's similarity spectra): it follows
@@ -22,11 +23,21 @@
 //! recording made over a road has. Inside the cabin the body lets the low frequencies
 //! through and damps the high ones.
 
+use std::f64::consts::PI;
+
 use serde::{Deserialize, Serialize};
 
 use crate::combustion::Rng;
 use crate::dsp::{Biquad, DcBlocker, Delay, Resampler, Svf};
 use crate::model::Model;
+
+/// A cylinder head's first structural modes: (Hz, Q, share of the strike).
+const HEAD_MODES: [(f64, f64, f64); 4] = [
+    (1250.0, 18.0, 0.5),
+    (2600.0, 25.0, 1.0),
+    (4100.0, 30.0, 0.7),
+    (6300.0, 35.0, 0.4),
+];
 
 /// Speed of sound in the air, m/s.
 const C_AIR: f64 = 343.0;
@@ -50,7 +61,7 @@ pub struct SoundSettings {
     pub mics: Vec<Mic>,
     /// Radiated pressure at 1 m per Pa/s of cylinder pressure rise.
     pub combustion: f64,
-    /// Valve seating clicks at 1 m, Pa.
+    /// Valve seating clicks at 1 m at 6000 rpm, Pa.
     pub valves: f64,
     /// Jet noise of the mouths, as a share of Lighthill's estimate.
     pub flow_noise: f64,
@@ -129,7 +140,9 @@ pub struct Acoustics {
     rate: f64,
     mics: Vec<MicState>,
     structure: [Biquad; 2],
-    valve_ring: Biquad,
+    /// The head's modes the valves ring: filter, and the impulse that starts it ringing
+    /// at 1 Pa.
+    valve_ring: Vec<(Biquad, f64)>,
     jet: Vec<Svf>,
     rho_air: f64,
     rng: Rng,
@@ -189,7 +202,11 @@ impl Acoustics {
                 Biquad::highpass(800.0, rate, 0.707),
                 Biquad::lowpass(6000.0, rate, 0.707),
             ],
-            valve_ring: Biquad::bandpass(3200.0, rate, 12.0),
+            valve_ring: HEAD_MODES
+                .iter()
+                .filter(|m| m.0 < 0.45 * rate)
+                .map(|&(f, q, w)| (Biquad::bandpass(f, rate, q), w * q * rate / (PI * f)))
+                .collect(),
             jet: vec![Svf::default(); model.mouths.len()],
             rho_air: rho,
             rng: Rng::new(0x5eed),
@@ -214,12 +231,10 @@ impl Acoustics {
         }
         // Valve seating.
         let seated = model.cylinders.iter().filter(|c| c.seated > 0.0).count() as f64;
-        let impulse = if seated > 0.0 {
-            seated * self.settings.valves * self.rate / 48_000.0 * 30.0
-        } else {
-            0.0
-        };
-        block += self.valve_ring.process(impulse);
+        let strike = seated * self.settings.valves * model.rpm().abs() / 6000.0;
+        for (f, k) in &mut self.valve_ring {
+            block += f.process(strike * *k);
+        }
         // Mouths.
         let mut mouth = [0.0f64; 16];
         let n = model.mouths.len().min(16);
