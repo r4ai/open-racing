@@ -3,7 +3,11 @@
 //! - Burn: the Wiebe function x_b = 1 − exp(−a·((θ − θ_s)/Δθ)^(m+1)) from the spark θ_s
 //!   (Heywood, *Internal Combustion Engine Fundamentals*, §9.2.1), with the duration
 //!   growing less than proportionally with speed, longer lean and rich, and a seeded
-//!   cycle-to-cycle spread.
+//!   cycle-to-cycle spread. The flame then runs at the pace of √S_L, the laminar flame
+//!   speed of the unburned charge (Metghalchi & Keck) against its value at the spark, and
+//!   goes out when S_L falls below the quench speed: a charge too diluted with residual
+//!   gas misfires, and a late flame slows and quenches in the expansion, leaving its fuel
+//!   to the exhaust (see [`crate::chem`]).
 //! - Heat transfer: Woschni (1967, SAE 670931).
 //! - Knock: the Livengood–Wu integral of the end gas's ignition delay, Douaud & Eyzat's
 //!   correlation (1978, SAE 780080).
@@ -29,6 +33,38 @@ pub fn duration_deg(c: &Combustion, rpm: f64, lambda: f64) -> f64 {
     let mix = 1.0 + 2.2 * (lambda - 0.9).powi(2);
     c.duration_deg * speed * mix
 }
+
+/// How much slower (positive) or faster than the mean one cycle's flame is, as a share of
+/// the burn duration, for a standard normal draw `z`. Cycle-to-cycle variation comes
+/// mostly from the early flame kernel, which the turbulence and mixture at the plug make
+/// grow faster or slower (Heywood §9.4): a slow kernel starts the main burn late and the
+/// burn runs long, so both move together (the burn starts `slow`/2 of a duration late
+/// and lasts `1 + slow` times as long). Residual gas slows the kernel and spreads it
+/// more, which is why an engine at idle runs rougher than at full load.
+pub fn cycle_variation(c: &Combustion, residual: f64, z: f64) -> f64 {
+    (c.variation * (1.0 + 4.0 * residual) * z.clamp(-2.5, 2.5)).clamp(-0.4, 0.8)
+}
+
+/// Laminar flame speed of a gasoline mixture, m/s: Metghalchi & Keck (*Combust. Flame*
+/// 48, 1982) for iso-octane, S_L = S_L0(φ)·(T_u/298)^α·(p/1 atm)^β·(1 − 2.06·x_b^0.77),
+/// with the unburned gas at `t_u` K and `p` Pa, its excess-air ratio `lambda` and its
+/// burned-gas (residual) fraction `residual`. Zero past the flammability limits.
+pub fn laminar_flame_speed(t_u: f64, p: f64, lambda: f64, residual: f64) -> f64 {
+    let phi = 1.0 / lambda.max(0.1);
+    let s0 = 0.263 - 0.847 * (phi - 1.13).powi(2);
+    let dilution = 1.0 - 2.06 * residual.max(0.0).powf(0.77);
+    if s0 <= 0.0 || dilution <= 0.0 {
+        return 0.0;
+    }
+    let alpha = 2.18 - 0.8 * (phi - 1.0);
+    let beta = -0.16 + 0.22 * (phi - 1.0);
+    s0 * (t_u.max(250.0) / 298.0).powf(alpha) * (p.max(1e4) / 101_325.0).powf(beta) * dilution
+}
+
+/// A flame goes out when its laminar speed falls below this, m/s: the turbulence
+/// stretching it then quenches it faster than it can grow (the lean and dilute limits of
+/// spark-ignition combustion lie round 5–10 cm/s).
+pub const QUENCH_SPEED: f64 = 0.08;
 
 /// Share of the fuel that can burn at excess-air ratio `lambda`: rich of stoichiometric
 /// there is not enough oxygen for all of it.

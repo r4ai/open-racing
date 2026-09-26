@@ -73,6 +73,9 @@ pub struct CylinderPlace {
 pub struct Head {
     pub valves: Valves,
     pub cam: Cam,
+    /// A second, higher lobe the ECU switches the valves to (VTEC and the like).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_cam: Option<Cam>,
     pub port: Port,
 }
 
@@ -182,7 +185,9 @@ pub struct Combustion {
     pub speed_exponent: f64,
     /// Share of the fuel's heat released (the rest leaves unburned or dissociated).
     pub efficiency: f64,
-    /// Relative cycle-to-cycle spread of the burn duration.
+    /// Relative cycle-to-cycle spread of the flame's development (its start and its
+    /// duration together), without residual gas; 0.03 gives a COV of IMEP of about 1–2 %
+    /// at full load and near 8 % at idle.
     #[serde(default)]
     pub variation: f64,
     #[serde(default)]
@@ -271,14 +276,80 @@ pub struct Ecu {
     /// part; the proportional part is half a second of it).
     #[serde(default = "default_idle_gain")]
     pub idle_gain: f64,
+    /// What the limiter cuts. Cutting the spark leaves the fuel to go down the exhaust
+    /// unburned, where it bangs.
+    #[serde(default, skip_serializing_if = "is_fuel_cut")]
+    pub limiter_cut: Cut,
     /// Fuel is cut with the throttle shut above this speed (overrun), rpm.
     #[serde(default)]
     pub overrun_cut_rpm: Option<f64>,
+    /// A pop map: on overrun, instead of cutting the fuel, keep fuelling and fire late,
+    /// so the flame is still burning when the exhaust valve opens and the charge goes on
+    /// burning, and banging, in the exhaust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pops: Option<Pops>,
+    /// When the valves go over to the heads' high lobes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cam_switch: Option<CamSwitch>,
+    /// Cam phasers: advance of the intake and of the exhaust cam, crank degrees, against
+    /// rpm and load (none: the cam as ground).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_phase: Option<Map2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhaust_phase: Option<Map2>,
     /// Spark advance before the firing TDC, crank degrees, against rpm and load (the
     /// throttle, 0..1).
     pub spark_deg: Map2,
     /// Excess-air ratio λ against rpm and load.
     pub lambda: Map2,
+}
+
+/// Switching over to the high lobes: above a speed with enough load, back below it less
+/// the hysteresis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CamSwitch {
+    pub rpm: f64,
+    #[serde(default = "default_cam_hysteresis")]
+    pub hysteresis_rpm: f64,
+    /// Least throttle, 0..1.
+    #[serde(default)]
+    pub min_load: f64,
+}
+
+fn default_cam_hysteresis() -> f64 {
+    200.0
+}
+
+/// What an ECU cuts to hold a speed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cut {
+    #[default]
+    Fuel,
+    Spark,
+}
+
+/// Overrun fuelling with late spark.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pops {
+    /// Above this speed, rpm.
+    pub above_rpm: f64,
+    /// Spark advance, crank degrees before the firing TDC (negative: after it).
+    pub spark_deg: f64,
+    /// Excess-air ratio.
+    pub lambda: f64,
+    /// Throttle the ECU opens meanwhile, 0..1: behind a shut plate the charge is so
+    /// diluted with residual gas that the flame will not light, and the unburned mixture
+    /// burns steadily in the hot manifold instead of popping.
+    #[serde(default)]
+    pub throttle: f64,
+}
+
+fn is_fuel_cut(c: &Cut) -> bool {
+    *c == Cut::Fuel
+}
+
+fn is_origin(v: &[f64; 3]) -> bool {
+    *v == [0.0; 3]
 }
 
 fn default_hysteresis() -> f64 {
@@ -356,6 +427,86 @@ pub struct Network {
     /// Restrictions straight between two volumes (or a volume and the air).
     #[serde(default)]
     pub orifices: Vec<Orifice>,
+    /// Turbochargers' compressors (in an intake) and turbines (in an exhaust); a
+    /// compressor and a turbine on the same `shaft` name, in whichever systems, make one
+    /// turbocharger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compressors: Vec<Compressor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turbines: Vec<Turbine>,
+}
+
+/// A centrifugal compressor between two volumes: air drawn from `inlet` through the
+/// impeller and diffuser into `outlet` (the volute and the charge pipe's start).
+///
+/// Its characteristic is set by five figures of the map in dimensionless form, with the
+/// impeller's tip speed U = ω·D/2 and the flow coefficient φ = ṁ/(ρ₀·U·D²): the
+/// isentropic head coefficient Δh_s/U² at the surge line (`head`, the top of each speed
+/// line) and at no flow (`shutoff` of it), the flow coefficients at the surge line and at
+/// choke, and the best efficiency.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Compressor {
+    pub name: String,
+    pub shaft: String,
+    pub inlet: String,
+    pub outlet: String,
+    /// Impeller tip (exducer) diameter, m.
+    pub wheel: f64,
+    /// Inducer diameter, m.
+    pub inducer: f64,
+    /// Full blades (as many splitters between them sound at twice the rate).
+    pub blades: u32,
+    pub head: f64,
+    #[serde(default = "default_shutoff")]
+    pub shutoff: f64,
+    pub surge_flow: f64,
+    pub choke_flow: f64,
+    pub efficiency: f64,
+    /// Length of the flow path through it, for the inertia of the air in it (the L of
+    /// Greitzer's surge model), m.
+    #[serde(default = "default_compressor_duct")]
+    pub duct_length: f64,
+    /// Where it is in the part's frame, for its sound, m.
+    #[serde(default)]
+    pub at: [f64; 3],
+}
+
+fn default_shutoff() -> f64 {
+    0.85
+}
+fn default_compressor_duct() -> f64 {
+    0.25
+}
+
+/// A radial turbine between two volumes of an exhaust: from `inlet` (the manifold or
+/// volute) to `outlet` (the downpipe's start).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Turbine {
+    pub name: String,
+    pub shaft: String,
+    pub inlet: String,
+    pub outlet: String,
+    /// Wheel tip diameter, m.
+    pub wheel: f64,
+    /// Effective area of its nozzle (the housing's A/R and the wheel's throat together:
+    /// its swallowing capacity), m².
+    pub area: f64,
+    /// Best total-to-static efficiency, at a blade speed ratio U/C_s of 0.7.
+    pub efficiency: f64,
+    /// Inertia of the shaft with both wheels, kg·m².
+    pub inertia: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wastegate: Option<Wastegate>,
+}
+
+/// A wastegate: a poppet valve round the turbine, its diaphragm pushed by the boost (the
+/// compressor's outlet over the air) against a spring.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wastegate {
+    pub diameter: f64,
+    /// Boost at which it starts to open, and at which it is fully open, Pa.
+    pub opens: f64,
+    pub open: f64,
 }
 
 /// A volume in which the gas is taken as uniform: a plenum, an air box, a collector, a
@@ -388,6 +539,10 @@ pub struct PipeSpec {
     /// Multiplier on the wall friction: a catalyst's brick, a filter's element, bends.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub friction: f64,
+    /// Multiplier on the wall heat transfer: an intercooler's core, its fins and
+    /// many small tubes, is a pipe with a great deal of it.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub heat: f64,
     pub a: End,
     pub b: End,
 }
@@ -431,6 +586,17 @@ pub enum End {
 pub enum Restriction {
     /// A fixed orifice: discharge coefficient and diameter.
     Fixed { cd: f64, diameter: f64 },
+    /// A blow-off (diverter) valve: a spring-loaded poppet between the charge pipe and
+    /// the air (or the compressor's inlet), pushed open when the charge's pressure is
+    /// `opens` Pa over that of the `reference` volume (the manifold behind the throttle),
+    /// fully open `span` Pa above that.
+    BlowOff {
+        diameter: f64,
+        reference: String,
+        opens: f64,
+        #[serde(default = "default_blow_off_span")]
+        span: f64,
+    },
     /// A butterfly throttle worked by the pedal.
     Throttle {
         bore: f64,
@@ -439,6 +605,10 @@ pub enum Restriction {
         #[serde(default = "default_closed_angle")]
         closed_angle_deg: f64,
     },
+}
+
+fn default_blow_off_span() -> f64 {
+    0.2e5
 }
 
 fn default_closed_angle() -> f64 {
@@ -451,6 +621,9 @@ pub struct Orifice {
     /// Names of two volumes, or of a volume and `"ambient"`.
     pub between: (String, String),
     pub restriction: Restriction,
+    /// Where it vents, when to the air, in the part's frame, m (for its sound).
+    #[serde(default, skip_serializing_if = "is_origin")]
+    pub at: [f64; 3],
 }
 
 /// Open area of a butterfly throttle at a pedal opening 0..1, m²: the plate turns from

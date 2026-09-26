@@ -3,6 +3,7 @@
 use crate::model::{Ambient, Link, Lump, Model, Mouth, Opening, Port, Quality};
 use crate::pipe::{End, Pipe, PipeGeometry, Prim};
 use crate::spec::{self, EngineSpec, Network, Restriction};
+use crate::turbo::Turbo;
 
 /// An intake or exhaust system fitted to the engine, under an instance name (terminals
 /// are `name:terminal`), at a position in the engine's frame (for the sound).
@@ -85,6 +86,10 @@ fn opening(r: &Option<Restriction>) -> Opening {
         Some(Restriction::Fixed { cd, diameter }) => {
             Opening::Fixed(cd * std::f64::consts::PI * 0.25 * diameter * diameter)
         }
+        // Only between volumes, where the build makes it.
+        Some(Restriction::BlowOff { diameter, .. }) => {
+            Opening::Fixed(0.8 * std::f64::consts::PI * 0.25 * diameter * diameter)
+        }
         Some(Restriction::Throttle {
             bore,
             shaft,
@@ -112,23 +117,29 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
         u: 0.0,
         p: amb.pressure,
         y: 0.0,
+        f: 0.0,
     };
     let cell = b.quality.cell_length();
-    let second = b.quality.second_order();
-    let geometry =
-        |name: String, length: f64, d: &[(f64, f64)], wall: f64, rough: f64, friction: f64| {
-            PipeGeometry {
-                name,
-                length,
-                diameter: d.to_vec(),
-                cell_length: cell,
-                wall_temperature: wall,
-                roughness: rough,
-                friction_scale: friction,
-                heat_scale: 1.0,
-                second_order: second,
-            }
-        };
+    let geometry = |name: String,
+                    length: f64,
+                    d: &[(f64, f64)],
+                    wall: f64,
+                    rough: f64,
+                    friction: f64,
+                    heat: f64| {
+        PipeGeometry {
+            name,
+            length,
+            diameter: d.to_vec(),
+            cell_length: cell,
+            wall_temperature: wall,
+            roughness: rough,
+            friction_scale: friction,
+            heat_scale: heat,
+        }
+    };
+    let mut compressors = Vec::new();
+    let mut turbines = Vec::new();
     // Terminal name → pipe end.
     let mut terminals: Vec<(String, usize, End)> = Vec::new();
     // Engine ports.
@@ -142,19 +153,18 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                 port.wall_temperature,
                 2e-4,
                 1.0,
+                1.0,
             );
             m.pipes.push(Pipe::new(&g, &m.gas, fill));
             let p = m.pipes.len() - 1;
-            m.links.push(Link {
-                a: Port::Pipe(p, End::Start),
-                b: Port::Cylinder(c),
-                opening: Opening::Valves {
+            m.links.push(Link::new(
+                Port::Pipe(p, End::Start),
+                Port::Cylinder(c),
+                Opening::Valves {
                     cylinder: c,
                     intake,
                 },
-                flow: 0.0,
-                guess: 0.0,
-            });
+            ));
             terminals.push((format!("engine:{side}.{}", c + 1), p, End::End));
         }
     }
@@ -202,42 +212,28 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                 ps.wall_temperature,
                 ps.roughness,
                 ps.friction,
+                ps.heat,
             );
             m.pipes.push(Pipe::new(&g, &m.gas, fill));
             let p = m.pipes.len() - 1;
             for (end, which) in [(&ps.a, End::Start), (&ps.b, End::End)] {
                 let here = Port::Pipe(p, which);
                 match end {
-                    spec::End::Closed => m.links.push(Link {
-                        a: here,
-                        b: Port::Closed,
-                        opening: Opening::Open,
-                        flow: 0.0,
-                        guess: 0.0,
-                    }),
-                    spec::End::Volume { name, restriction } => m.links.push(Link {
-                        a: here,
-                        b: Port::Volume(volume(name)?),
-                        opening: opening(restriction),
-                        flow: 0.0,
-                        guess: 0.0,
-                    }),
+                    spec::End::Closed => m.links.push(Link::new(here, Port::Closed, Opening::Open)),
+                    spec::End::Volume { name, restriction } => m.links.push(Link::new(
+                        here,
+                        Port::Volume(volume(name)?),
+                        opening(restriction),
+                    )),
                     spec::End::Ambient { at, restriction } => {
-                        m.links.push(Link {
-                            a: here,
-                            b: Port::Ambient,
-                            opening: opening(restriction),
-                            flow: 0.0,
-                            guess: 0.0,
-                        });
-                        m.mouths.push(Mouth {
-                            name: format!("{}:{}", sys.name, ps.name),
-                            link: m.links.len() - 1,
-                            position: add(sys.offset, *at),
-                            flow: 0.0,
-                            prev_flow: 0.0,
-                            velocity: 0.0,
-                        });
+                        m.links
+                            .push(Link::new(here, Port::Ambient, opening(restriction)));
+                        m.mouths.push(Mouth::new(
+                            format!("{}:{}", sys.name, ps.name),
+                            m.links.len() - 1,
+                            add(sys.offset, *at),
+                            m.pipes[p].end_area(which),
+                        ));
                     }
                     spec::End::Terminal(t) => {
                         terminals.push((format!("{}:{t}", sys.name), p, which))
@@ -259,13 +255,11 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                     sys.name, joints[k].0
                 ));
             }
-            m.links.push(Link {
-                a: Port::Pipe(joints[k].1, joints[k].2),
-                b: Port::Pipe(joints[k + 1].1, joints[k + 1].2),
-                opening: Opening::Open,
-                flow: 0.0,
-                guess: 0.0,
-            });
+            m.links.push(Link::new(
+                Port::Pipe(joints[k].1, joints[k].2),
+                Port::Pipe(joints[k + 1].1, joints[k + 1].2),
+                Opening::Open,
+            ));
             k += 2;
         }
         for o in &net.orifices {
@@ -276,14 +270,125 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                     volume(n).map(Port::Volume)
                 }
             };
-            m.links.push(Link {
-                a: port(&o.between.0)?,
-                b: port(&o.between.1)?,
-                opening: opening(&Some(o.restriction.clone())),
-                flow: 0.0,
-                guess: 0.0,
-            });
+            let (a, b) = (port(&o.between.0)?, port(&o.between.1)?);
+            let (op, area) = match &o.restriction {
+                Restriction::BlowOff {
+                    diameter,
+                    reference,
+                    opens,
+                    span,
+                } => {
+                    let area = 0.8 * std::f64::consts::PI * 0.25 * diameter * diameter;
+                    let op = Opening::BlowOff {
+                        area,
+                        reference: volume(reference)?,
+                        opens: *opens,
+                        span: span.max(1.0),
+                    };
+                    (op, area)
+                }
+                r => {
+                    let op = opening(&Some(r.clone()));
+                    let area = match op {
+                        Opening::Fixed(a) => a,
+                        _ => 1e-4,
+                    };
+                    (op, area)
+                }
+            };
+            m.links.push(Link::new(a, b, op));
+            if a == Port::Ambient || b == Port::Ambient {
+                m.mouths.push(Mouth::new(
+                    format!("{}:{}", sys.name, o.name),
+                    m.links.len() - 1,
+                    add(sys.offset, o.at),
+                    area,
+                ));
+            }
         }
+        for c in &net.compressors {
+            compressors.push((
+                c.clone(),
+                [volume(&c.inlet)?, volume(&c.outlet)?],
+                add(sys.offset, c.at),
+            ));
+        }
+        for t in &net.turbines {
+            turbines.push((t.clone(), [volume(&t.inlet)?, volume(&t.outlet)?]));
+        }
+    }
+    // Turbochargers: the compressor and the turbine on each shaft.
+    let mut shafts: Vec<String> = compressors
+        .iter()
+        .map(|c| c.0.shaft.clone())
+        .chain(turbines.iter().map(|t| t.0.shaft.clone()))
+        .collect();
+    shafts.sort();
+    shafts.dedup();
+    for shaft in shafts {
+        if compressors.iter().filter(|c| c.0.shaft == shaft).count() > 1
+            || turbines.iter().filter(|t| t.0.shaft == shaft).count() > 1
+        {
+            return Err(format!(
+                "shaft {shaft} carries more than one compressor or turbine"
+            ));
+        }
+        let c = compressors
+            .iter()
+            .position(|c| c.0.shaft == shaft)
+            .map(|k| compressors.remove(k));
+        let t = turbines
+            .iter()
+            .position(|t| t.0.shaft == shaft)
+            .map(|k| turbines.remove(k));
+        if let Some((c, ..)) = &c {
+            let ok = c.wheel > 0.0
+                && c.inducer > 0.0
+                && c.inducer < c.wheel
+                && c.head > 0.0
+                && (0.0..1.0).contains(&c.shutoff)
+                && c.surge_flow > 0.0
+                && c.choke_flow > c.surge_flow
+                && c.efficiency > 0.0
+                && c.efficiency <= 1.0
+                && c.duct_length > 0.0;
+            if !ok {
+                return Err(format!(
+                    "compressor {}: sizes and efficiency must be positive, the efficiency                      at most 1, the inducer smaller than the wheel, the shut-off head                      below 1 and the surge flow below the choke flow",
+                    c.name
+                ));
+            }
+        } else {
+            warnings.push(format!(
+                "shaft {shaft} has no compressor: its turbine spins free"
+            ));
+        }
+        if let Some((t, tp)) = &t {
+            if !(t.wheel > 0.0 && t.area > 0.0 && t.inertia > 0.0)
+                || !(t.efficiency > 0.0 && t.efficiency <= 1.0)
+            {
+                return Err(format!(
+                    "turbine {}: size, area, inertia and efficiency must be positive,                      the efficiency at most 1",
+                    t.name
+                ));
+            }
+            if let Some(w) = &t.wastegate {
+                let area = 0.8 * std::f64::consts::PI * 0.25 * w.diameter * w.diameter;
+                m.links.push(Link::new(
+                    Port::Volume(tp[0]),
+                    Port::Volume(tp[1]),
+                    Opening::Wastegate {
+                        turbo: m.turbos.len(),
+                        area,
+                    },
+                ));
+            }
+        } else {
+            warnings.push(format!(
+                "shaft {shaft} has no turbine: its compressor spins free"
+            ));
+        }
+        m.turbos.push(Turbo::new(shaft, c, t));
     }
     // Joins.
     let mut pairs: Vec<(String, String)> = b.connections.clone();
@@ -326,13 +431,11 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
         }
         used[i] = true;
         used[j] = true;
-        m.links.push(Link {
-            a: Port::Pipe(terminals[i].1, terminals[i].2),
-            b: Port::Pipe(terminals[j].1, terminals[j].2),
-            opening: Opening::Open,
-            flow: 0.0,
-            guess: 0.0,
-        });
+        m.links.push(Link::new(
+            Port::Pipe(terminals[i].1, terminals[i].2),
+            Port::Pipe(terminals[j].1, terminals[j].2),
+            Opening::Open,
+        ));
     }
     for (k, (name, p, end)) in terminals.iter().enumerate() {
         if used[k] {
@@ -340,30 +443,21 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
         }
         if name.starts_with("engine:") {
             // An open port.
-            m.links.push(Link {
-                a: Port::Pipe(*p, *end),
-                b: Port::Ambient,
-                opening: Opening::Open,
-                flow: 0.0,
-                guess: 0.0,
-            });
-            m.mouths.push(Mouth {
-                name: name.clone(),
-                link: m.links.len() - 1,
-                position: [0.0; 3],
-                flow: 0.0,
-                prev_flow: 0.0,
-                velocity: 0.0,
-            });
+            m.links.push(Link::new(
+                Port::Pipe(*p, *end),
+                Port::Ambient,
+                Opening::Open,
+            ));
+            m.mouths.push(Mouth::new(
+                name.clone(),
+                m.links.len() - 1,
+                [0.0; 3],
+                m.pipes[*p].end_area(*end),
+            ));
             warnings.push(format!("{name} opens straight to the air"));
         } else {
-            m.links.push(Link {
-                a: Port::Pipe(*p, *end),
-                b: Port::Closed,
-                opening: Opening::Open,
-                flow: 0.0,
-                guess: 0.0,
-            });
+            m.links
+                .push(Link::new(Port::Pipe(*p, *end), Port::Closed, Opening::Open));
             warnings.push(format!("{name} is not connected: its pipe is closed there"));
         }
     }

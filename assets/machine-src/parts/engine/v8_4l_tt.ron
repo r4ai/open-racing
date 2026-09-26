@@ -1,34 +1,25 @@
 (
-    description: "4.0 l flat-plane V8, 94 × 72 mm, dry sump, 9000 rpm.",
+    description: "4.0 l twin-turbocharged cross-plane V8, 83 × 92 mm, 8.6:1, firing 1-5-4-8-6-3-7-2; a turbocharger per bank.",
     physical: (
         shapes: [
             (
                 name: "block",
                 kind: Box(
-                    size: (0.6, 0.62, 0.45),
+                    size: (0.6, 0.65, 0.55),
                 ),
-                at: (0.0, 0.0, 0.25),
-                mass: 140.0,
+                at: (0.0, 0.0, 0.3),
+                mass: 190.0,
                 colour: (0.62, 0.62, 0.66),
             ),
             (
                 name: "flywheel",
                 kind: Cylinder(
-                    radius: 0.12,
+                    radius: 0.15,
                     length: 0.04,
                     axis: X,
                 ),
-                at: (-0.32, 0.0, 0.16),
-                mass: 8.0,
-                colour: (0.25, 0.25, 0.27),
-            ),
-            (
-                name: "ancillaries",
-                kind: Box(
-                    size: (0.15, 0.3, 0.15),
-                ),
-                at: (0.3, 0.1, 0.3),
-                mass: 12.0,
+                at: (-0.34, 0.0, 0.16),
+                mass: 11.0,
                 colour: (0.25, 0.25, 0.27),
             ),
         ],
@@ -43,32 +34,32 @@
             ),
             (
                 name: "intake",
-                at: (0.0, 0.0, 0.5),
+                at: (0.0, 0.0, 0.6),
             ),
         ],
     ),
     design: Engine((
         spec: (
-            bore: 0.094,
-            stroke: 0.072,
-            rod: 0.138,
-            compression_ratio: 12.5,
+            bore: 0.083,
+            stroke: 0.092,
+            rod: 0.1435,
+            compression_ratio: 8.6,
             layout: (
                 banks: [
                     (
                         name: "A",
-                        angle_deg: 45.0,
+                        angle_deg: -45.0,
                     ),
                     (
                         name: "B",
-                        angle_deg: -45.0,
+                        angle_deg: 45.0,
                     ),
                 ],
                 throws_deg: [
                     0.0,
+                    90.0,
+                    270.0,
                     180.0,
-                    180.0,
-                    0.0,
                 ],
                 cylinders: [
                     (
@@ -106,19 +97,19 @@
                 ],
                 firing_order: [
                     1,
-                    6,
-                    2,
                     5,
                     4,
-                    7,
-                    3,
                     8,
+                    6,
+                    3,
+                    7,
+                    2,
                 ],
             ),
             intake: (
                 valves: (
                     count: 2,
-                    diameter: 0.038,
+                    diameter: 0.033,
                     stem: 0.006,
                     cd: [
                         (0.0, 0.55),
@@ -130,9 +121,9 @@
                     ],
                 ),
                 cam: (
-                    lift: 0.0125,
-                    duration_deg: 280.0,
-                    centreline_deg: 105.0,
+                    lift: 0.01,
+                    duration_deg: 250.0,
+                    centreline_deg: 112.0,
                     profile: Polynomial,
                 ),
                 port: (
@@ -147,7 +138,7 @@
             exhaust: (
                 valves: (
                     count: 2,
-                    diameter: 0.032,
+                    diameter: 0.028,
                     stem: 0.006,
                     cd: [
                         (0.0, 0.55),
@@ -159,9 +150,9 @@
                     ],
                 ),
                 cam: (
-                    lift: 0.0115,
-                    duration_deg: 276.0,
-                    centreline_deg: 108.0,
+                    lift: 0.0095,
+                    duration_deg: 246.0,
+                    centreline_deg: 112.0,
                     profile: Polynomial,
                 ),
                 port: (
@@ -174,7 +165,7 @@
                 ),
             ),
             crank: (
-                flywheel_inertia: 0.06,
+                flywheel_inertia: 0.14,
                 crank_inertia: 0.03,
                 reciprocating_mass: 0.4,
                 rotating_mass: 0.35,
@@ -205,21 +196,20 @@
                 accessories: 10000.0,
             ),
             ecu: (
-                idle_rpm: 1600.0,
-                limiter_rpm: 9000.0,
+                idle_rpm: 750.0,
+                limiter_rpm: 7000.0,
                 stall_rpm: 500.0,
                 limiter_hysteresis_rpm: 200.0,
-                idle_opening: 0.006,
+                idle_opening: 0.008,
                 idle_authority: 0.04,
                 idle_gain: 0.00005,
                 overrun_cut_rpm: Some(2000.0),
-                spark_deg: (
+                intake_phase: Some((
                     rpm: [
                         1000.0,
-                        3000.0,
-                        5000.0,
-                        7000.0,
-                        9000.0,
+                        2500.0,
+                        4500.0,
+                        6500.0,
                     ],
                     load: [
                         0.0,
@@ -228,52 +218,112 @@
                     ],
                     values: [
                         [
+                            0.0,
+                            5.0,
+                            10.0,
+                        ],
+                        [
+                            5.0,
+                            20.0,
+                            25.0,
+                        ],
+                        [
+                            5.0,
+                            20.0,
+                            20.0,
+                        ],
+                        [
+                            0.0,
+                            5.0,
+                            5.0,
+                        ],
+                    ],
+                )),
+                spark_deg: (
+                    rpm: [
+                        1000.0,
+                        2000.0,
+                        3000.0,
+                        4000.0,
+                        5000.0,
+                        6000.0,
+                        7000.0,
+                        8000.0,
+                    ],
+                    load: [
+                        0.0,
+                        0.5,
+                        1.0,
+                    ],
+                    values: [
+                        [
+                            20.0,
+                            14.0,
+                            8.0,
+                        ],
+                        [
+                            32.0,
                             22.0,
-                            16.0,
                             10.0,
                         ],
                         [
                             38.0,
-                            30.0,
-                            22.0,
+                            26.0,
+                            12.0,
+                        ],
+                        [
+                            40.0,
+                            28.0,
+                            14.0,
                         ],
                         [
                             42.0,
-                            34.0,
-                            27.0,
-                        ],
-                        [
-                            44.0,
-                            36.0,
                             30.0,
+                            16.0,
                         ],
                         [
-                            44.0,
-                            37.0,
+                            42.0,
+                            31.0,
+                            17.0,
+                        ],
+                        [
+                            42.0,
                             32.0,
+                            18.0,
+                        ],
+                        [
+                            42.0,
+                            32.0,
+                            18.0,
                         ],
                     ],
                 ),
                 lambda: (
                     rpm: [
                         1000.0,
-                        9000.0,
+                        4000.0,
+                        8000.0,
                     ],
                     load: [
                         0.0,
-                        0.7,
+                        0.6,
                         1.0,
                     ],
                     values: [
                         [
                             1.0,
-                            0.98,
-                            0.9,
+                            1.0,
+                            0.85,
                         ],
                         [
                             1.0,
                             0.95,
-                            0.87,
+                            0.8,
+                        ],
+                        [
+                            1.0,
+                            0.92,
+                            0.78,
                         ],
                     ],
                 ),
@@ -284,11 +334,11 @@
             oil_cooler: None,
             thermostat: 85.0,
             boiling_point: 125.0,
-            fan: false,
+            fan: true,
         ),
         bench: (
-            intake: Some("intake/v8_itb"),
-            exhaust: Some("exhaust/v8_race"),
+            intake: Some("intake/v8_tt"),
+            exhaust: Some("exhaust/v8_tt"),
         ),
     )),
 )

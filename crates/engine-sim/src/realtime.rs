@@ -20,6 +20,8 @@ const BLOCK: usize = 256;
 /// Frames of the ring buffer (≈ 170 ms), and how far ahead the thread keeps it.
 const RING: usize = 8192;
 const AHEAD: usize = 2400;
+/// Simulated seconds the engine is held at idle before it is heard.
+const SETTLE: f64 = 1.5;
 
 /// An `f64` in an atomic.
 #[derive(Debug, Default)]
@@ -53,6 +55,8 @@ pub struct LiveControls {
     /// Sound pressure (Pa) at full scale.
     pub full_scale: AtomicF64,
     pub stop: AtomicBool,
+    /// Set once the engine has settled at idle and its sound begins.
+    pub running: AtomicBool,
     /// Frames the audio side wanted and did not get.
     pub underruns: AtomicU64,
 }
@@ -93,6 +97,10 @@ pub struct AudioOut {
 impl AudioOut {
     /// Fills `out` (interleaved stereo); silence where the engine fell behind.
     pub fn fill(&mut self, out: &mut [f32]) {
+        if !self.controls.running.load(Ordering::Relaxed) {
+            out.fill(0.0);
+            return;
+        }
         let n = self.consumer.slots().min(out.len());
         if let Ok(chunk) = self.consumer.read_chunk(n) {
             let (a, b) = chunk.as_slices();
@@ -110,6 +118,9 @@ impl AudioOut {
 
     /// One sample (the next of the interleaved stream), or silence.
     pub fn next_sample(&mut self) -> f32 {
+        if !self.controls.running.load(Ordering::Relaxed) {
+            return 0.0;
+        }
         match self.consumer.pop() {
             Ok(v) => v,
             Err(_) => {
@@ -122,7 +133,9 @@ impl AudioOut {
 
 impl Realtime {
     /// Builds the engine and starts it at idle. The first one or two microphones of `sound`
-    /// make the left and right channels.
+    /// make the left and right channels. The engine first runs held at idle for
+    /// `SETTLE` seconds, silent, so its manifold empties to the idle's pressure before
+    /// it is let go (from the air at rest it would flare and hunt for seconds).
     pub fn start(build: Build, sound: SoundSettings) -> Result<(Self, AudioOut), String> {
         let (mut m, _) = build.build()?;
         let controls = Arc::new(LiveControls::default());
@@ -131,15 +144,6 @@ impl Realtime {
         let telemetry = Arc::new(Mutex::new(Telemetry::default()));
         let (mut producer, consumer) = rtrb::RingBuffer::<f32>::new(RING * 2);
         let idle = build.engine.ecu.idle_rpm;
-        // Settle at idle before the sound starts.
-        m.set_crank(0.0, idle);
-        let hold = Controls {
-            load: Load::Speed(idle),
-            ..Default::default()
-        };
-        while m.time < 0.4 {
-            m.step(&hold);
-        }
         let manifold = m
             .lumps
             .iter()
@@ -149,6 +153,15 @@ impl Realtime {
         let thread = std::thread::Builder::new()
             .name("engine".into())
             .spawn(move || {
+                m.set_crank(0.0, idle);
+                let hold = Controls {
+                    load: Load::Speed(idle),
+                    ..Default::default()
+                };
+                while m.time < SETTLE && !c2.stop.load(Ordering::Relaxed) {
+                    m.step(&hold);
+                }
+                c2.running.store(true, Ordering::Relaxed);
                 let mut ac = Acoustics::new(&m, sound);
                 let mics = ac.mic_count().max(1);
                 let mut bufs = vec![Vec::new(); mics];
@@ -287,14 +300,18 @@ mod tests {
         let t0 = Instant::now();
         rt.controls.pedal.set(0.6);
         let mut peak_rpm: f64 = 0.0;
-        while t0.elapsed() < Duration::from_millis(1500) {
+        while t0.elapsed() < Duration::from_millis(3000) {
             std::thread::sleep(Duration::from_millis(20));
             out.fill(&mut buf);
             peak_rpm = peak_rpm.max(rt.telemetry().rpm);
         }
         let t = rt.telemetry();
         rt.stop();
-        assert!(t.time > 0.5, "the engine thread ran ({} s)", t.time);
+        assert!(
+            t.time > SETTLE + 0.3,
+            "the engine thread ran ({} s)",
+            t.time
+        );
         assert!(peak_rpm > 1500.0, "revved to {peak_rpm}");
         assert!(buf.iter().any(|v| v.abs() > 1e-4));
     }

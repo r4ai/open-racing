@@ -15,6 +15,7 @@ pub mod analysis;
 pub mod boundary;
 pub mod build;
 pub mod cam;
+pub mod chem;
 pub mod combustion;
 pub mod crank;
 pub mod dsp;
@@ -28,6 +29,7 @@ pub mod samples;
 pub mod spec;
 pub mod table;
 pub mod trace;
+pub mod turbo;
 
 pub use acoustics::{Mic, SoundSettings};
 pub use build::{Build, System};

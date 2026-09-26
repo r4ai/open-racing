@@ -43,12 +43,14 @@ fn default_warmup() -> f64 {
 }
 
 /// Names of the built-in scripts.
-pub const PRESETS: [&str; 5] = ["sweep", "idle", "blips", "rev", "overrun"];
+pub const PRESETS: [&str; 6] = ["sweep", "idle", "blips", "rev", "overrun", "pull"];
 
 impl Script {
     /// A built-in script for an engine: `sweep` (full throttle from idle to the limiter on
     /// a dyno), `idle`, `blips` (throttle blips from idle), `rev` (free rev into the
-    /// limiter and back), `overrun` (throttle shut from the limiter down).
+    /// limiter and back), `overrun` (throttle shut from the limiter down), `pull` (full
+    /// throttle from low speed against a car's inertia in a middle gear, then lifting off:
+    /// what a turbocharger needs to build boost, and to blow off).
     pub fn preset(name: &str, e: &EngineSpec) -> Option<Self> {
         let (idle, limit) = (e.ecu.idle_rpm, e.ecu.limiter_rpm);
         let free = ScriptLoad::Free {
@@ -68,7 +70,7 @@ impl Script {
                 load: free,
                 rpm: vec![(0.0, idle)],
                 throttle: vec![(0.0, 0.0)],
-                warmup: 0.5,
+                warmup: 1.5,
             },
             "blips" => {
                 let mut t = vec![(0.0, 0.0)];
@@ -81,7 +83,7 @@ impl Script {
                     load: free,
                     rpm: vec![(0.0, idle)],
                     throttle: t,
-                    warmup: 0.5,
+                    warmup: 1.5,
                 }
             }
             "rev" => Self {
@@ -89,7 +91,7 @@ impl Script {
                 load: free,
                 rpm: vec![(0.0, idle)],
                 throttle: vec![(0.0, 0.0), (0.5, 0.0), (0.6, 1.0), (3.5, 1.0), (3.6, 0.0)],
-                warmup: 0.5,
+                warmup: 1.5,
             },
             "overrun" => Self {
                 duration: 6.0,
@@ -97,6 +99,17 @@ impl Script {
                 rpm: vec![(0.0, limit - 200.0), (6.0, (idle + 600.0).max(1500.0))],
                 throttle: vec![(0.0, 0.0)],
                 warmup: 0.3,
+            },
+            "pull" => Self {
+                duration: 8.0,
+                // A 1400 kg car on 0.32 m tyres through 5.3:1 overall.
+                load: ScriptLoad::Free {
+                    inertia: 5.0,
+                    torque: 20.0,
+                },
+                rpm: vec![(0.0, (idle + 1200.0).max(2000.0))],
+                throttle: vec![(0.0, 0.1), (0.5, 0.1), (0.6, 1.0), (6.0, 1.0), (6.1, 0.0)],
+                warmup: 1.5,
             },
             _ => return None,
         })

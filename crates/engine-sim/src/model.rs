@@ -8,14 +8,17 @@
 use std::f64::consts::PI;
 
 use crate::boundary::{
-    Reservoir, pipe_open_to_reservoir, pipe_to_pipe, pipe_to_reservoir, reservoir_to_reservoir,
+    Radiation, Reservoir, pipe_open_to_reservoir, pipe_radiating, pipe_to_pipe, pipe_to_reservoir,
+    reservoir_to_reservoir,
 };
 use crate::cam::Valvetrain;
+use crate::chem::Chemistry;
 use crate::combustion::{self, Phase, Rng};
 use crate::crank::{SliderCrank, firing_angles};
 use crate::gas::Gas;
 use crate::pipe::{End, Pipe};
-use crate::spec::{EngineSpec, throttle_area};
+use crate::spec::{Cut, EngineSpec, throttle_area};
+use crate::turbo::Turbo;
 
 /// Most parts a step is split into for the CFL condition.
 const MAX_SPLIT: usize = 16;
@@ -26,14 +29,14 @@ pub const RAD_PER_RPM: f64 = PI / 30.0;
 /// How finely the engine is simulated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Quality {
-    /// 24 kHz, ≈ 50 mm cells, first order: for playing in real time.
+    /// 24 kHz, ≈ 60 mm cells: for playing in real time.
     Draft,
-    /// 48 kHz, ≈ 25 mm cells: for the dyno and baking.
+    /// 48 kHz, ≈ 30 mm cells: for the dyno and baking.
     #[default]
     Normal,
-    /// 96 kHz, ≈ 13 mm cells: for recordings.
+    /// 96 kHz, ≈ 15 mm cells: for recordings.
     High,
-    /// 192 kHz, ≈ 6.5 mm cells.
+    /// 192 kHz, ≈ 7.5 mm cells.
     Ultra,
 }
 
@@ -51,10 +54,6 @@ impl Quality {
     /// Cell length the step allows with gas up to 1300 m/s (sound plus flow), m.
     pub fn cell_length(self) -> f64 {
         1300.0 / self.rate() as f64 / 0.9
-    }
-
-    pub fn second_order(self) -> bool {
-        self != Quality::Draft
     }
 }
 
@@ -120,9 +119,17 @@ pub struct Lump {
     pub energy: f64,
     /// Burned-gas mass, kg.
     pub burned: f64,
+    /// Unburned fuel, kg (a part of the fresh charge).
+    pub fuel: f64,
+    /// Heat released by fuel burning outside a flame since it was built, J.
+    pub heat_released: f64,
     pub wall_temperature: f64,
     /// Whether it is a cylinder's (advanced with the crank, not with the volumes).
     pub cylinder: bool,
+    /// A flame crossing it (a volume's afterfire), and whether gas hot enough to light
+    /// one came in over the step.
+    flame: Option<Flame>,
+    hot_inflow: bool,
     // Derived.
     pub p: f64,
     pub t: f64,
@@ -131,6 +138,7 @@ pub struct Lump {
     dm: f64,
     de: f64,
     dmy: f64,
+    dmf: f64,
 }
 
 impl Lump {
@@ -142,14 +150,19 @@ impl Lump {
             mass,
             energy: mass * gas.energy(t, y),
             burned: mass * y,
+            fuel: 0.0,
+            heat_released: 0.0,
             wall_temperature: wall,
             cylinder: false,
+            flame: None,
+            hot_inflow: false,
             p,
             t,
             y,
             dm: 0.0,
             de: 0.0,
             dmy: 0.0,
+            dmf: 0.0,
         };
         l.derive(gas);
         l
@@ -158,6 +171,7 @@ impl Lump {
     pub fn derive(&mut self, gas: &Gas) {
         self.mass = self.mass.max(1e-12);
         self.burned = self.burned.clamp(0.0, self.mass);
+        self.fuel = self.fuel.clamp(0.0, self.mass - self.burned);
         self.y = self.burned / self.mass;
         self.t = gas
             .temperature_near(self.energy / self.mass, self.y, self.t)
@@ -166,16 +180,99 @@ impl Lump {
     }
 
     fn reservoir(&self, gas: &Gas) -> Reservoir {
-        Reservoir::new(gas, self.p, self.t, self.y)
+        Reservoir {
+            f: self.fuel / self.mass,
+            ..Reservoir::new(gas, self.p, self.t, self.y)
+        }
     }
 
     fn apply(&mut self, dt: f64) {
         self.mass += self.dm * dt;
         self.energy += self.de * dt;
         self.burned += self.dmy * dt;
+        self.fuel += self.dmf * dt;
         self.dm = 0.0;
         self.de = 0.0;
         self.dmy = 0.0;
+        self.dmf = 0.0;
+    }
+
+    /// Adds flows in (negative: out), per second, over the current step: mass, energy,
+    /// burned mass and fuel.
+    pub(crate) fn add_rates(&mut self, dm: f64, de: f64, dmy: f64, dmf: f64) {
+        self.dm += dm;
+        self.de += de;
+        self.dmy += dmy;
+        self.dmf += dmf;
+    }
+
+    /// Burns its unburned fuel as a flame crossing it would, over `dt` (call `derive`
+    /// after); returns the heat released, J.
+    ///
+    /// A volume full of unburned mixture — fuel from misfires, late burns and rich
+    /// running collected in a collector or a silencer, too cool to ignite by itself — is
+    /// lit when gas hotter than `IGNITION` comes in (a burning or freshly burned slug of
+    /// exhaust), if it is flammable: its laminar flame speed (Metghalchi & Keck, at the
+    /// mixture's λ, burned-gas dilution and its temperature compressed isentropically
+    /// since it was lit) above the quench speed. The turbulent flame then crosses it at
+    /// S_T = S_L + √(S_L·u′) (the thin-flame limit, u′ the exhaust's turbulence) in the
+    /// time the volume's size takes, burning along a Wiebe curve. A deflagration in a
+    /// closed box, vented through its pipes: the afterfire's bang.
+    fn deflagrate(&mut self, chem: &Chemistry, dt: f64) -> f64 {
+        let hot = std::mem::take(&mut self.hot_inflow);
+        let air = (self.mass - self.burned - self.fuel).max(0.0);
+        if self.fuel <= 1e-5 * self.mass || air <= 0.0 {
+            self.flame = None;
+            return 0.0;
+        }
+        let lambda = air / (chem.afr * self.fuel);
+        let mut flame = match self.flame.take() {
+            Some(f) => f,
+            None if hot => Flame {
+                p0: self.p,
+                t0: self.t,
+                residual: self.y,
+                progress: 0.0,
+                done: 0.0,
+            },
+            None => return 0.0,
+        };
+        let t_u = flame.t0 * (self.p / flame.p0).max(0.1).powf(0.25);
+        let s_l = combustion::laminar_flame_speed(t_u, self.p, lambda, flame.residual);
+        if s_l < combustion::QUENCH_SPEED {
+            return 0.0;
+        }
+        let size = 2.0 * (3.0 * self.volume / (4.0 * PI)).cbrt();
+        let s_t = s_l + (s_l * TURBULENCE).sqrt();
+        flame.progress += dt * s_t / size;
+        let x = combustion::wiebe(5.0, 2.0, flame.progress);
+        let share = ((x - flame.done) / (1.0 - flame.done).max(1e-9)).clamp(0.0, 1.0);
+        flame.done = flame.done.max(x);
+        let dm = share * self.fuel.min(air / chem.afr);
+        self.fuel -= dm;
+        self.burned += dm * (1.0 + chem.afr);
+        self.energy += dm * chem.heat;
+        self.heat_released += dm * chem.heat;
+        if flame.progress < 1.2 {
+            self.flame = Some(flame);
+        }
+        dm * chem.heat
+    }
+
+    /// Burns its unburned fuel as the chemistry lets it over `dt` (call `derive` after);
+    /// returns the heat released, J.
+    fn react(&mut self, chem: &Chemistry, dt: f64) -> f64 {
+        if self.fuel <= 1e-4 * self.mass {
+            return 0.0;
+        }
+        let rho = self.mass / self.volume;
+        let f = self.fuel / self.mass;
+        let dm = chem.burn(rho, self.t, self.y, f, dt) * self.mass;
+        self.fuel -= dm;
+        self.burned += dm * (1.0 + chem.afr);
+        self.energy += dm * chem.heat;
+        self.heat_released += dm * chem.heat;
+        dm * chem.heat
     }
 }
 
@@ -205,6 +302,18 @@ pub enum Opening {
     },
     /// A cylinder's intake (true) or exhaust valves.
     Valves { cylinder: usize, intake: bool },
+    /// A turbocharger's wastegate: its area when fully open, m², opened as far as the
+    /// turbocharger's `wastegate` says.
+    Wastegate { turbo: usize, area: f64 },
+    /// A blow-off valve: its area when fully open, m², opened as far as the link's
+    /// `position` says; it opens `opens` Pa (fully `span` Pa further) over the
+    /// `reference` volume's pressure.
+    BlowOff {
+        area: f64,
+        reference: usize,
+        opens: f64,
+        span: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +325,21 @@ pub struct Link {
     pub flow: f64,
     /// Face velocity at a pipe end the step before, the next search's start, m/s.
     pub guess: f64,
+    /// How far open a valve worked by the gas (a blow-off valve) is, 0..1.
+    pub position: f64,
+}
+
+impl Link {
+    pub fn new(a: Port, b: Port, opening: Opening) -> Self {
+        Self {
+            a,
+            b,
+            opening,
+            flow: 0.0,
+            guess: 0.0,
+            position: 0.0,
+        }
+    }
 }
 
 /// A pipe's mouth to the air, a source of sound.
@@ -228,8 +352,41 @@ pub struct Mouth {
     /// Outward volume flow, m³/s, this step and the step before.
     pub flow: f64,
     pub prev_flow: f64,
-    /// Outward gas velocity, m/s.
+    /// Outward gas velocity, m/s, and the gas's density there, kg/m³.
     pub velocity: f64,
+    pub density: f64,
+    /// Area of the mouth, m².
+    pub area: f64,
+    pub radiation: Radiation,
+}
+
+impl Cylinder {
+    /// Laminar flame speed in the unburned charge at cylinder pressure `p`, m/s: its
+    /// temperature is the trapped charge's, compressed isentropically since the inlet
+    /// valve shut.
+    fn flame_speed(&self, p: f64, lambda: f64, residual: f64) -> f64 {
+        let Some((pr, _, tr)) = self.ivc else {
+            return 1.0;
+        };
+        let t_u = tr * (p / pr).powf(0.25);
+        combustion::laminar_flame_speed(t_u, p, lambda, residual)
+    }
+}
+
+impl Mouth {
+    pub fn new(name: String, link: usize, position: [f64; 3], area: f64) -> Self {
+        Self {
+            name,
+            link,
+            position,
+            flow: 0.0,
+            prev_flow: 0.0,
+            velocity: 0.0,
+            density: 0.0,
+            area,
+            radiation: Radiation::default(),
+        }
+    }
 }
 
 /// A cylinder's state over its cycle.
@@ -243,6 +400,8 @@ pub struct Cylinder {
     burn: Option<Burn>,
     /// State at inlet valve closing, for Woschni's motored pressure.
     ivc: Option<(f64, f64, f64)>,
+    /// Burned-gas share of the charge trapped then.
+    residual: f64,
     knock: f64,
     /// Accumulators over the current cycle.
     acc: CycleAcc,
@@ -250,20 +409,49 @@ pub struct Cylinder {
     pub last: CycleStats,
     /// Valve lifts at the previous step, for seating.
     lift_prev: [f64; 2],
+    /// Whether its intake and exhaust valves run on the high lobes.
+    pub high: [bool; 2],
     /// Seating velocity of a valve that closed this step, m/s.
     pub seated: f64,
     /// dp/dt of the cylinder this step, Pa/s.
     pub dpdt: f64,
 }
 
+/// Gas coming into a volume hotter than this lights the unburned mixture there, K: the
+/// temperature at which the fuel burns within a fraction of a millisecond (see
+/// [`crate::chem`]), so that the gas is itself burning.
+const IGNITION: f64 = 1200.0;
+
+/// Turbulence intensity u′ in the exhaust's volumes, m/s: a tenth or so of the gas's
+/// speed in the pipes feeding them.
+const TURBULENCE: f64 = 5.0;
+
+/// A flame crossing a volume.
+#[derive(Clone, Debug)]
+struct Flame {
+    /// Pressure and temperature of the mixture when it was lit, and its burned share.
+    p0: f64,
+    t0: f64,
+    residual: f64,
+    /// Share of the crossing done, and of the fuel burned.
+    progress: f64,
+    done: f64,
+}
+
+/// A flame, burning the cylinder's fuel along its Wiebe function.
 #[derive(Clone, Debug)]
 struct Burn {
     start_deg: f64,
     duration_deg: f64,
-    heat: f64,
-    /// Fresh mass that burns.
-    fresh: f64,
+    /// Share of the duration run, which the flame speed paces.
+    progress: f64,
+    /// Share of the charge burned so far.
     done: f64,
+    /// Excess-air ratio of the charge and its residual gas round the flame (which varies
+    /// from cycle to cycle), and its laminar flame speed at the spark, m/s.
+    lambda: f64,
+    residual: f64,
+    speed0: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -310,6 +498,25 @@ pub struct CycleStats {
 struct EcuState {
     idle: f64,
     limiter_cut: bool,
+    /// The high lobes asked for, and how long the oil has been changing over.
+    cam_want: bool,
+    cam_timer: f64,
+}
+
+/// Time the oil takes to move the rocker pins once the ECU switches the spool valve, s.
+const CAM_SWITCH_TIME: f64 = 0.08;
+
+/// Fastest a cam phaser turns, crank degrees per second.
+const PHASER_RATE: f64 = 250.0;
+
+/// What the ECU does to the cylinders this step.
+#[derive(Clone, Copy, Debug)]
+struct Firing {
+    fuel: bool,
+    spark: bool,
+    /// Advance before the firing TDC, crank degrees.
+    spark_deg: f64,
+    lambda: f64,
 }
 
 /// The engine model.
@@ -324,6 +531,12 @@ pub struct Model {
     pub links: Vec<Link>,
     pub cylinders: Vec<Cylinder>,
     pub mouths: Vec<Mouth>,
+    pub turbos: Vec<Turbo>,
+    /// The fuel's burning outside the flame.
+    pub chem: Chemistry,
+    /// Heat released by fuel burning outside the cylinders' flames (in the pipes and
+    /// volumes) over the last step, J: the afterfire.
+    pub afterfire: f64,
     pub kinematics: SliderCrank,
     pub intake_valves: Valvetrain,
     pub exhaust_valves: Valvetrain,
@@ -352,6 +565,10 @@ pub struct Model {
     peak_pressure: f64,
     /// The speed below which fuel is cut and the engine is taken as stopped, rad/s.
     stall: f64,
+    /// Oil pressure at the rocker pins: valves go over to the high lobes as they shut.
+    pub cam_oil: bool,
+    /// Advance of the intake and exhaust cams, crank degrees.
+    pub phase: [f64; 2],
 }
 
 impl Model {
@@ -375,6 +592,8 @@ impl Model {
             intake_valves: Valvetrain::new(&spec.intake, true),
             exhaust_valves: Valvetrain::new(&spec.exhaust, false),
             rng: Rng::new(spec.combustion.seed),
+            chem: Chemistry::new(&spec.combustion),
+            afterfire: 0.0,
             stall: spec.ecu.stall_rpm * RAD_PER_RPM,
             spec,
             gas,
@@ -386,6 +605,7 @@ impl Model {
             links: Vec::new(),
             cylinders: Vec::new(),
             mouths: Vec::new(),
+            turbos: Vec::new(),
             kinematics: kin,
             angle: 0.0,
             omega: 0.0,
@@ -398,10 +618,9 @@ impl Model {
             load_torque: 0.0,
             split_steps: 0,
             fault: None,
-            ecu: EcuState {
-                idle: 0.0,
-                limiter_cut: false,
-            },
+            ecu: EcuState::default(),
+            cam_oil: false,
+            phase: [0.0; 2],
             peak_pressure: 50e5,
         };
         for (i, f) in firing.into_iter().enumerate() {
@@ -423,10 +642,12 @@ impl Model {
                 cycle_prev: 0.0,
                 burn: None,
                 ivc: None,
+                residual: 0.0,
                 knock: 0.0,
                 acc: CycleAcc::default(),
                 last: CycleStats::default(),
                 lift_prev: [0.0; 2],
+                high: [false; 2],
                 seated: 0.0,
                 dpdt: 0.0,
             });
@@ -512,11 +733,13 @@ impl Model {
             m.prev_flow = m.flow;
             m.flow = 0.0;
             m.velocity = 0.0;
+            m.density = 0.0;
         }
         for c in &mut self.cylinders {
             c.seated = 0.0;
             c.dpdt = 0.0;
         }
+        self.afterfire = 0.0;
         for _ in 0..n {
             self.advance(h, c);
         }
@@ -534,9 +757,73 @@ impl Model {
         let err = e.idle_rpm - rpm;
         // Never below half the idle air: a shut plate would starve the manifold and stall.
         let (lo, hi) = (-0.5 * e.idle_opening, e.idle_authority);
-        self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(lo, hi);
+        // Only with the pedal up: revving, the speed is the driver's, and an integral
+        // wound down meanwhile would let the engine dip under idle when it comes back.
+        if c.pedal < 0.01 {
+            self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(lo, hi);
+        }
         let idle = e.idle_opening + (self.ecu.idle + 0.5 * e.idle_gain * err).clamp(lo, hi);
         self.throttle = c.pedal.clamp(0.0, 1.0).max(idle);
+        if let Some(pops) = &e.pops
+            && c.pedal < 0.01
+            && rpm > pops.above_rpm
+        {
+            self.throttle = self.throttle.max(pops.throttle);
+        }
+        // Wastegates' diaphragms, pushed by the boost at their compressors' outlets
+        // against their springs; they settle in some 50 ms.
+        let amb = self.ambient.pressure;
+        let lag = 1.0 - (-self.dt / 0.05).exp();
+        for t in &mut self.turbos {
+            let gate = t.turbine.as_ref().and_then(|t| t.wastegate.as_ref());
+            let target = gate.filter(|_| t.compressor.is_some()).map_or(0.0, |w| {
+                let boost = self.lumps[t.compressor_ports[1]].p - amb;
+                ((boost - w.opens) / (w.open - w.opens).max(1.0)).clamp(0.0, 1.0)
+            });
+            t.wastegate += lag * (target - t.wastegate);
+        }
+        // Blow-off valves: light poppets, open in a few milliseconds.
+        let lag = 1.0 - (-self.dt / 0.005).exp();
+        for li in 0..self.links.len() {
+            if let Opening::BlowOff {
+                reference,
+                opens,
+                span,
+                ..
+            } = self.links[li].opening
+            {
+                let from = match self.links[li].a {
+                    Port::Volume(v) => self.lumps[v].p,
+                    _ => amb,
+                };
+                let target = ((from - self.lumps[reference].p - opens) / span).clamp(0.0, 1.0);
+                self.links[li].position += lag * (target - self.links[li].position);
+            }
+        }
+        // Cam lobes: the spool valve follows the ECU, the oil after it.
+        if let Some(sw) = &e.cam_switch {
+            let want = if self.ecu.cam_want {
+                rpm > sw.rpm - sw.hysteresis_rpm && self.throttle >= 0.5 * sw.min_load
+            } else {
+                rpm > sw.rpm && self.throttle >= sw.min_load
+            };
+            self.ecu.cam_want = want;
+            if want != self.cam_oil {
+                self.ecu.cam_timer += self.dt;
+                if self.ecu.cam_timer >= CAM_SWITCH_TIME {
+                    self.cam_oil = want;
+                    self.ecu.cam_timer = 0.0;
+                }
+            } else {
+                self.ecu.cam_timer = 0.0;
+            }
+        }
+        // Cam phasers, as fast as they turn.
+        for (k, map) in [&e.intake_phase, &e.exhaust_phase].into_iter().enumerate() {
+            let target = map.as_ref().map_or(0.0, |m| m.at(rpm, self.throttle));
+            let most = PHASER_RATE * self.dt;
+            self.phase[k] += (target - self.phase[k]).clamp(-most, most);
+        }
         if rpm > e.limiter_rpm {
             self.ecu.limiter_cut = true;
         } else if rpm < e.limiter_rpm - e.limiter_hysteresis_rpm {
@@ -544,14 +831,34 @@ impl Model {
         }
     }
 
-    fn fuel_cut(&self, c: &Controls) -> bool {
+    /// Fuel, spark, advance and mixture this step: the maps, the limiter's cut, and on
+    /// overrun either a fuel cut or a pop map's late spark.
+    fn firing(&self, c: &Controls) -> Firing {
         let e = &self.spec.ecu;
         let rpm = self.rpm();
-        !c.ignition
-            || self.omega < self.stall
-            || self.ecu.limiter_cut
-            || e.overrun_cut_rpm
-                .is_some_and(|cut| rpm > cut && c.pedal < 0.01)
+        let mut f = Firing {
+            fuel: c.ignition && self.omega >= self.stall,
+            spark: c.ignition && self.omega >= self.stall,
+            spark_deg: e.spark_deg.at(rpm, self.throttle),
+            lambda: e.lambda.at(rpm, self.throttle).max(0.5),
+        };
+        if self.ecu.limiter_cut {
+            match e.limiter_cut {
+                Cut::Fuel => f.fuel = false,
+                Cut::Spark => f.spark = false,
+            }
+        }
+        if c.pedal < 0.01 {
+            if let Some(pops) = &e.pops
+                && rpm > pops.above_rpm
+            {
+                f.spark_deg = pops.spark_deg;
+                f.lambda = pops.lambda;
+            } else if e.overrun_cut_rpm.is_some_and(|cut| rpm > cut) {
+                f.fuel = false;
+            }
+        }
+        f
     }
 
     fn reservoir(&self, port: Port) -> Reservoir {
@@ -570,7 +877,7 @@ impl Model {
         }
     }
 
-    fn cda(&self, o: &Opening, pipe_area: f64) -> f64 {
+    fn cda(&self, o: &Opening, pipe_area: f64, position: f64) -> f64 {
         match *o {
             Opening::Open => pipe_area,
             Opening::Fixed(a) => a,
@@ -579,15 +886,30 @@ impl Model {
                 shaft,
                 closed_angle_deg,
             } => 0.85 * throttle_area(bore, shaft, closed_angle_deg, self.throttle),
+            Opening::Wastegate { turbo, area } => area * self.turbos[turbo].wastegate,
+            Opening::BlowOff { area, .. } => area * position,
             Opening::Valves { cylinder, intake } => {
                 let deg = self.cycle_deg(cylinder);
-                if intake {
-                    self.intake_valves.area_at(deg)
+                let v = if intake {
+                    &self.intake_valves
                 } else {
-                    self.exhaust_valves.area_at(deg)
-                }
+                    &self.exhaust_valves
+                };
+                v.area_at_lift(self.valve_lift_at(cylinder, intake, deg))
             }
         }
+    }
+
+    /// A cylinder's intake (`intake`) or exhaust valve lift at a cycle angle, on the lobe
+    /// it runs on and with the cam's phase, m.
+    pub fn valve_lift_at(&self, cylinder: usize, intake: bool, deg: f64) -> f64 {
+        let k = if intake { 0 } else { 1 };
+        let v = if intake {
+            &self.intake_valves
+        } else {
+            &self.exhaust_valves
+        };
+        v.lift_on(deg, self.cylinders[cylinder].high[k], self.phase[k])
     }
 
     fn advance(&mut self, h: f64, c: &Controls) {
@@ -616,10 +938,18 @@ impl Model {
                     let cda = if other == Port::Closed {
                         0.0
                     } else {
-                        self.cda(&opening, area)
+                        self.cda(&opening, area, self.links[li].position)
                     };
                     let res = self.reservoir(other);
-                    let f = if opening == Opening::Open && other != Port::Closed {
+                    let mouth = if other == Port::Ambient {
+                        self.mouths.iter().position(|m| m.link == li)
+                    } else {
+                        None
+                    };
+                    let f = if let (Opening::Open, Some(k)) = (&opening, mouth) {
+                        let rad = &mut self.mouths[k].radiation;
+                        pipe_radiating(&self.gas, &s, e.sign(), area, &res, rad, h)
+                    } else if opening == Opening::Open && other != Port::Closed {
                         pipe_open_to_reservoir(&self.gas, &s, e.sign(), area, &res)
                     } else {
                         let mut guess = self.links[li].guess;
@@ -634,13 +964,15 @@ impl Model {
                         lump.dm += f[0];
                         lump.de += f[2];
                         lump.dmy += f[3];
+                        lump.dmf += f[4];
+                        lump.hot_inflow |= f[0] > 0.0 && s.t > IGNITION;
                     }
-                    if other == Port::Ambient
-                        && let Some(m) = self.mouths.iter_mut().find(|m| m.link == li)
-                    {
+                    if let Some(k) = mouth {
+                        let m = &mut self.mouths[k];
                         let rho = s.w.rho;
                         m.flow += f[0] / rho * h / self.dt;
                         m.velocity += f[0] / (rho * area) * h / self.dt;
+                        m.density += rho * h / self.dt;
                     }
                     // Positive from a to b: out of the pipe when the pipe is `a`.
                     if matches!(a, Port::Pipe(..)) {
@@ -650,15 +982,38 @@ impl Model {
                     }
                 }
                 (x, y) => {
-                    let cda = self.cda(&opening, f64::INFINITY);
+                    let cda = self.cda(&opening, f64::INFINITY, self.links[li].position);
                     let (rx, ry) = (self.reservoir(x), self.reservoir(y));
                     let f = reservoir_to_reservoir(cda, &rx, &ry);
+                    // A volume venting to the air (a blow-off valve) is a sound source: its
+                    // jet, at the vena contracta's speed.
+                    if let Some(k) = self.mouths.iter().position(|m| m.link == li) {
+                        let (out, src) = if y == Port::Ambient {
+                            (f[0], &rx)
+                        } else {
+                            (-f[0], &ry)
+                        };
+                        let rho = if out >= 0.0 {
+                            src.density()
+                        } else {
+                            self.ambient_res.density()
+                        };
+                        let m = &mut self.mouths[k];
+                        let c = (src.gamma * src.r * src.t).sqrt();
+                        m.flow += out / rho * h / self.dt;
+                        m.velocity += (out / (rho * cda.max(1e-9))).clamp(-c, c) * h / self.dt;
+                        m.density += rho * h / self.dt;
+                        m.area = cda.max(1e-7);
+                    }
+                    let hot = if f[0] >= 0.0 { rx.t } else { ry.t } > IGNITION;
                     for (port, sign) in [(x, -1.0), (y, 1.0)] {
                         if let Some(l) = self.lump_of(port) {
                             let lump = &mut self.lumps[l];
                             lump.dm += sign * f[0];
                             lump.de += sign * f[1];
                             lump.dmy += sign * f[2];
+                            lump.dmf += sign * f[3];
+                            lump.hot_inflow |= hot && sign * f[0] > 0.0;
                         }
                     }
                     f[0]
@@ -680,8 +1035,11 @@ impl Model {
                 }
             }
         }
+        for t in &mut self.turbos {
+            t.advance(&self.gas, &mut self.lumps, h);
+        }
         for p in &mut self.pipes {
-            p.update(&self.gas, h);
+            self.afterfire += p.update_reacting(&self.gas, &self.chem, h);
         }
         // Volumes (cylinders follow with the crank).
         for l in &mut self.lumps {
@@ -690,13 +1048,18 @@ impl Model {
             }
             l.apply(h);
             l.derive(&self.gas);
+            let q = l.react(&self.chem, h) + l.deflagrate(&self.chem, h);
+            if q > 0.0 {
+                self.afterfire += q;
+                l.derive(&self.gas);
+            }
         }
         self.advance_cylinders(h, c);
     }
 
     fn advance_cylinders(&mut self, h: f64, c: &Controls) {
         let rpm = self.rpm();
-        let cut = self.fuel_cut(c);
+        let fire = self.firing(c);
         let dtheta = self.omega * h;
         let new_angle = self.angle + dtheta;
         let sp = self.mean_piston_speed();
@@ -704,8 +1067,8 @@ impl Model {
         let kin = self.kinematics;
         let ht = self.spec.heat_transfer.clone();
         let comb = self.spec.combustion.clone();
-        let (lhv, afr) = comb.fuel.properties();
-        let ivc_deg = self.intake_valves.close_deg();
+        let afr = self.chem.afr;
+
         let m_rec = self.spec.crank.reciprocating_mass;
         let mut gas_torque = 0.0;
         for ci in 0..self.cylinders.len() {
@@ -720,8 +1083,7 @@ impl Model {
             let piston = kin.at(deg1.to_radians());
             let v1 = piston.volume;
             // Spark: the ECU's advance before the firing TDC.
-            let advance = self.spec.ecu.spark_deg.at(rpm, self.throttle);
-            let spark = 720.0 - advance;
+            let spark = (720.0 - fire.spark_deg).rem_euclid(720.0);
             let crossed = |at: f64| -> bool {
                 let at = at.rem_euclid(720.0);
                 if wrapped {
@@ -730,63 +1092,102 @@ impl Model {
                     at > deg0 && at <= deg1
                 }
             };
-            // Inlet valve closing: the charge is trapped.
+            // Inlet valve closing: the charge is trapped, and (port injection) the
+            // fresh part of it is air and fuel at the ECU's λ.
+            let ivc_deg = self
+                .intake_valves
+                .close_deg_on(self.cylinders[ci].high[0], self.phase[0]);
             if crossed(ivc_deg) {
-                let l = &self.lumps[self.cylinders[ci].gas];
+                let gi = self.cylinders[ci].gas;
+                let l = &mut self.lumps[gi];
+                let added = if fire.fuel {
+                    let fresh = l.mass - l.burned;
+                    let fuel = fresh / (1.0 + afr * fire.lambda);
+                    let added = (fuel - l.fuel).max(0.0);
+                    l.fuel = l.fuel.max(fuel);
+                    added
+                } else {
+                    0.0
+                };
                 let (m, y, p, t, v) = (l.mass, l.y, l.p, l.t, l.volume);
                 let cyl = &mut self.cylinders[ci];
                 cyl.ivc = Some((p, v, t));
+                cyl.residual = y;
                 cyl.knock = 0.0;
                 cyl.acc.trapped = m;
                 cyl.acc.residual = y;
+                cyl.acc.fuel += added;
             }
-            if crossed(spark) {
-                let lambda = self.spec.ecu.lambda.at(rpm, self.throttle).max(0.5);
+            if crossed(spark) && fire.spark {
                 let l = &self.lumps[self.cylinders[ci].gas];
-                let fresh = l.mass - l.burned;
-                if !cut && fresh > 0.0 {
-                    // Port-injected: the fresh charge is air and fuel at this λ.
-                    let fuel = fresh / (1.0 + afr * lambda);
-                    let spread = 1.0 + comb.variation * self.rng.normal();
-                    let dur = combustion::duration_deg(&comb, rpm, lambda)
-                        * spread.clamp(0.5, 2.0)
-                        * (1.0 + 1.5 * l.y);
-                    let heat = comb.efficiency * combustion::burnable(lambda) * fuel * lhv;
-                    let cyl = &mut self.cylinders[ci];
-                    cyl.burn = Some(Burn {
-                        start_deg: spark,
-                        duration_deg: dur,
-                        heat,
-                        fresh,
-                        done: 0.0,
-                    });
-                    cyl.acc.fuel += fuel;
+                if l.fuel > 1e-4 * l.mass {
+                    let lambda = (l.mass - l.burned - l.fuel) / (afr * l.fuel);
+                    let dur = combustion::duration_deg(&comb, rpm, lambda) * (1.0 + 1.5 * l.y);
+                    let slow = combustion::cycle_variation(&comb, l.y, self.rng.normal());
+                    let cyl = &self.cylinders[ci];
+                    // The kernel that grows slowly is the one in more residual gas.
+                    let residual = cyl.residual * (1.0 + slow);
+                    let speed0 = cyl.flame_speed(l.p, lambda, residual);
+                    // Too dilute or too lean to light: a misfire.
+                    if speed0 >= combustion::QUENCH_SPEED {
+                        self.cylinders[ci].burn = Some(Burn {
+                            start_deg: spark + 0.5 * slow * dur,
+                            duration_deg: dur * (1.0 + slow),
+                            progress: 0.0,
+                            done: 0.0,
+                            lambda,
+                            residual,
+                            speed0,
+                        });
+                    }
                 }
             }
-            // Heat released this step.
+            // Heat released this step: the flame takes its share of the charge still
+            // unburned, of the fuel still in the cylinder (some may have left with the
+            // exhaust) and that its oxygen can burn.
             let mut dq = 0.0;
             let mut dburned = 0.0;
+            let mut dfuel = 0.0;
             let mut burning = false;
-            if let Some(b) = &mut self.cylinders[ci].burn {
-                let since = (deg1 - b.start_deg).rem_euclid(720.0);
-                let f = since / b.duration_deg;
+            let gi = self.cylinders[ci].gas;
+            if let Some(mut b) = self.cylinders[ci].burn.take() {
+                // Negative until a late flame kernel starts to burn. From then the
+                // turbulent flame runs at √S_L (Damköhler's thin-flame limit, as in
+                // Gülder's correlation): as the expansion cools the unburned gas, a late
+                // flame slows, and it goes out when S_L falls below the quench speed,
+                // leaving the rest of the charge to the exhaust.
+                let since = (deg1 - b.start_deg + 360.0).rem_euclid(720.0) - 360.0;
+                let l = &self.lumps[gi];
+                let speed = self.cylinders[ci].flame_speed(l.p, b.lambda, b.residual);
+                let quenched = since > 0.0 && speed < combustion::QUENCH_SPEED;
+                if since > 0.0 {
+                    let step = (dtheta.to_degrees()).min(since);
+                    b.progress += step / b.duration_deg * (speed / b.speed0).sqrt();
+                }
+                let f = b.progress;
                 let x = combustion::wiebe(comb.wiebe_a, comb.wiebe_m, f);
-                let dx = (x - b.done).max(0.0);
-                b.done = x;
-                dq = dx * b.heat;
-                dburned = dx * b.fresh;
-                burning = f < 1.0;
-                if f >= 1.2 {
-                    self.cylinders[ci].burn = None;
+                let share = ((x - b.done) / (1.0 - b.done).max(1e-9)).clamp(0.0, 1.0);
+                b.done = b.done.max(x);
+                let l = &self.lumps[gi];
+                let burnable = l.fuel.min((l.mass - l.burned - l.fuel).max(0.0) / afr);
+                dfuel = share * burnable;
+                dq = dfuel * self.chem.heat;
+                dburned = dfuel * (1.0 + afr);
+                burning = f < 1.0 && !quenched;
+                if f < 1.2 && !quenched {
+                    self.cylinders[ci].burn = Some(b);
                 }
             }
+            // A charge no flame burned (unlit, quenched) is left to the exhaust: the global
+            // kinetics are fitted to flames, not to the low-temperature chemistry of
+            // autoignition in a cylinder.
             // Woschni.
             let (p, t) = {
                 let l = &self.lumps[self.cylinders[ci].gas];
                 (l.p, l.t)
             };
-            let li = self.intake_valves.lift_at(deg1);
-            let le = self.exhaust_valves.lift_at(deg1);
+            let li = self.valve_lift_at(ci, true, deg1);
+            let le = self.valve_lift_at(ci, false, deg1);
             let phase = if burning {
                 Phase::Combustion
             } else if li > 0.0 || le > 0.0 {
@@ -819,6 +1220,7 @@ impl Model {
                 l.apply(h);
                 l.energy += dq - q_wall - work;
                 l.burned += dburned;
+                l.fuel -= dfuel;
                 l.derive(g);
             }
             let p1 = self.lumps[self.cylinders[ci].gas].p;
@@ -827,13 +1229,28 @@ impl Model {
             let ddx = piston.ddx * omega * omega;
             let t_gas = (p1 - self.ambient.pressure) * piston.dv - m_rec * ddx * piston.dx;
             gas_torque += t_gas;
-            // Valve seating.
+            // Valve seating. The rocker pins can move only with both lobes' rockers on
+            // their base circles.
+            let shut = [true, false].map(|intake| {
+                let v = if intake {
+                    &self.intake_valves
+                } else {
+                    &self.exhaust_valves
+                };
+                let k = if intake { 0 } else { 1 };
+                [false, true]
+                    .iter()
+                    .all(|&hi| v.lift_on(deg1, hi, self.phase[k]) == 0.0)
+            });
             let cyl = &mut self.cylinders[ci];
             for (k, lift) in [li, le].into_iter().enumerate() {
                 if lift == 0.0 && cyl.lift_prev[k] > 0.0 {
                     cyl.seated = cyl.seated.max(cyl.lift_prev[k] / h);
                 }
                 cyl.lift_prev[k] = lift;
+                if shut[k] {
+                    cyl.high[k] = self.cam_oil;
+                }
             }
             cyl.dpdt += (p1 - p0) / h;
             // Cycle bookkeeping.
@@ -892,5 +1309,50 @@ impl Model {
         }
         self.angle = new_angle.rem_euclid(4.0 * PI);
         self.time += h;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Build, samples};
+
+    /// Above the switch speed the valves go over to the high lobes a cylinder at a time,
+    /// each while its valves are shut, and the engine breathes more for it.
+    #[test]
+    fn cam_lobes_switch_on_the_base_circle() {
+        let e = samples::i4_vtec();
+        let run = |switch: f64| {
+            let mut e = e.clone();
+            e.ecu.cam_switch.as_mut().unwrap().rpm = switch;
+            let (mut m, _) = Build::new(&e)
+                .system("intake", &samples::i4_vtec_intake())
+                .system("exhaust", &samples::i4_exhaust())
+                .quality(Quality::Draft)
+                .build()
+                .unwrap();
+            m.set_crank(0.0, 7000.0);
+            let c = Controls {
+                pedal: 1.0,
+                load: Load::Speed(7000.0),
+                ..Default::default()
+            };
+            for _ in 0..(0.4 / m.dt) as usize {
+                let before: Vec<[bool; 2]> = m.cylinders.iter().map(|c| c.high).collect();
+                m.step(&c);
+                for (ci, cyl) in m.cylinders.iter().enumerate() {
+                    for k in 0..2 {
+                        if cyl.high[k] != before[ci][k] {
+                            let deg = m.cycle_deg(ci);
+                            assert_eq!(m.valve_lift_at(ci, k == 0, deg), 0.0);
+                        }
+                    }
+                }
+            }
+            assert!(m.cylinders.iter().all(|c| c.high == [switch == 0.0; 2]));
+            m.cylinders[0].last.trapped
+        };
+        let (low, high) = (run(1e9), run(0.0));
+        assert!(high > 1.1 * low, "{low} {high}");
     }
 }

@@ -1,0 +1,314 @@
+(
+    description: "Each bank\'s four primaries into its own turbine with a wastegate, then a catalyst and a silencer to its own tailpipe.",
+    physical: (
+        shapes: [
+            (
+                name: "turbochargers",
+                kind: Box(
+                    size: (0.25, 0.4, 0.2),
+                ),
+                at: (0.2, 0.0, 0.7),
+                mass: 16.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+            (
+                name: "silencer A",
+                kind: Cylinder(
+                    radius: 0.11,
+                    length: 0.45,
+                    axis: X,
+                ),
+                at: (-3.7, 0.45, 0.3),
+                mass: 8.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+            (
+                name: "silencer B",
+                kind: Cylinder(
+                    radius: 0.11,
+                    length: 0.45,
+                    axis: X,
+                ),
+                at: (-3.7, -0.45, 0.3),
+                mass: 8.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Exhaust((
+        network: (
+            volumes: [
+                (
+                    name: "collector.A",
+                    volume: 0.0004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "turbine.out.A",
+                    volume: 0.0004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "cat.A",
+                    volume: 0.0012,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "silencer.A",
+                    volume: 0.005,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "collector.B",
+                    volume: 0.0004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "turbine.out.B",
+                    volume: 0.0004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "cat.B",
+                    volume: 0.0012,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "silencer.B",
+                    volume: 0.005,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "downpipe.A",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "turbine.out.A",
+                    ),
+                    b: Volume(
+                        name: "cat.A",
+                    ),
+                ),
+                (
+                    name: "centre.A",
+                    length: 1.3,
+                    diameter: [
+                        (0.0, 0.065),
+                    ],
+                    wall_temperature: 600.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "cat.A",
+                    ),
+                    b: Volume(
+                        name: "silencer.A",
+                    ),
+                ),
+                (
+                    name: "tail.A",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.075),
+                    ],
+                    wall_temperature: 500.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "silencer.A",
+                    ),
+                    b: Ambient(
+                        at: (-4.4, 0.45, 0.35),
+                    ),
+                ),
+                (
+                    name: "downpipe.B",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "turbine.out.B",
+                    ),
+                    b: Volume(
+                        name: "cat.B",
+                    ),
+                ),
+                (
+                    name: "centre.B",
+                    length: 1.3,
+                    diameter: [
+                        (0.0, 0.065),
+                    ],
+                    wall_temperature: 600.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "cat.B",
+                    ),
+                    b: Volume(
+                        name: "silencer.B",
+                    ),
+                ),
+                (
+                    name: "tail.B",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.075),
+                    ],
+                    wall_temperature: 500.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "silencer.B",
+                    ),
+                    b: Ambient(
+                        at: (-4.4, -0.45, 0.35),
+                    ),
+                ),
+                (
+                    name: "primary.1",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.1"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.2",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.2"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.3",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.3"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.4",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.4"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.5",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.5"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.6",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.6"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.7",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.7"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.8",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.8"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+            ],
+            orifices: [],
+            turbines: [
+                (
+                    name: "turbine.A",
+                    shaft: "turbo.A",
+                    inlet: "collector.A",
+                    outlet: "turbine.out.A",
+                    wheel: 0.052,
+                    area: 0.00065,
+                    efficiency: 0.7,
+                    inertia: 0.00003,
+                    wastegate: Some((
+                        diameter: 0.03,
+                        opens: 75000.0,
+                        open: 105000.0,
+                    )),
+                ),
+                (
+                    name: "turbine.B",
+                    shaft: "turbo.B",
+                    inlet: "collector.B",
+                    outlet: "turbine.out.B",
+                    wheel: 0.052,
+                    area: 0.00065,
+                    efficiency: 0.7,
+                    inertia: 0.00003,
+                    wastegate: Some((
+                        diameter: 0.03,
+                        opens: 75000.0,
+                        open: 105000.0,
+                    )),
+                ),
+            ],
+        ),
+    )),
+)

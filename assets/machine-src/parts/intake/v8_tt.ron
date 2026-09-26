@@ -1,0 +1,348 @@
+(
+    description: "An air box and a compressor per bank, intercoolers, one 80 mm throttle, plenum and runners; a diverter valve back to a compressor inlet.",
+    physical: (
+        shapes: [
+            (
+                name: "air boxes",
+                kind: Box(
+                    size: (0.3, 0.8, 0.2),
+                ),
+                at: (0.9, 0.0, 0.5),
+                mass: 4.0,
+                colour: (0.25, 0.25, 0.27),
+            ),
+            (
+                name: "plenum",
+                kind: Box(
+                    size: (0.5, 0.3, 0.15),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 6.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Intake((
+        network: (
+            volumes: [
+                (
+                    name: "charge",
+                    volume: 0.001,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "plenum",
+                    volume: 0.005,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "airbox.A",
+                    volume: 0.004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "compressor.in.A",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "compressor.out.A",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "airbox.B",
+                    volume: 0.004,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "compressor.in.B",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "compressor.out.B",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "throttle.body",
+                    length: 0.25,
+                    diameter: [
+                        (0.0, 0.08),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "charge",
+                    ),
+                    b: Volume(
+                        name: "plenum",
+                        restriction: Some(Throttle(
+                            bore: 0.08,
+                            shaft: 0.009,
+                            closed_angle_deg: 7.0,
+                        )),
+                    ),
+                ),
+                (
+                    name: "snorkel.A",
+                    length: 0.35,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 300.0,
+                    roughness: 0.0001,
+                    a: Ambient(
+                        at: (1.0, 0.35, 0.6),
+                    ),
+                    b: Volume(
+                        name: "airbox.A",
+                    ),
+                ),
+                (
+                    name: "inlet.A",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.065),
+                    ],
+                    wall_temperature: 310.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox.A",
+                    ),
+                    b: Volume(
+                        name: "compressor.in.A",
+                    ),
+                ),
+                (
+                    name: "intercooler.A",
+                    length: 0.5,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    friction: 4.0,
+                    heat: 25.0,
+                    a: Volume(
+                        name: "compressor.out.A",
+                    ),
+                    b: Volume(
+                        name: "charge",
+                    ),
+                ),
+                (
+                    name: "snorkel.B",
+                    length: 0.35,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 300.0,
+                    roughness: 0.0001,
+                    a: Ambient(
+                        at: (1.0, -0.35, 0.6),
+                    ),
+                    b: Volume(
+                        name: "airbox.B",
+                    ),
+                ),
+                (
+                    name: "inlet.B",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.065),
+                    ],
+                    wall_temperature: 310.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox.B",
+                    ),
+                    b: Volume(
+                        name: "compressor.in.B",
+                    ),
+                ),
+                (
+                    name: "intercooler.B",
+                    length: 0.5,
+                    diameter: [
+                        (0.0, 0.07),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    friction: 4.0,
+                    heat: 25.0,
+                    a: Volume(
+                        name: "compressor.out.B",
+                    ),
+                    b: Volume(
+                        name: "charge",
+                    ),
+                ),
+                (
+                    name: "runner.1",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.1"),
+                ),
+                (
+                    name: "runner.2",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.2"),
+                ),
+                (
+                    name: "runner.3",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.3"),
+                ),
+                (
+                    name: "runner.4",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.4"),
+                ),
+                (
+                    name: "runner.5",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.5"),
+                ),
+                (
+                    name: "runner.6",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.6"),
+                ),
+                (
+                    name: "runner.7",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.7"),
+                ),
+                (
+                    name: "runner.8",
+                    length: 0.22,
+                    diameter: [
+                        (0.0, 0.042),
+                        (1.0, 0.038),
+                    ],
+                    wall_temperature: 330.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "plenum",
+                    ),
+                    b: Terminal("intake.8"),
+                ),
+            ],
+            orifices: [
+                (
+                    name: "diverter",
+                    between: ("charge", "compressor.in.A"),
+                    restriction: BlowOff(
+                        diameter: 0.028,
+                        reference: "plenum",
+                        opens: 30000.0,
+                        span: 20000.0,
+                    ),
+                    at: (0.3, 0.0, 0.7),
+                ),
+            ],
+            compressors: [
+                (
+                    name: "compressor.A",
+                    shaft: "turbo.A",
+                    inlet: "compressor.in.A",
+                    outlet: "compressor.out.A",
+                    wheel: 0.054,
+                    inducer: 0.03888,
+                    blades: 6,
+                    head: 0.62,
+                    shutoff: 0.85,
+                    surge_flow: 0.05,
+                    choke_flow: 0.17,
+                    efficiency: 0.76,
+                    duct_length: 0.25,
+                    at: (0.2, 0.175, 0.75),
+                ),
+                (
+                    name: "compressor.B",
+                    shaft: "turbo.B",
+                    inlet: "compressor.in.B",
+                    outlet: "compressor.out.B",
+                    wheel: 0.054,
+                    inducer: 0.03888,
+                    blades: 6,
+                    head: 0.62,
+                    shutoff: 0.85,
+                    surge_flow: 0.05,
+                    choke_flow: 0.17,
+                    efficiency: 0.76,
+                    duct_length: 0.25,
+                    at: (0.2, -0.175, 0.75),
+                ),
+            ],
+        ),
+        throttle: DriveByWire,
+    )),
+)
