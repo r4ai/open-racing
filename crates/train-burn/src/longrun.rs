@@ -32,7 +32,7 @@ struct Lap {
     /// Mean hot pressure at the end of the lap, bar.
     pressure: f64,
     damage: f64,
-    /// Steps with two or more wheels off the track, and off course (three or more:
+    /// Steps with a wheel off the track, and off course (three or more wheels:
     /// beyond the track limits).
     off_steps: usize,
     off_course_steps: usize,
@@ -64,7 +64,7 @@ impl LapAccumulator {
             .iter()
             .filter(|w| w.surface.off_track())
             .count();
-        self.off_steps += (off >= 2) as usize;
+        self.off_steps += (off >= 1) as usize;
         self.off_course_steps += (off >= OFF_COURSE_WHEELS) as usize;
         self.steps += 1;
     }
@@ -90,7 +90,7 @@ pub fn run(
     laps: u32,
     cars: usize,
     noise: f32,
-    weather: &EnvConfig,
+    conditions: &EnvConfig,
     trace: Option<&Path>,
     trace_car: usize,
 ) {
@@ -99,9 +99,11 @@ pub fn run(
         random_start: false,
         start_speed: (0.0, 0.0),
         start_offset: (-0.3, 0.3),
-        air_temperature: weather.air_temperature,
-        road_heat: weather.road_heat,
-        wind_speed: weather.wind_speed,
+        track_grip: conditions.track_grip.or(policy.meta.track_grip),
+        grip_gain_per_lap: conditions.grip_gain_per_lap,
+        air_temperature: conditions.air_temperature,
+        road_heat: conditions.road_heat,
+        wind_speed: conditions.wind_speed,
         ..policy.meta.env_config()
     };
     let mut spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config.clone())
@@ -298,15 +300,21 @@ fn report(stints: &[Stint], laps: u32, track: &Track) {
     let n = stints.len();
     let completed_laps: usize = stints.iter().map(|s| s.laps.len()).sum();
     let crashes: Vec<(usize, f64)> = stints.iter().filter_map(|s| s.crash).collect();
+    let off: usize = stints
+        .iter()
+        .flat_map(|s| &s.laps)
+        .map(|l| l.off_steps)
+        .sum();
     let off_course: usize = stints
         .iter()
         .flat_map(|s| &s.laps)
         .map(|l| l.off_course_steps)
         .sum();
     println!(
-        "all {n} cars: {}/{n} finished {laps} laps, {} crashes in {completed_laps} laps, {:.2} off-course steps per lap, total time mean {} best {}",
+        "all {n} cars: {}/{n} finished {laps} laps, {} crashes in {completed_laps} laps, {:.2} steps per lap with a wheel off, {:.2} off course, total time mean {} best {}",
         finishers.len(),
         crashes.len(),
+        off as f64 / completed_laps.max(1) as f64,
         off_course as f64 / completed_laps.max(1) as f64,
         mean(&finishers).map_or("-".into(), |t| format!("{t:.2}s")),
         finishers

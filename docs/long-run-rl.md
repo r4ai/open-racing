@@ -4,7 +4,7 @@
 
 ## Abstract
 
-A reinforcement-learning policy that sets fast single laps can still fail a race stint. On a 5.8 km road circuit, a GT3 policy trained with our previous recipe lapped in 119.7 s, yet none of 32 cars driving 10 laps from a standing start got past lap 4. We trace the failure to the training distribution: episodes lasted about one lap and always began on fresh tyres, so the states of later laps (hot, worn tyres and flying-lap speeds) were never trained on. We change what the policy trains on and what it observes. Episodes run for several laps, starts are randomised over worn and hot tyres, and a share of episodes restart shortly before earlier crashes. The policy sees its tyre, brake and damage state, and the reward prices tyre degradation. With these changes, all 32 cars completed 10 laps without a crash or leaving the track, in 1208.2 s for the car driven without noise. An ablation that keeps every change except the state distribution completes no stint at all. The same holds for weather: a policy trained only in fixed standard conditions left the track on lap 1 in hot weather. After a further stage in randomised weather, it finished stints from 5 °C to 40 °C air and drove in the application's full weather model. We also report a case of reward hacking, where a policy cut a chicane, and the rule that removed it.
+A reinforcement-learning policy that sets fast single laps can still fail a race stint. On a 5.8 km road circuit, a GT3 policy trained with our previous recipe lapped in 119.7 s, yet none of 32 cars driving 10 laps from a standing start got past lap 4. We trace the failure to the training distribution: episodes lasted about one lap and always began on fresh tyres, so the states of later laps (hot, worn tyres and flying-lap speeds) were never trained on. We change what the policy trains on and what it observes. Episodes run for several laps, starts are randomised over worn and hot tyres, and a share of episodes restart shortly before earlier crashes. The policy sees its tyre, brake and damage state, and the reward prices tyre degradation. With these changes, all 32 cars completed 10 laps without a crash or leaving the track, in 1208.2 s for the car driven without noise. An ablation that keeps every change except the state distribution completes no stint at all. The same holds for weather: a policy trained only in fixed standard conditions left the track on lap 1 in hot weather. After a further stage in randomised weather, it finished stints from 5 °C to 40 °C air and drove in the application's full weather model. A last stage on randomised and evolving track conditions, from a dusty track to a fully rubbered-in one, kept its wheels on the track and let it gain pace as the track rubbered in. We also report a case of reward hacking, where a policy cut a chicane, and the rule that removed it.
 
 ## 1 Introduction
 
@@ -15,7 +15,7 @@ We train with PPO [4] in open-racing, a vehicle simulator with a thermal and wea
 - a diagnosis of long-run failure as a train–test mismatch in the state distribution (Section 3);
 - a training method that covers the states of a stint and prices tyre degradation (Section 4);
 - a 10-lap evaluation, an ablation and an analysis of driving technique (Section 5);
-- the same diagnosis and fix for weather, which the policy must also meet outside its training (Section 5.6).
+- the same diagnosis and fix for weather and for the track's grip, which the policy must also meet outside its training (Sections 5.6 and 5.7).
 
 ## 2 Background
 
@@ -55,12 +55,13 @@ We use PPO with the clipped objective [4] and generalised advantage estimation [
 
 ### 4.2 State distribution
 
-This is the central change. Four mechanisms put the states of a stint into training.
+This is the central change. Five mechanisms put the states of a stint into training.
 
 1. **Long episodes.** Episodes may last 600 s (stage 1) and then 1400 s (later stages), several laps up to a full stint. Starts remain at random points and speeds, so every part of the track is visited both from a standing start and at speed.
 2. **Worn starts.** With probability 0.5 (then 0.4), a random start uses tyres as a stint leaves them. Wear is drawn uniformly up to 0.35, with each tyre within ±30 % of the common draw. The carcass temperature is drawn from 60–105 °C, and each tread zone lies −10 to +15 K around it. This reaches, from the first iteration, conditions that the policy would otherwise meet only after many clean laps.
 3. **Crash replay.** Every car records its state every 0.5 s. When an episode ends in a crash, the state 3 s earlier enters a pool of 4096 states. A quarter of all resets restart from a random state in this pool. This follows GT Sophy's mistake learning [1] and focuses training on the situations the current policy fails in.
 4. **Weather** (stage 4). Each episode draws its air temperature from 5–40 °C, a road 0–30 K warmer than the air, a wind of 0–9 m/s from any direction with gusts, and a sea-level pressure of 995–1030 hPa, which set the air's density. The tyres are inflated to their cold pressure in the air they start in. The weather is uniform over the track and steady within an episode; the policy does not observe it directly, only through its effects on the tyres, brakes and car. This is domain randomisation [10] of the conditions the car will meet.
+5. **Track condition** (stage 5). Each episode starts on a track whose racing line has between 90 % grip (dusty) and 100 % (fully rubbered in). The asphalt off the line is dustier, and tyres that leave the track drag dirt onto it, which costs grip until other tyres sweep it away. As the car drives, its tyres lay rubber in proportion to the work they do. The line gains 0.004 of grip per lap, twice the application's default, so the policy meets a track that changes during the episode. The policy does not observe the grip of the road; it sees only how the car responds.
 
 ### 4.3 Observations
 
@@ -89,6 +90,7 @@ where $\Delta s$ is the progress along the centreline in metres and $n_{\text{of
 
 - **Tyre price.** Overheating a tyre costs lap time for minutes, far beyond the horizon of γ = 0.997 at 25 Hz (about 13 s). The grip-loss and wear terms charge that cost immediately.
 - **Off-course mask.** Progress made with three or more wheels off the track earns nothing, as in GT Sophy [1]. Section 5.5 shows why this is needed.
+- **Wheels off the track.** Stages 1–4 charge 0.02 per wheel off the track per step, and stage 5 charges 0.1. Kerbs count as track.
 
 An episode ends as a crash on:
 
@@ -99,7 +101,7 @@ An episode ends as a crash on:
 
 ### 4.6 Training schedule and model selection
 
-Training runs in four stages on one GPU (AMD RX 9070) and an 8-core CPU, at 30–60 k agent steps per second:
+Training runs in five stages on one GPU (AMD RX 9070) and an 8-core CPU, at 30–60 k agent steps per second:
 
 | stage | from | duration | learning rate | action std. (start → end) |
 | --- | --- | --- | --- | --- |
@@ -107,8 +109,9 @@ Training runs in four stages on one GPU (AMD RX 9070) and an 8-core CPU, at 30�
 | 2 | stage 1 | 85 min | 1.5·10⁻⁴ | 0.08 → 0.05 |
 | 3 | stage 2 | 20 min | 1·10⁻⁴ | 0.05 → 0.04 |
 | 4 | stage 3 | 60 min | 1.5·10⁻⁴ | 0.08 → 0.04 |
+| 5 | stage 4 | 60 min | 1.5·10⁻⁴ | 0.06 → 0.04 |
 
-Stage 3 enables the off-course mask and stage 4 the weather. The other settings of Sections 4.2–4.5 are the same in all stages. Most of the wall time goes to simulation rather than to network updates. We select checkpoints by the evaluation of Section 5.1, as GT Sophy selected its policies [1]. Stage 3 was stopped after 20 minutes of a 55-minute schedule because that checkpoint was 2 s faster over 10 laps than the last one. Stage 4 was stopped after 60 minutes of a 90-minute schedule, for the reason given in Section 5.6.
+Stage 3 enables the off-course mask, stage 4 the weather, and stage 5 the track condition and the higher price for wheels off the track. The other settings of Sections 4.2–4.5 are the same in all stages. Most of the wall time goes to simulation rather than to network updates. We select checkpoints by the evaluation of Section 5.1, as GT Sophy selected its policies [1]. Stage 3 was stopped after 20 minutes of a 55-minute schedule because that checkpoint was 2 s faster over 10 laps than the last one. Stages 4 and 5 were each stopped after 60 minutes of a 90-minute schedule, for the reasons given in Sections 5.6 and 5.7.
 
 ## 5 Experiments
 
@@ -178,6 +181,31 @@ We evaluate two ways, with 32 cars as in Section 5.1 unless stated. First, in we
 
 Training in randomised weather made the policy robust at a cost of 15 s over 10 laps in the standard conditions. The hot case is 51 s slower than the standard one, because hot tyres, thin air and a weak engine all cost lap time. The last checkpoint scored best in the drawn weather, but it left the track in three of the application's conditions, whose road temperature is not uniform. We therefore selected the 60-minute checkpoint. Selection must include the conditions the policy will be used in, not only the ones it trained in.
 
+### 5.7 Track condition and track evolution
+
+Stages 1–4 trained on a track with the same grip everywhere. The application's default track has a rubbered-in racing line, dustier asphalt off it, and dirt that tyres drag back onto the road. It rubbers in further as cars drive. On such tracks the stage-4 policy ran wider the less grip there was. We count the steps per lap with at least one wheel off the track (kerbs count as track):
+
+| track | stage 4 | stage 5 |
+| --- | --- | --- |
+| same grip everywhere (training of stages 1–4) | 2.7 | – |
+| rubbered in (optimum) | 4.6 | 1.4 |
+| green (94 %) | 11.3 | 1.3 |
+| dusty (90 %) | 18.3 | 2.6 |
+
+Each row is 16 cars over 10 laps, with the track rubbering in at the application's 0.002 per lap. The dusty track also shows pace: stage 5 takes 1245.5 s for 10 laps on average against 1248.8 s for stage 4.
+
+On drawn tracks in drawn weather, each car starts on its own track condition between dusty and rubbered in, and in its own weather as in Section 5.6. There, 32 cars of stage 5 finished all their 10-lap stints, with a wheel off 3.4 steps per lap. Stage 4 finished 27 of 32 cars, with 5 crashes and a wheel off 8.2 steps per lap. The last checkpoint of the stage kept its wheels on the track more often (1.6 steps per lap), but crashed two of 32 cars, so we again selected the 60-minute checkpoint. In the application's weather and track model, both checkpoints drove all twelve conditions we tried: the eight of Section 5.6 and four on dusty and green tracks. There, the stage-5 policy had a wheel off at most 9.5 steps per lap, against up to 76 for stage 4.
+
+To see whether the policy uses the grip the track gains, we start it on a dusty track that rubbers in at different rates:
+
+| rubbering in, grip per lap | lap 2 | lap 5 | lap 10 | 10 laps |
+| --- | --- | --- | --- | --- |
+| 0 | 123.8 s | 124.3 s | 124.5 s | 1248.5 s |
+| 0.004 | 123.6 s | 123.7 s | 123.3 s | 1242.2 s |
+| 0.01 | 123.4 s | 123.1 s | 122.9 s | 1237.6 s |
+
+These are means over 8 cars. Without rubbering in, the laps slow down as the tyres wear. As the track rubbers in, the policy gains pace, which more than makes up for the wear. It also leaves the track less often (from 3.6 to 1.6 steps per lap).
+
 ## 6 Discussion and limitations
 
 - **What matters most.** The main lesson is that what a policy trains on matters more than how. Algorithm settings did not cause the long-run failures. They came from states that the training never produced. Worn starts and crash replay are cheap ways to produce such states, and long episodes let them arise naturally.
@@ -186,11 +214,12 @@ Training in randomised weather made the policy robust at a cost of 15 s over 10 
 - **One car and one track.** We trained on one car and one track. The method has no track-specific parts, but we have not tested how it transfers.
 - **Tyre model.** The tyre model is simplified: it has no graining or blistering, and its wear curve is linear.
 - **Weather in training.** Training weather is uniform over the track, while the application's road temperature varies with sun and shade. This gap is why the checkpoint had to be chosen in the application's weather. Drawing a varying road temperature in training should close it. The policy also does not observe the air and road temperatures, which simulators report and which could make adapting easier.
+- **Checkpoint selection.** In stages 4 and 5 the last checkpoint was not the most robust one. We choose by evaluation, but the evaluation takes several minutes per checkpoint and uses a fixed set of conditions.
 - **Future work.** A policy that adapts from a history of observations [14], rather than from direct telemetry of its tyres, could transfer to simulators that report less.
 
 ## 7 Conclusion
 
-Racing policies trained on short episodes and fresh cars fail over a stint because a stint takes them into states they never trained on. Training on those states by using long episodes, worn and hot tyre starts, and restarts before earlier crashes produced a policy that drove 320 laps without a crash or a track-limit violation. Pricing tyre degradation in the reward kept the tyres in their working range. Weather follows the same rule: a policy trained in one fixed weather fails in others, and randomising the weather in training fixed that. The `longrun` evaluation in open-racing reproduces these measurements for any policy.
+Racing policies trained on short episodes and fresh cars fail over a stint because a stint takes them into states they never trained on. Training on those states by using long episodes, worn and hot tyre starts, and restarts before earlier crashes produced a policy that drove 320 laps without a crash or a track-limit violation. Pricing tyre degradation in the reward kept the tyres in their working range. Weather and the track's grip follow the same rule. A policy trained in one fixed weather, on a track with the same grip everywhere, fails or runs wide in other conditions. Randomising both in training fixed that, and the policy learned to use the grip a track gains as it rubbers in. The `longrun` evaluation in open-racing reproduces these measurements for any policy.
 
 ## References
 

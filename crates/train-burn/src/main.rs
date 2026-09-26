@@ -229,6 +229,13 @@ enum Command {
         /// Wind speed at 10 m, m/s, from any direction: a value or a range.
         #[arg(long, value_parser = parse_range, default_value = "0")]
         wind: (f64, f64),
+        /// Racing-line grip (see `train --track-grip`): rubber on the racing line, dust
+        /// off it, and dirt dragged onto the road. Defaults to what the policy trained on.
+        #[arg(long, value_parser = parse_grip_range)]
+        track_grip: Option<(f64, f64)>,
+        /// Grip the racing line gains per lap, with --track-grip.
+        #[arg(long, default_value_t = open_racing_api::TrackEvolution::DEFAULT_GAIN_PER_LAP)]
+        grip_gain: f64,
         /// Write one car's stint step by step to this CSV file.
         #[arg(long)]
         trace: Option<PathBuf>,
@@ -526,15 +533,19 @@ fn main() {
             air_temperature,
             road_heat,
             wind,
+            track_grip,
+            grip_gain,
             trace,
             trace_car,
         } => {
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
-            let weather = open_racing_api::EnvConfig {
+            let conditions = open_racing_api::EnvConfig {
                 air_temperature,
                 road_heat,
                 wind_speed: wind,
+                track_grip,
+                grip_gain_per_lap: grip_gain,
                 ..Default::default()
             };
             longrun::run(
@@ -542,7 +553,7 @@ fn main() {
                 laps,
                 cars,
                 noise,
-                &weather,
+                &conditions,
                 trace.as_deref(),
                 trace_car,
             );
