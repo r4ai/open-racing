@@ -316,6 +316,15 @@ fn brush(kind: PlantKind) -> BrushPreset {
     }
 }
 
+/// How far a download has got, or that it is done and the asset being prepared.
+fn label(progress: f32) -> String {
+    if progress >= 1.0 {
+        "Preparing…".into()
+    } else {
+        format!("{:.0}%", progress * 100.0)
+    }
+}
+
 /// Draws how far a tile's download has got over it, or a mark that it needs one.
 pub fn badge(ui: &egui::Ui, rect: egui::Rect, progress: Option<f32>, ready: bool) {
     let painter = ui.painter_at(rect);
@@ -330,7 +339,7 @@ pub fn badge(ui: &egui::Ui, rect: egui::Rect, progress: Option<f32>, ready: bool
             painter.text(
                 rect.center() - egui::vec2(0.0, 8.0),
                 egui::Align2::CENTER_CENTER,
-                format!("{:.0}%", p * 100.0),
+                label(p),
                 egui::FontId::proportional(13.0),
                 egui::Color32::WHITE,
             );
@@ -455,7 +464,8 @@ fn details(ui: &mut egui::Ui, ph: &mut PolyHaven, a: &Asset, kind: AssetType, st
             ui.add(
                 egui::ProgressBar::new(p)
                     .desired_width(160.0)
-                    .show_percentage(),
+                    .text(label(p))
+                    .animate(p >= 1.0),
             );
             return;
         }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use bevy::window::FileDragAndDrop;
 use bevy_egui::egui;
 use open_racing_track::texture;
@@ -148,10 +149,11 @@ pub fn place(editor: &mut Editor, model: &Path, at: glam::DVec3) {
     }
 }
 
-/// Thumbnails of textures, made again when their files change.
+/// Thumbnails of textures, made in the background, and again when their files change.
 #[derive(Default)]
 pub struct Thumbnails {
     made: HashMap<PathBuf, (u64, Option<egui::TextureHandle>)>,
+    making: HashMap<PathBuf, (u64, Task<Option<egui::ColorImage>>)>,
 }
 
 impl Thumbnails {
@@ -162,32 +164,39 @@ impl Thumbnails {
         a: &Asset,
         revision: u64,
     ) -> Option<egui::TextureHandle> {
-        if let Some((r, t)) = self.made.get(&a.path)
-            && *r == revision
+        if let Some((r, task)) = self.making.get_mut(&a.path)
+            && let Some(image) = check_ready(task)
         {
-            return t.clone();
+            let r = *r;
+            self.making.remove(&a.path);
+            let handle = image.map(|c| {
+                ctx.load_texture(a.path.to_string_lossy(), c, egui::TextureOptions::LINEAR)
+            });
+            self.made.insert(a.path.clone(), (r, handle));
         }
-        let image = std::fs::read(dir.join(&a.path))
-            .ok()
-            .and_then(|b| texture::decode(&b).ok());
-        let handle = image.map(|img| {
-            // Nearest texels of a small square.
-            let mut px = Vec::with_capacity(THUMB * THUMB * 4);
-            for y in 0..THUMB {
-                for x in 0..THUMB {
-                    let (sx, sy) = (x * img.width / THUMB, y * img.height / THUMB);
-                    px.extend_from_slice(&img.pixels[(sy * img.width + sx) * 4..][..4]);
+        let made = self.made.get(&a.path);
+        let current = made.is_some_and(|(r, _)| *r == revision);
+        if !current && self.making.get(&a.path).is_none_or(|(r, _)| *r != revision) {
+            let path = dir.join(&a.path);
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let img = texture::decode(&std::fs::read(path).ok()?).ok()?;
+                // Nearest texels of a small square.
+                let mut px = Vec::with_capacity(THUMB * THUMB * 4);
+                for y in 0..THUMB {
+                    for x in 0..THUMB {
+                        let (sx, sy) = (x * img.width / THUMB, y * img.height / THUMB);
+                        px.extend_from_slice(&img.pixels[(sy * img.width + sx) * 4..][..4]);
+                    }
                 }
-            }
-            let color = egui::ColorImage::from_rgba_unmultiplied([THUMB, THUMB], &px);
-            ctx.load_texture(
-                a.path.to_string_lossy(),
-                color,
-                egui::TextureOptions::LINEAR,
-            )
-        });
-        self.made.insert(a.path.clone(), (revision, handle.clone()));
-        handle
+                Some(egui::ColorImage::from_rgba_unmultiplied(
+                    [THUMB, THUMB],
+                    &px,
+                ))
+            });
+            self.making.insert(a.path.clone(), (revision, task));
+        }
+        // The old picture until the new one is made.
+        made.and_then(|(_, t)| t.clone())
     }
 }
 

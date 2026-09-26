@@ -226,6 +226,9 @@ pub struct Rebuild {
     /// Materials the handles were made from, and the asset files' revision then.
     materials: Vec<MaterialDef>,
     assets: u64,
+    /// The materials' textures being prepared in the background: the main thread would
+    /// wait on the cache while a build holds it (a new scatter's models being made).
+    looking: Option<Task<Result<open_racing_track::Visual, String>>>,
     handles: Vec<Handle<TrackMaterial>>,
     /// The materials of models walls and scatters show, made once per model and asset
     /// revision.
@@ -437,11 +440,24 @@ pub fn rebuild(
     mut materials: ResMut<Assets<TrackMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // Materials change rarely; their textures are prepared again only when their files
-    // change.
-    if state.materials != editor.project.materials || state.assets != library.revision {
-        let mut cache = cache.0.lock().expect("cache");
-        match bake::materials(&editor.project, &editor.dir, &mut cache) {
+    // Materials change rarely; their textures are prepared again, in the background,
+    // only when their files change.
+    if state.looking.is_none()
+        && (state.materials != editor.project.materials || state.assets != library.revision)
+    {
+        state.materials = editor.project.materials.clone();
+        state.assets = library.revision;
+        let (project, dir, cache) = (editor.project.clone(), editor.dir.clone(), cache.0.clone());
+        state.looking = Some(AsyncComputeTaskPool::get().spawn(async move {
+            let mut cache = cache.lock().map_err(|e| e.to_string())?;
+            bake::materials(&project, &dir, &mut cache).map_err(|e| e.to_string())
+        }));
+    }
+    if let Some(task) = &mut state.looking
+        && let Some(done) = check_ready(task)
+    {
+        state.looking = None;
+        match done {
             Ok(visual) => {
                 state.handles = render::add_materials(
                     &visual,
@@ -455,15 +471,15 @@ pub fn rebuild(
             }
             Err(e) => warn!("materials: {e}"),
         }
-        state.materials = editor.project.materials.clone();
-        state.assets = library.revision;
         state.wall_looks.clear();
         state.looks += 1;
         scattered.shapes.clear();
         state.ground = None;
     }
 
-    if let Some(task) = &mut state.task
+    // A build waits for the materials being made, so as not to show it in the old ones.
+    if state.looking.is_none()
+        && let Some(task) = &mut state.task
         && let Some(done) = check_ready(task)
     {
         state.task = None;
