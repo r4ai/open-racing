@@ -94,6 +94,7 @@ impl Preset {
     pub fn spline(&self, project: &Project, nodes: Vec<glam::DVec3>) -> Option<Spline> {
         let (shape, resolution) = self.shape(project)?;
         Some(Spline {
+            group: None,
             name: unique_name(project, self.name()),
             closed: false,
             nodes: nodes

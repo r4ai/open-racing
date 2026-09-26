@@ -138,6 +138,9 @@ pub struct Shown {
     pub locked: HashSet<Named>,
     /// Local view: only these are shown.
     pub local: Option<HashSet<Named>>,
+    /// Collections hidden, and locked.
+    pub hidden_groups: HashSet<String>,
+    pub locked_groups: HashSet<String>,
 }
 
 #[derive(Resource)]
@@ -423,12 +426,27 @@ impl Editor {
         })
     }
 
-    /// Whether the view shows an item: not hidden, and in local view if there is one.
+    /// The collection an item is kept in.
+    pub fn group(&self, item: Item) -> Option<&str> {
+        let p = &self.project;
+        match item {
+            Item::Road(_) => None,
+            Item::Spline(s) => p.splines.get(s)?.group.as_deref(),
+            Item::Prop(i) => p.props.get(i)?.group.as_deref(),
+        }
+    }
+
+    /// Whether the view shows an item: not hidden, nor its collection, and in local
+    /// view if there is one.
     pub fn visible(&self, item: Item) -> bool {
         let Some(n) = self.named(item) else {
             return false;
         };
-        !self.shown.hidden.contains(&n) && self.shown.local.as_ref().is_none_or(|l| l.contains(&n))
+        !self.shown.hidden.contains(&n)
+            && self
+                .group(item)
+                .is_none_or(|g| !self.shown.hidden_groups.contains(g))
+            && self.shown.local.as_ref().is_none_or(|l| l.contains(&n))
     }
 
     /// Whether a click or a box in the view can select an item.
@@ -437,6 +455,56 @@ impl Editor {
             && self
                 .named(item)
                 .is_some_and(|n| !self.shown.locked.contains(&n))
+            && self
+                .group(item)
+                .is_none_or(|g| !self.shown.locked_groups.contains(g))
+    }
+
+    /// The collections splines and props are kept in, in order of name.
+    pub fn groups(&self) -> Vec<String> {
+        let p = &self.project;
+        let mut g: Vec<String> = p
+            .splines
+            .iter()
+            .filter_map(|s| s.group.clone())
+            .chain(p.props.iter().filter_map(|x| x.group.clone()))
+            .collect();
+        g.sort();
+        g.dedup();
+        g
+    }
+
+    /// Puts the selected splines and props in collection `group` (none: out of any), as
+    /// one step.
+    pub fn set_group(&mut self, group: Option<String>) {
+        let p = &self.project;
+        let mut ops = Vec::new();
+        for item in self.selection.items() {
+            match item {
+                Item::Spline(s) => {
+                    if let Some(sp) = p.splines.get(s).filter(|sp| sp.group != group) {
+                        let mut sp = sp.clone();
+                        sp.group = group.clone();
+                        ops.push(Op::PutSpline { spline: sp });
+                    }
+                }
+                Item::Prop(i) => {
+                    if let Some(x) = p.props.get(i).filter(|x| x.group != group) {
+                        let mut x = x.clone();
+                        x.group = group.clone();
+                        ops.push(Op::PutProp { prop: x });
+                    }
+                }
+                Item::Road(_) => {}
+            }
+        }
+        let n = ops.len();
+        if n > 0 && self.apply(ops, None) {
+            self.status = match &group {
+                Some(g) => format!("{n} put in \"{g}\""),
+                None => format!("{n} taken out of their collections"),
+            };
+        }
     }
 
     pub fn is_hidden(&self, item: Item) -> bool {
@@ -708,6 +776,40 @@ mod tests {
         assert!(editor.visible(Item::Road(1)) && !editor.visible(Item::Road(0)));
         assert!(!editor.toggle_local());
         assert!(editor.visible(Item::Road(0)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collections_hide_lock_and_take_the_selection() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        for (name, y) in [("a", 0.0), ("b", 10.0), ("c", 20.0)] {
+            let spline = crate::presets::named(&editor.project, "kerb")
+                .unwrap()
+                .spline(
+                    &editor.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(9.0, y, 0.0)],
+                )
+                .unwrap();
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                ..spline
+            };
+            assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        }
+        editor.selection.select(Item::Spline(0));
+        editor.selection.others = vec![Item::Spline(1), Item::Road(0)];
+        editor.set_group(Some("T1 kerbs".into()));
+        assert_eq!(editor.groups(), vec!["T1 kerbs".to_string()]);
+        assert_eq!(editor.group(Item::Spline(1)), Some("T1 kerbs"));
+        assert_eq!(editor.group(Item::Spline(2)), None);
+        editor.shown.hidden_groups.insert("T1 kerbs".into());
+        assert!(!editor.visible(Item::Spline(0)) && editor.visible(Item::Spline(2)));
+        editor.shown.hidden_groups.clear();
+        editor.shown.locked_groups.insert("T1 kerbs".into());
+        assert!(editor.visible(Item::Spline(0)) && !editor.pickable(Item::Spline(0)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

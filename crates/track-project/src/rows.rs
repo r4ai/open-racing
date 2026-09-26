@@ -89,6 +89,7 @@ pub fn copies(road: &Road, smp: &Sampled, row: &PropRow) -> Vec<Prop> {
                 scale: (row.scale * (1.0 + j.scale * wobble(&row.name, k, 3))).max(1e-3),
                 drape: row.drape,
                 collide: row.collide,
+                group: None,
             }
         })
         .collect()

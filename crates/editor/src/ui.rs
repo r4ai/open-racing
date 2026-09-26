@@ -84,6 +84,8 @@ pub enum Popup {
     Handles { at: Vec2 },
     /// `: the view pie.
     Pie { at: Vec2 },
+    /// M: the collection to move the selected splines and props to.
+    Collection { at: Vec2, text: String },
     /// A few commands to choose from (Shift G, Ctrl M).
     Choose {
         at: Vec2,

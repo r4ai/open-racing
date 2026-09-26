@@ -54,6 +54,7 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
     ops.push(Op::PutSpline { spline: wall });
     ops.push(Op::PutProp {
         prop: Prop {
+            group: None,
             name: "stand".into(),
             model: "assets/models/stand.glb".into(),
             pos: DVec3::new(100.0, 40.0, 0.0),

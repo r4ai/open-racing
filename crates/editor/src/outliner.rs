@@ -53,11 +53,12 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                 .filter(|(_, r)| shown(&r.name))
                 .map(|(i, r)| (i, r.name.clone()))
                 .collect();
+            // Splines and props in no collection; those in one are listed under it.
             let splines: Vec<(usize, String, bool)> = p
                 .splines
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| shown(&s.name))
+                .filter(|(_, s)| shown(&s.name) && s.group.is_none())
                 .map(|(i, s)| {
                     let wall = matches!(
                         s.shape,
@@ -70,9 +71,10 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                 .props
                 .iter()
                 .enumerate()
-                .filter(|(_, x)| shown(&x.name))
+                .filter(|(_, x)| shown(&x.name) && x.group.is_none())
                 .map(|(i, x)| (i, x.name.clone()))
                 .collect();
+            let groups = c.editor.groups();
             let main = p.main_road.clone();
 
             category(ui, "Roads", roads.len(), |ui| {
@@ -88,6 +90,13 @@ pub fn show(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                     .body(|ui| road_parts(ui, c, *i));
                 }
             });
+            if !groups.is_empty() {
+                category(ui, "Collections", groups.len(), |ui| {
+                    for g in &groups {
+                        collection(ui, c, state, g, &shown);
+                    }
+                });
+            }
             category(ui, "Kerbs, walls & fences", splines.len(), |ui| {
                 for (i, name, wall) in &splines {
                     ui.horizontal(|ui| {
@@ -318,4 +327,110 @@ fn road_parts(ui: &mut egui::Ui, c: &mut Ctx, r: usize) {
             c.shell.focus = focus;
         }
     }
+}
+
+/// A collection: its eye and lock, a click selecting all it holds, and what it holds.
+fn collection(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    state: &mut State,
+    group: &str,
+    shown: &dyn Fn(&str) -> bool,
+) {
+    let p = &c.editor.project;
+    let members: Vec<(Item, String, &'static str)> = p
+        .splines
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.group.as_deref() == Some(group) && shown(&s.name))
+        .map(|(i, s)| {
+            let icon = match s.shape {
+                open_racing_track_project::project::Shape::Wall { .. } => "🚧",
+                _ => "〰",
+            };
+            (Item::Spline(i), s.name.clone(), icon)
+        })
+        .chain(
+            p.props
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| x.group.as_deref() == Some(group) && shown(&x.name))
+                .map(|(i, x)| (Item::Prop(i), x.name.clone(), "📦")),
+        )
+        .collect();
+    let id = ui.make_persistent_id(("outliner collection", group));
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+        .show_header(ui, |ui| {
+            let sh = &mut c.editor.shown;
+            let hidden = sh.hidden_groups.contains(group);
+            if ui
+                .add(egui::Button::new(if hidden { "◌" } else { "👁" }).frame(false))
+                .on_hover_text("Hide or show the whole collection")
+                .clicked()
+                && !sh.hidden_groups.remove(group)
+            {
+                sh.hidden_groups.insert(group.to_string());
+            }
+            let locked = sh.locked_groups.contains(group);
+            if ui
+                .add(egui::Button::new(if locked { "🔒" } else { "🔓" }).frame(false))
+                .on_hover_text("Keep the whole collection from being picked in the view")
+                .clicked()
+                && !sh.locked_groups.remove(group)
+            {
+                sh.locked_groups.insert(group.to_string());
+            }
+            let resp = ui
+                .selectable_label(false, egui::RichText::new(format!("🗀 {group}")).strong())
+                .on_hover_text("Click: select all it holds · right click: menu");
+            if resp.clicked() {
+                let sel = &mut c.editor.selection;
+                *sel = Default::default();
+                for (item, ..) in &members {
+                    if sel.item.is_none() {
+                        sel.select(*item);
+                    } else {
+                        sel.others.push(*item);
+                    }
+                }
+                c.tool.edit = false;
+            }
+            ui.weak(members.len().to_string());
+            resp.context_menu(|ui| {
+                if ui.button("Select all").clicked() {
+                    c.editor.selection = Default::default();
+                    for (item, ..) in &members {
+                        if c.editor.selection.item.is_none() {
+                            c.editor.selection.select(*item);
+                        } else {
+                            c.editor.selection.others.push(*item);
+                        }
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("Remove collection (keep what it holds)")
+                    .clicked()
+                {
+                    c.editor.selection = Default::default();
+                    for (item, ..) in &members {
+                        if c.editor.selection.item.is_none() {
+                            c.editor.selection.select(*item);
+                        } else {
+                            c.editor.selection.others.push(*item);
+                        }
+                    }
+                    c.editor.set_group(None);
+                    ui.close();
+                }
+            });
+        })
+        .body(|ui| {
+            for (item, name, icon) in &members {
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    item_row(ui, c, state, *item, icon, name);
+                });
+            }
+        });
 }

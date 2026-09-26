@@ -220,6 +220,7 @@ fn object_menu(ui: &mut egui::Ui, c: &mut Ctx, item: Item) {
     entry(ui, c, Cmd::Rename);
     entry(ui, c, Cmd::Duplicate);
     entry(ui, c, Cmd::Copy);
+    entry(ui, c, Cmd::MoveToCollection);
     if !matches!(item, Item::Prop(_)) {
         entry(ui, c, Cmd::Join);
         entry(ui, c, Cmd::Reverse);

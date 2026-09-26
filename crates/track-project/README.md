@@ -121,6 +121,7 @@ trackctl guide                          # this text
 - `drape: true` lays it on whatever is under the line (roads, then terrain) and ignores the nodes' heights. Otherwise it follows the nodes.
 - The `Band` shape is drivable: it takes a `width` and a profile. It lies centred on the line, or to its `Left` or `Right`. `lift` raises it above what is under it.
 - The `Wall` shape stands on the line. A `thickness` of 0 gives a thin rail or fence, which wants a double-sided material. With `collide: false`, cars pass through it.
+- `group: Some("T1 kerbs")` keeps a spline in a collection, as props may be too: the editor's outliner lists, hides, locks and selects a collection as one.
 
 **Surfaces.** A surface's `kind` is one of `Asphalt`, `Kerb`, `Runoff`, `Grass`, `Turf`, `Gravel` or `Dirt`.
 

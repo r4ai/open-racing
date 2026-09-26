@@ -1103,6 +1103,9 @@ pub struct Spline {
     /// The strip or wall type it was made from: changing the type changes it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
+    /// The collection it is kept in, as the editor's outliner shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 impl Spline {
@@ -1132,6 +1135,9 @@ pub struct Prop {
     /// Whether cars collide with it.
     #[serde(default)]
     pub collide: bool,
+    /// The collection it is kept in, as the editor's outliner shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 fn one() -> f64 {

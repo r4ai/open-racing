@@ -84,6 +84,8 @@ pub enum Cmd {
     HandleMenu,
     ToggleClosed,
     Duplicate,
+    /// M: move the selected splines and props to a collection.
+    MoveToCollection,
     Copy,
     /// Shift G.
     SimilarMenu,
@@ -165,6 +167,7 @@ impl Cmd {
             Handles(HandleMode::Free),
             ToggleClosed,
             Duplicate,
+            MoveToCollection,
             Copy,
             SelectSimilar(Similar::Kind),
             SelectSimilar(Similar::Type),
@@ -237,6 +240,7 @@ impl Cmd {
             ToggleClosed => "Toggle Closed Loop".into(),
             Duplicate => "Duplicate".into(),
             Copy => "Copy".into(),
+            MoveToCollection => "Move to Collection…".into(),
             SimilarMenu => "Select Similar…".into(),
             SelectSimilar(Similar::Kind) => "Select Similar: Kind".into(),
             SelectSimilar(Similar::Type) => "Select Similar: Type or Model".into(),
@@ -260,9 +264,9 @@ impl Cmd {
             SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | ToggleEdit
             | SimilarMenu | SelectSimilar(_) => "Select",
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
-            | HandleMenu | ToggleClosed | Duplicate | Copy | MirrorMenu | Mirror(_) | Split
-            | Join | Reverse | SetMain | Rename | SmoothHeights | SmoothShape | Flatten
-            | EvenGrade => "Edit",
+            | HandleMenu | ToggleClosed | Duplicate | MoveToCollection | Copy | MirrorMenu
+            | Mirror(_) | Split | Join | Reverse | SetMain | Rename | SmoothHeights
+            | SmoothShape | Flatten | EvenGrade => "Edit",
             View(_) | ToggleOrtho | Walk | Replay | FrameSelected | FrameAll | ViewPie
             | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap | ToggleProportional
             | LocalView | Hide | HideOthers | Reveal => "View",
@@ -313,6 +317,7 @@ impl Cmd {
             ToggleClosed => "Alt C",
             Duplicate => "Shift D",
             Copy => "Ctrl C",
+            MoveToCollection => "M",
             SimilarMenu => "Shift G",
             MirrorMenu => "Ctrl M",
             Split => "Y",
@@ -343,6 +348,13 @@ impl Cmd {
             Extrude | Handles(_) | HandleMenu => node,
             Width | Tilt => sel.road().is_some(),
             Duplicate | Copy | MirrorMenu | Mirror(_) => sel.item.is_some(),
+            MoveToCollection => {
+                !c.tool.edit
+                    && sel
+                        .items()
+                        .iter()
+                        .any(|i| matches!(i, Item::Spline(_) | Item::Prop(_)))
+            }
             SimilarMenu | SelectSimilar(_) => sel.item.is_some() && !c.tool.edit,
             Split => node,
             Join => line && !sel.others.is_empty(),
@@ -483,6 +495,12 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         ToggleClosed => edit::toggle_closed(c.editor),
         Duplicate => viewport::duplicate(c.editor, c.tool, c.built, at),
         Copy => c.shell.copy = true,
+        MoveToCollection => {
+            c.shell.popup = Some(Popup::Collection {
+                at,
+                text: String::new(),
+            })
+        }
         SimilarMenu => {
             c.shell.popup = Some(Popup::Choose {
                 at,
@@ -598,6 +616,7 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
         run_if(Cmd::SelectInvert, Key::I, Modifiers::COMMAND, c);
         run_if(Cmd::Join, Key::J, Modifiers::COMMAND, c);
         run_if(Cmd::SimilarMenu, Key::G, Modifiers::SHIFT, c);
+        run_if(Cmd::MoveToCollection, Key::M, none, c);
         run_if(Cmd::MirrorMenu, Key::M, Modifiers::COMMAND, c);
         run_if(Cmd::Split, Key::Y, none, c);
         run_if(Cmd::ViewPie, Key::Backtick, none, c);

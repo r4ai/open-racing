@@ -110,6 +110,7 @@ pub fn place(editor: &mut Editor, model: &Path, at: glam::DVec3) {
         .map_or("prop".into(), |s| s.to_string_lossy().into_owned());
     let name = crate::presets::unique_prop_name(&editor.project, &stem);
     let prop = Prop {
+        group: None,
         name,
         model: model.to_path_buf(),
         pos: at,

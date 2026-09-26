@@ -19,6 +19,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
     let mut changed = false;
     section(ui, "Spline", ("spline", i), true, |ui| {
         name_row(ui, c, state, Item::Spline(i));
+        collection_row(ui, c, before.group.as_deref());
         changed |= check(ui, &mut sp.closed, "Closed loop");
         changed |= row(ui, "", |ui| {
             ui.checkbox(&mut sp.drape, "Follow the ground")
@@ -164,6 +165,18 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
     });
 }
 
+/// The collection an item is kept in, and a button to move it (and the rest of the
+/// selection) to another.
+fn collection_row(ui: &mut egui::Ui, c: &mut Ctx, group: Option<&str>) {
+    row(ui, "Collection", |ui| {
+        match group {
+            Some(g) => ui.label(format!("🗀 {g}")),
+            None => ui.weak("none"),
+        };
+        commands::button_as(ui, c, Cmd::MoveToCollection, "Move…");
+    });
+}
+
 /// A prop's place, turn, size and flags; the sidebar shows them too.
 pub fn prop_fields(ui: &mut egui::Ui, editor: &mut Editor, i: usize) {
     let Some(before) = editor.project.props.get(i).cloned() else {
@@ -202,6 +215,8 @@ pub(super) fn prop_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, librar
     };
     section(ui, "Prop", ("prop", i), true, |ui| {
         name_row(ui, c, state, Item::Prop(i));
+        let group = c.editor.project.props[i].group.clone();
+        collection_row(ui, c, group.as_deref());
         let mut p = c.editor.project.props[i].clone();
         let mut changed = false;
         row(ui, "Model", |ui| {

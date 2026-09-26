@@ -21,6 +21,7 @@ pub fn show(ctx: &egui::Context, c: &mut Ctx) {
         Popup::Handles { at } => handles(ctx, at),
         Popup::Pie { at } => pie(ctx, c, at),
         Popup::Choose { at, of } => choose(ctx, c, at, of),
+        Popup::Collection { at, text } => collection(ctx, c, at, text),
     };
     c.shell.popup = keep;
     if let Some(cmd) = chosen {
@@ -144,6 +145,44 @@ fn rename(
         return (None, None);
     }
     (Some(Popup::Rename { at, item, text }), None)
+}
+
+/// Move to Collection (M): an existing collection, a new one typed, or none.
+fn collection(
+    ctx: &egui::Context,
+    c: &mut Ctx,
+    at: Vec2,
+    mut text: String,
+) -> (Option<Popup>, Option<Cmd>) {
+    let groups = c.editor.groups();
+    let mut chosen: Option<Option<String>> = None;
+    let (_, outside) = popup_area(ctx, "collection", pos(at) - egui::vec2(20.0, 12.0), |ui| {
+        ui.set_min_width(200.0);
+        ui.strong("Move to Collection");
+        ui.separator();
+        for g in &groups {
+            if ui.button(format!("🗀 {g}")).clicked() {
+                chosen = Some(Some(g.clone()));
+            }
+        }
+        let resp = ui.add(egui::TextEdit::singleline(&mut text).hint_text("new collection"));
+        resp.request_focus();
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !text.trim().is_empty() {
+            chosen = Some(Some(text.trim().to_string()));
+        }
+        ui.separator();
+        if ui.button("None (out of any)").clicked() {
+            chosen = Some(None);
+        }
+    });
+    if let Some(g) = chosen {
+        c.editor.set_group(g);
+        return (None, None);
+    }
+    if outside || escape(ctx) {
+        return (None, None);
+    }
+    (Some(Popup::Collection { at, text }), None)
 }
 
 /// A titled list of commands at the pointer.
