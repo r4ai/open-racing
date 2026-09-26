@@ -1,0 +1,11 @@
+[package]
+name = "open-racing-machine-project"
+description = "Machines built from parts (frame, engine, exhaust, suspension, tyres…), their operations, and their baking into car packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-engine-sim.workspace = true
+serde.workspace = true
+ron.workspace = true

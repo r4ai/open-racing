@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/train-burn", "crates/app", "crates/track-render", "crates/track-project", "crates/editor"]
-default-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/track-project"]
+members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/train-burn", "crates/app", "crates/track-render", "crates/track-project", "crates/editor", "crates/engine-sim", "crates/machine-project", "crates/machine-editor"]
+default-members = ["crates/sim", "crates/env", "crates/api", "crates/track", "crates/car", "crates/ac", "crates/track-project", "crates/engine-sim", "crates/machine-project"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,8 @@ open-racing-car = { path = "crates/car" }
 open-racing-ac = { path = "crates/ac" }
 open-racing-track-render = { path = "crates/track-render" }
 open-racing-track-project = { path = "crates/track-project" }
+open-racing-engine-sim = { path = "crates/engine-sim" }
+open-racing-machine-project = { path = "crates/machine-project" }
 bevy = { version = "0.19", features = ["serialize", "dds", "pbr_light_textures"] }
 glam = { version = "0.33", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +34,14 @@ opt-level = 1
 # The track editor rebuilds the whole track in the background on every edit: its
 # builder runs optimised, so long circuits show edits in a fraction of a second.
 [profile.dev.package.open-racing-track-project]
+opt-level = 3
+
+# The machine tool's engine simulator solves the gas dynamics of a whole engine in real
+# time, and its projects bake cars through it: both run optimised in dev builds too.
+[profile.dev.package.open-racing-engine-sim]
+opt-level = 3
+
+[profile.dev.package.open-racing-machine-project]
 opt-level = 3
 
 [profile.dev.package."*"]

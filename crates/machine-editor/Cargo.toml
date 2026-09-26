@@ -1,0 +1,13 @@
+[package]
+name = "open-racing-machine-editor"
+description = "Machine editor: assemble cars from parts and develop engines on a simulated dyno"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Faster incremental builds while developing: links Bevy as a DLL. Not for release builds.
+dev = []
+
+[dependencies]
+open-racing-machine-project.workspace = true
