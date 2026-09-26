@@ -97,7 +97,12 @@ pub fn decode(encoded: &[u8]) -> Result<Image, String> {
 /// Block-compresses an image into a DDS with a complete mip chain: BC1 when it is
 /// opaque, BC3 otherwise.
 pub fn encode(image: Image) -> Vec<u8> {
-    finish(Source::Pixels(image), Mips::Complete).expect("pixel sources are always encoded")
+    encode_with(image, Mips::Complete)
+}
+
+/// Block-compresses an image into a DDS with the mip levels `mips` asks for.
+pub fn encode_with(image: Image, mips: Mips) -> Vec<u8> {
+    finish(Source::Pixels(image), mips).expect("pixel sources are always encoded")
 }
 
 /// `Ok(None)` for DDS variants that are passed through unchanged.

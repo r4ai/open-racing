@@ -51,6 +51,10 @@ pub struct Project {
     pub main_road: String,
     pub markers: Markers,
     pub terrain: Terrain,
+    /// The sky and the light: the time of day and the season, the weather, and how the
+    /// picture is exposed. The game starts in them; the editor's view is lit by them.
+    #[serde(default)]
+    pub environment: open_racing_track::Environment,
     /// Where the project's (0, 0) lies on the Earth, once a real place was brought in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geo: Option<crate::geo::Geo>,
@@ -1339,9 +1343,9 @@ pub struct LayerStroke {
 }
 
 /// A brush stroke over the ground, seen from above: the path its middle took, how far
-/// it reached and how strongly it acted. It acts fully within half its radius of its
-/// path and less beyond, easing smoothly to nothing at `radius`; a stroke acts once
-/// wherever it passes, however often it crossed itself.
+/// it reached and how strongly it acted. It acts fully within `hardness` of its radius
+/// of its path and less beyond, easing smoothly to nothing at `radius`; a stroke acts
+/// once wherever it passes, however often it crossed itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     pub brush: Brush,
@@ -1354,13 +1358,32 @@ pub struct Stroke {
     /// Its path, m.
     pub points: Vec<DVec2>,
     /// Its path is a closed outline, as a lasso: it acts fully inside it, easing to
-    /// nothing `radius` outside it.
+    /// nothing outside it over twice the soft part of its radius (`radius` at the
+    /// default hardness).
     #[serde(default, skip_serializing_if = "is_false")]
     pub fill: bool,
+    /// The share of its radius it acts fully within, 0 to 1: 0 eases out from its path,
+    /// 1 has a hard edge at `radius`.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub hardness: f64,
+    /// A shape of texture it acts through, in patches (see `stamp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<crate::stamp::Stamp>,
 }
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+/// A stroke's hardness unless it says otherwise.
+pub const HARDNESS: f64 = 0.5;
+
+fn half() -> f64 {
+    HARDNESS
+}
+
+fn is_half(v: &f64) -> bool {
+    *v == HARDNESS
 }
 
 /// What a stroke does.
@@ -1400,10 +1423,21 @@ impl Stroke {
         )
     }
 
-    /// How much it acts at `p`: fully within half its radius of its path, easing
-    /// smoothly to nothing at `radius` from it.
+    /// How much it acts at `p`: fully within its hardness of its radius from its
+    /// path, easing smoothly to nothing at `radius` from it, and as much as its stamp
+    /// lets it there.
     pub fn weight(&self, p: DVec2) -> f64 {
+        let w = self.reach(p);
+        match &self.stamp {
+            Some(s) if w > 0.0 => w * s.at(p),
+            _ => w,
+        }
+    }
+
+    /// How much it acts at `p` by its path, radius and hardness.
+    fn reach(&self, p: DVec2) -> f64 {
         let smooth = |t: f64| t * t * (3.0 - 2.0 * t);
+        let soft = (1.0 - self.hardness.clamp(0.0, 1.0)) * self.radius;
         if self.fill && self.points.len() > 2 {
             if inside(&self.points, p) {
                 return 1.0;
@@ -1411,17 +1445,21 @@ impl Stroke {
             // Outside the outline, its closing side included.
             let closing = [self.points[self.points.len() - 1], self.points[0]];
             let d = distance_to_path(&self.points, p).min(distance_to_path(&closing, p));
-            return if self.radius <= 0.0 || d >= self.radius {
+            let reach = 2.0 * soft;
+            return if reach <= 0.0 || d >= reach {
                 0.0
             } else {
-                smooth(1.0 - d / self.radius)
+                smooth(1.0 - d / reach)
             };
         }
         let d = distance_to_path(&self.points, p);
         if self.radius <= 0.0 || d >= self.radius {
             return 0.0;
         }
-        smooth(((self.radius - d) / (0.5 * self.radius)).min(1.0))
+        if soft <= 1e-9 {
+            return 1.0;
+        }
+        smooth(((self.radius - d) / soft).min(1.0))
     }
 
     pub fn is_valid(&self) -> bool {
@@ -1431,6 +1469,8 @@ impl Stroke {
             Brush::Smooth | Brush::Paint | Brush::Erase => (0.0..=1.0).contains(&self.strength),
         };
         strength
+            && self.stamp.is_none_or(|s| s.is_valid())
+            && (0.0..=1.0).contains(&self.hardness)
             && self.radius > 0.0
             && self.radius.is_finite()
             && !self.points.is_empty()
@@ -1471,10 +1511,16 @@ pub fn distance_to_path(points: &[DVec2], p: DVec2) -> f64 {
 /// Models scattered over the ground where brush strokes painted them: trees, bushes,
 /// rocks, spectators. Copies stand about `spacing` apart where fully painted and fewer
 /// where the strokes were light, varying in size and turn, the same way every build.
-/// They keep off the roads and their strips, and off ground too steep.
+/// They keep off the roads and their strips, and off ground too steep. Single copies
+/// can be taken out of what was painted, and copies planted one by one, each where it
+/// was put.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scatter {
     pub name: String,
+    /// The number its copies' places are drawn from; 0 draws them from the name. Kept
+    /// when it is renamed, so that its copies stay where they are.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seed: u64,
     /// The models, each picked in proportion to its weight.
     pub models: Vec<ScatterModel>,
     /// Distance between neighbouring copies where fully painted, m.
@@ -1493,9 +1539,32 @@ pub struct Scatter {
     /// Whether cars collide with them.
     #[serde(default)]
     pub collide: bool,
+    /// Whether they cast shadows (long grass need not).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub shadows: bool,
+    /// Out to this distance from the camera copies show their models in full; beyond
+    /// it, a lighter far model (each model's `far`, or a picture of it on crossed
+    /// cards), m.
+    #[serde(default = "detail_distance")]
+    pub detail: f64,
+    /// The farthest copies are drawn from, m; 0 draws them however far.
+    #[serde(default = "draw_distance")]
+    pub draw: f64,
+    /// How much the copies' leaf colours differ from each other, 0 (none) to 1.
+    #[serde(default = "variety", skip_serializing_if = "is_variety")]
+    pub variety: f64,
+    /// How its places are laid out where it is painted.
+    #[serde(default, skip_serializing_if = "Layout::is_grid")]
+    pub layout: Layout,
     /// Where they were painted and wiped out (`Paint` and `Erase`), in order.
     #[serde(default)]
     pub strokes: Vec<Stroke>,
+    /// Painted copies taken out, by their cell of the scatter's grid (`Copy::id`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<[i64; 2]>,
+    /// Copies planted one by one, each standing where it was put.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placed: Vec<Plant>,
     /// The collection it is kept in, as the editor's outliner shows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -1503,6 +1572,57 @@ pub struct Scatter {
 
 fn steepest() -> f64 {
     35.0
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+fn detail_distance() -> f64 {
+    150.0
+}
+
+fn draw_distance() -> f64 {
+    2500.0
+}
+
+/// How much copies' leaf colours differ unless a scatter says otherwise.
+pub const VARIETY: f64 = 0.4;
+
+fn variety() -> f64 {
+    VARIETY
+}
+
+fn is_variety(v: &f64) -> bool {
+    *v == VARIETY
+}
+
+impl Scatter {
+    /// The number its copies' places are drawn from.
+    pub fn seed(&self) -> u64 {
+        if self.seed != 0 {
+            return self.seed;
+        }
+        self.name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Removes model `i`, and the copies planted of it; those of later models follow
+    /// them down.
+    pub fn remove_model(&mut self, i: usize) {
+        self.models.remove(i);
+        self.placed.retain(|p| p.model != i);
+        for p in &mut self.placed {
+            if p.model > i {
+                p.model -= 1;
+            }
+        }
+    }
 }
 
 /// A model of a scatter, and how often it is picked.
@@ -1513,6 +1633,118 @@ pub struct ScatterModel {
     pub model: PathBuf,
     #[serde(default = "one")]
     pub weight: f64,
+    /// A lighter model shown beyond the scatter's detail distance, made to stand in
+    /// for this one; without it, pictures of this one on crossed cards are made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far: Option<PathBuf>,
+    /// The project's materials used for some of the model's own, by their place in
+    /// the model (its first material is 0): bark or leaves of another texture.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<MaterialSlot>,
+    /// What kind of plant it is, if any: how it moves in the wind and changes with the
+    /// seasons. Left out, a built-in model's own kind, or else `Evergreen`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Kind>,
+}
+
+/// How a scatter's places are laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Layout {
+    /// A grid `spacing` apart, each place jittered in its cell: natural, a little
+    /// clumped.
+    #[default]
+    Grid,
+    /// Evenly, as blue noise: `spacing` apart on the whole, none nearer than about half
+    /// of it.
+    Even,
+    /// In rows along the roads, `spacing` apart along them and across, from `clearance`
+    /// beyond their outer edges, every other row staggered, facing the road: avenues,
+    /// orchards, rows of spectators.
+    Rows,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 3] = [Layout::Grid, Layout::Even, Layout::Rows];
+
+    pub fn is_grid(&self) -> bool {
+        *self == Layout::Grid
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Layout::Grid => "Natural",
+            Layout::Even => "Even",
+            Layout::Rows => "Rows along roads",
+        }
+    }
+}
+
+/// What kind of thing a scatter's model is: a kind of plant, a crowd or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Kind {
+    /// Not a plant: rocks, cones, stands. It stands still in the wind.
+    Rigid,
+    /// A conifer or other evergreen: it sways, and stays green.
+    Evergreen,
+    /// A broadleaf tree or bush: it sways, its leaves turn in autumn and fall in
+    /// winter, and come out fresh in spring.
+    Deciduous,
+    /// Long grass: it bends far in the wind, dries in late summer and is straw in
+    /// winter.
+    Grass,
+    /// Spectators: each stands facing the nearest road, in clothes of its own colour.
+    Crowd,
+}
+
+impl ScatterModel {
+    pub fn new(model: PathBuf, weight: f64) -> Self {
+        Self {
+            model,
+            weight,
+            far: None,
+            materials: vec![],
+            kind: None,
+        }
+    }
+
+    /// What kind of plant it is.
+    pub fn kind(&self) -> Kind {
+        self.kind.unwrap_or_else(|| {
+            crate::shapes::name(&self.model)
+                .and_then(crate::shapes::kind)
+                .unwrap_or(Kind::Evergreen)
+        })
+    }
+
+    /// The project's material used for the model's material `slot`, if one is.
+    pub fn material(&self, slot: usize) -> Option<&str> {
+        self.materials
+            .iter()
+            .find(|m| m.slot == slot)
+            .map(|m| m.material.as_str())
+    }
+}
+
+/// One of a model's materials, and the project's material used in its place.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaterialSlot {
+    pub slot: usize,
+    pub material: MaterialId,
+}
+
+/// A copy of a scatter's model planted on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Plant {
+    /// Which of the scatter's models.
+    pub model: usize,
+    /// Where it stands, seen from above, m; it stands on the ground there.
+    pub pos: DVec2,
+    /// Turn about its up, radians.
+    #[serde(default)]
+    pub yaw: f64,
+    /// Size, times the model's own.
+    #[serde(default = "one")]
+    pub scale: f64,
 }
 
 /// A shape given to the ground away from the roads: round about `center`, or, with
@@ -1693,6 +1925,7 @@ impl Project {
             },
             reference: None,
             geo: None,
+            environment: Default::default(),
         }
     }
 
@@ -1997,6 +2230,11 @@ impl Project {
                 return invalid(format!("two landforms are named \"{}\"", l.name));
             }
         }
+        if !self.environment.is_valid() {
+            return invalid(
+                "environment: the hour 0 to 24, the month 1 to 12, a latitude of -89 to 89°, a temperature of -30 to 30 K, an exposure of -5 to 5 EV and a haze of 0 to 10".into(),
+            );
+        }
         self.validate_brushes()
     }
 
@@ -2067,8 +2305,30 @@ impl Project {
                 .any(|k| !k.is_valid() || !matches!(k.brush, Brush::Paint | Brush::Erase))
             {
                 return invalid(
-                    "a stroke needs points, a radius, the Paint or Erase brush and a strength of 0 to 1",
+                    "a stroke needs points, a radius, the Paint or Erase brush, a strength and a hardness of 0 to 1",
                 );
+            }
+            if !(s.detail >= 0.0 && s.detail.is_finite() && s.draw >= 0.0 && s.draw.is_finite()) {
+                return invalid("its detail and draw distances must be 0 m or more");
+            }
+            if s.placed.iter().any(|p| {
+                p.model >= s.models.len()
+                    || !p.pos.is_finite()
+                    || !p.yaw.is_finite()
+                    || !(p.scale > 0.0 && p.scale.is_finite())
+            }) {
+                return invalid(
+                    "a planted copy needs one of its models, a place and a size above 0",
+                );
+            }
+            for m in &s.models {
+                if let Some(slot) = m
+                    .materials
+                    .iter()
+                    .find(|x| self.material_index(&x.material).is_none())
+                {
+                    return invalid(&format!("no material named \"{}\"", slot.material));
+                }
             }
         }
         Ok(())

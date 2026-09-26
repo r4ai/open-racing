@@ -14,11 +14,14 @@ mod commands;
 mod corners;
 mod curve_graph;
 mod edit;
+mod graph;
 mod jobs;
 mod lay;
 mod menus;
 mod outliner;
 mod overlay;
+mod palette;
+mod plants;
 mod popups;
 mod presets;
 mod preview;
@@ -26,9 +29,11 @@ mod profile;
 mod properties;
 mod reference;
 mod sidebar;
+mod sky;
 mod state;
 mod theme;
 mod ui;
+mod vegetation;
 mod viewport;
 
 #[cfg(test)]
@@ -65,10 +70,14 @@ struct Args {
     /// Look at this corner of the focused road (or the main road), by its number.
     #[arg(long)]
     corner: Option<usize>,
-    /// Open this tab of the properties: track, markers, terrain, reference, library,
-    /// object, corners, strips, lines or barriers.
+    /// Open this tab of the properties: track, markers, terrain, scatter, world,
+    /// reference, library, object, corners, strips, lines, barriers or rows.
     #[arg(long)]
     tab: Option<String>,
+    /// Show this graph in the Curves area below the view: elevation, left, right (the
+    /// road's widths) or bank.
+    #[arg(long)]
+    curves: Option<String>,
     /// How far the camera stands from what it looks at, m.
     #[arg(long)]
     distance: Option<f32>,
@@ -78,6 +87,12 @@ struct Args {
     /// Start with this tool: select, move, rotate, scale, sculpt, paint or scatter.
     #[arg(long)]
     tool: Option<String>,
+    /// With the Scatter tool, work on the scatter of this name.
+    #[arg(long)]
+    scatter: Option<String>,
+    /// With the Scatter tool, start in this mode: paint, plant or select.
+    #[arg(long)]
+    scatter_mode: Option<String>,
     /// How far above the horizon the camera looks down from, degrees (90 from above).
     #[arg(long)]
     pitch: Option<f32>,
@@ -95,6 +110,9 @@ struct Args {
 pub struct StartCorner(pub usize);
 #[derive(Resource)]
 pub struct StartTab(pub ui::PropTab);
+/// The graph the Curves area shows, from the command line.
+#[derive(Resource)]
+pub struct StartCurves(pub curve_graph::Shown);
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -108,13 +126,16 @@ fn auto_screenshot(
     mut commands: Commands,
     shot: Option<ResMut<AutoScreenshot>>,
     built: Res<preview::Built>,
+    weather: Res<sky::ProjectWeather>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut shot) = shot else { return };
-    // Wait for the first build, then for its meshes and textures to reach the GPU.
-    if built.count == 0 {
+    // Wait for the first build and the sky, then for their meshes and textures to reach
+    // the GPU.
+    if built.count == 0 || !weather.ready() {
         return;
     }
+
     if shot.wait > 0 {
         shot.wait -= 1;
         return;
@@ -142,6 +163,7 @@ pub struct StartOnGround;
 pub type Start<'w> = (
     Option<Res<'w, StartCorner>>,
     Option<Res<'w, StartTab>>,
+    Option<Res<'w, StartCurves>>,
     Option<Res<'w, StartDistance>>,
     Option<Res<'w, StartOnGround>>,
 );
@@ -228,6 +250,32 @@ fn main() {
             }
         }
     }
+    if let Some(name) = &args.scatter {
+        if !editor.project.scatter.iter().any(|s| &s.name == name) {
+            eprintln!("no scatter \"{name}\"");
+            std::process::exit(1);
+        }
+        tool.active = viewport::ToolKind::Scatter;
+        tool.brush.scatter = Some(name.clone());
+    }
+    if let Some(mode) = &args.scatter_mode {
+        match plants::ScatterMode::ALL
+            .into_iter()
+            .find(|m| m.label().eq_ignore_ascii_case(mode))
+        {
+            Some(m) => {
+                tool.active = viewport::ToolKind::Scatter;
+                tool.brush.mode = m;
+                if tool.brush.scatter.is_none() {
+                    tool.brush.scatter = editor.project.scatter.first().map(|s| s.name.clone());
+                }
+            }
+            None => {
+                eprintln!("no scatter mode \"{mode}\": paint, plant or select");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.clean {
         tool.overlays = viewport::Overlays {
             lines: false,
@@ -238,6 +286,7 @@ fn main() {
             props: false,
             scatter: true,
             xray: false,
+            sky: true,
         };
     }
 
@@ -262,6 +311,17 @@ fn main() {
             }
         }
     }
+    if let Some(name) = &args.curves {
+        match curve_graph::Shown::named(name) {
+            Some(shown) => {
+                app.insert_resource(StartCurves(shown));
+            }
+            None => {
+                eprintln!("no graph \"{name}\": elevation, left, right or bank");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(path) = args.screenshot {
         app.insert_resource(AutoScreenshot {
             path,
@@ -277,7 +337,13 @@ fn main() {
         }),
         ..default()
     }))
-    .add_plugins((EguiPlugin::default(), TrackModelPlugin))
+    .add_plugins((
+        EguiPlugin::default(),
+        TrackModelPlugin,
+        open_racing_sky::SkyPlugin::<sky::ProjectWeather>::default(),
+        viewport::GizmoGroups,
+    ))
+    .init_resource::<sky::ProjectWeather>()
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
@@ -286,7 +352,9 @@ fn main() {
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()
     .init_resource::<preview::GroundPaint>()
+    .init_resource::<preview::Scattered>()
     .init_resource::<preview::SharedCache>()
+    .init_resource::<palette::Palette>()
     .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
     .init_resource::<reference::Shown>()
@@ -316,6 +384,9 @@ fn main() {
             viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
+            sky::weather,
+            sky::wind,
+            sky::look,
             auto_screenshot,
         )
             .chain(),

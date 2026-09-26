@@ -13,6 +13,7 @@ dev = ["bevy/dynamic_linking"]
 open-racing-sim.workspace = true
 open-racing-track.workspace = true
 open-racing-track-project.workspace = true
+open-racing-sky.workspace = true
 open-racing-track-render.workspace = true
 bevy.workspace = true
 bevy_egui = "0.42"

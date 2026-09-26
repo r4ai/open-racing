@@ -19,6 +19,7 @@ pub mod corners;
 pub mod curve;
 pub mod dem;
 pub mod geo;
+pub mod impostor;
 pub mod inspect;
 pub mod lines;
 pub mod model;
@@ -32,6 +33,7 @@ pub mod rows;
 pub mod scatter;
 pub mod shapes;
 pub mod spline;
+pub mod stamp;
 pub mod terrain;
 pub mod validate;
 

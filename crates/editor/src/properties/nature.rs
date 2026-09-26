@@ -2,9 +2,13 @@
 //! it (woods, bushes, rocks): their settings here, their strokes painted in the view.
 
 use open_racing_track_project::ops::StrokeTarget;
-use open_racing_track_project::project::{MAX_LAYERS, ScatterModel, Terrain};
+use open_racing_track_project::project::{
+    Kind, Layout, MAX_LAYERS, MaterialSlot, Scatter, ScatterModel, Terrain,
+};
 
 use super::*;
+use crate::plants::ScatterMode;
+use crate::vegetation::{BrushPreset, Category};
 use crate::viewport::ToolKind;
 
 /// A button that picks a brush tool (and what it paints) to paint in the view.
@@ -171,16 +175,24 @@ pub(super) fn layers_ui(ui: &mut egui::Ui, c: &mut Ctx, t: &mut Terrain) -> bool
 }
 
 /// The scatters: woods, bushes and rocks painted over the ground.
-pub(super) fn scatter_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
-    ui.weak("Models painted over the ground with the Scatter brush: woods, bushes, rocks, long grass. They keep off the roads, kerbs and ground too steep, and vary in size and turn.");
-    ui.horizontal(|ui| {
-        brush_button(
-            ui,
-            c,
-            ToolKind::Scatter,
-            "🌲 Scatter in the view",
-            "The Scatter tool: drag over the ground to plant, Ctrl to wipe out",
-        );
+pub(super) fn scatter_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library, state: &mut State) {
+    ui.weak("Models painted over the ground with the Scatter tool, or planted one by one: woods, bushes, rocks, long grass. Painted copies keep off the roads, kerbs and ground too steep, and vary in size and turn. More kinds, and your own, are on the palette below the view while the tool is on.");
+    ui.horizontal_wrapped(|ui| {
+        for (mode, label) in [
+            (ScatterMode::Paint, "🌲 Paint"),
+            (ScatterMode::Plant, "📍 Plant"),
+            (ScatterMode::Select, "⬚ Select"),
+        ] {
+            let on = c.tool.active == ToolKind::Scatter && c.tool.brush.mode == mode;
+            if ui
+                .selectable_label(on, label)
+                .on_hover_text(mode.tip())
+                .clicked()
+            {
+                c.tool.active = ToolKind::Scatter;
+                c.tool.brush.mode = mode;
+            }
+        }
         ui.checkbox(&mut c.tool.overlays.scatter, "Show")
             .on_hover_text("Hide them all while working elsewhere: the view is lighter");
     });
@@ -198,28 +210,142 @@ pub(super) fn scatter_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
         egui::CollapsingHeader::new(header)
             .id_salt(("scatter", k))
             .default_open(project.scatter.len() < 4)
-            .show(ui, |ui| scatter_ui(ui, c, s, &models));
+            .show(ui, |ui| scatter_ui(ui, c, s, &models, state));
     }
     ui.menu_button("+ Scatter", |ui| {
-        for (i, (name, models, ..)) in crate::brush::SCATTER_KINDS.iter().enumerate() {
-            let what: Vec<&str> = models.iter().map(|m| m.0).collect();
+        for kind in crate::vegetation::builtin() {
             if ui
-                .button(*name)
-                .on_hover_text(format!("Built-in {}", what.join(", ")))
+                .button(&kind.name)
+                .on_hover_text(format!("Built-in {}", kind.category.label().to_lowercase()))
                 .clicked()
             {
-                crate::brush::add_scatter(c, i);
+                crate::brush::add_scatter(c, &kind, None);
                 ui.close();
             }
         }
     });
 }
 
+/// A scatter model's far level and the project's materials used for its own.
+fn model_details(
+    ui: &mut egui::Ui,
+    c: &Ctx,
+    s: &Scatter,
+    i: usize,
+    m: &mut ScatterModel,
+    models: &[std::path::PathBuf],
+) -> bool {
+    let mut changed = false;
+    let (_, materials) = names(&c.editor.project);
+    let kind = |f: Kind| match f {
+        Kind::Rigid => "not a plant",
+        Kind::Evergreen => "evergreen",
+        Kind::Deciduous => "broadleaf",
+        Kind::Grass => "grass",
+        Kind::Crowd => "spectators",
+    };
+    row(ui, "Plant", |ui| {
+        egui::ComboBox::from_id_salt(("scatter kind", &s.name, i))
+            .selected_text(kind(m.kind()))
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for f in [
+                    Kind::Evergreen,
+                    Kind::Deciduous,
+                    Kind::Grass,
+                    Kind::Crowd,
+                    Kind::Rigid,
+                ] {
+                    if ui
+                        .selectable_label(m.kind() == f, kind(f))
+                        .clicked()
+                        && m.kind() != f
+                    {
+                        m.kind = Some(f);
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How it moves in the wind and changes with the seasons (the World tab): evergreens sway and stay green, broadleaf trees turn in autumn and are bare in winter, grass bends far and dries to straw; what is not a plant stands still")
+    });
+    let far_label = match &m.far {
+        Some(p) => crate::assets::model_name(p),
+        None => "pictures of it (made)".into(),
+    };
+    row(ui, "Far model", |ui| {
+        egui::ComboBox::from_id_salt(("scatter far", &s.name, i))
+            .selected_text(far_label)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut m.far, None, "pictures of it (made)")
+                    .on_hover_text("Its model drawn from three sides onto crossed cards when the project is built")
+                    .changed();
+                for path in models.iter().filter(|p| **p != m.model) {
+                    changed |= ui
+                        .selectable_value(
+                            &mut m.far,
+                            Some(path.clone()),
+                            path.to_string_lossy(),
+                        )
+                        .changed();
+                }
+            })
+            .response
+            .on_hover_text("What stands in for it beyond the detail distance")
+    });
+    // Its own materials, each with the project's used in its place.
+    let own = c
+        .built
+        .names
+        .iter()
+        .position(|n| *n == s.name)
+        .and_then(|b| c.built.colours.get(b))
+        .and_then(|m| m.get(i))
+        .cloned()
+        .unwrap_or_default();
+    for (slot, colour) in own.iter().enumerate() {
+        let now = m.material(slot).map(str::to_string);
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                r,
+                2.0,
+                egui::Color32::from(egui::Rgba::from_rgb(colour[0], colour[1], colour[2])),
+            );
+            ui.label(format!("Material {slot}"));
+            let mut pick = now.clone();
+            egui::ComboBox::from_id_salt(("scatter material", &s.name, i, slot))
+                .selected_text(now.as_deref().unwrap_or("its own"))
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut pick, None, "its own");
+                    for name in &materials {
+                        ui.selectable_value(&mut pick, Some(name.clone()), name);
+                    }
+                })
+                .response
+                .on_hover_text("A material of the project (the Library tab) in place of the model's own: bark or leaves of your texture, laid by the model's UVs");
+            if pick != now {
+                m.materials.retain(|x| x.slot != slot);
+                if let Some(material) = pick {
+                    m.materials.push(MaterialSlot { slot, material });
+                    m.materials.sort_by_key(|x| x.slot);
+                }
+                changed = true;
+            }
+        });
+    }
+    changed
+}
+
 fn scatter_ui(
     ui: &mut egui::Ui,
     c: &mut Ctx,
-    before: &open_racing_track_project::project::Scatter,
+    before: &Scatter,
     models: &[std::path::PathBuf],
+    state: &mut State,
 ) {
     let mut s = before.clone();
     let mut changed = false;
@@ -237,7 +363,8 @@ fn scatter_ui(
     ui.label("Models");
     let mut remove = None;
     let n = s.models.len();
-    for (i, m) in s.models.iter_mut().enumerate() {
+    for i in 0..n {
+        let mut m = s.models[i].clone();
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("scatter model", k, i))
                 .selected_text(crate::assets::model_name(&m.model))
@@ -263,19 +390,26 @@ fn scatter_ui(
                 remove = Some(i);
             }
         });
+        egui::CollapsingHeader::new("far model and materials")
+            .id_salt(("scatter model details", k, i))
+            .default_open(false)
+            .show(ui, |ui| {
+                changed |= model_details(ui, c, before, i, &mut m, models);
+            });
+        s.models[i] = m;
     }
     if let Some(i) = remove {
-        s.models.remove(i);
+        s.remove_model(i);
         changed = true;
     }
     if ui.small_button("+ Model").clicked() {
-        s.models.push(ScatterModel {
-            model: models
+        s.models.push(ScatterModel::new(
+            models
                 .first()
                 .cloned()
                 .unwrap_or_else(|| open_racing_track_project::shapes::path("pine")),
-            weight: 1.0,
-        });
+            1.0,
+        ));
         changed = true;
     }
     changed |= drag(ui, "Spacing m", &mut s.spacing, 0.05, 0.2..=200.0);
@@ -307,8 +441,59 @@ fn scatter_ui(
     changed |= drag(ui, "Clearance m", &mut s.clearance, 0.1, 0.0..=200.0);
     changed |= drag(ui, "Steepest °", &mut s.max_slope, 0.5, 0.0..=90.0);
     changed |= check(ui, &mut s.collide, "Cars collide with them");
+    changed |= check(ui, &mut s.shadows, "They cast shadows");
+    changed |= row(ui, "Layout", |ui| {
+        let mut changed = false;
+        egui::ComboBox::from_id_salt(("scatter layout", k))
+            .selected_text(s.layout.label())
+            .show_ui(ui, |ui| {
+                for l in Layout::ALL {
+                    changed |= ui.selectable_value(&mut s.layout, l, l.label()).changed();
+                }
+            })
+            .response
+            .on_hover_text("Natural: a jittered grid, a little clumped. Even: spread evenly, none nearer than about half the spacing. Rows along roads: rows the spacing apart beyond the roads' edges and the clearance, facing the road (avenues, spectators)");
+        changed
+    });
+    changed |= row(ui, "Variety", |ui| {
+        ui.add(egui::Slider::new(&mut s.variety, 0.0..=1.0).max_decimals(2))
+            .on_hover_text("How much the copies' leaf colours differ from each other: 0 all alike")
+            .changed()
+    });
+    ui.label("Level of detail");
+    changed |= drag(ui, "In full to m", &mut s.detail, 1.0, 0.0..=5000.0);
+    changed |= drag(ui, "Drawn to m", &mut s.draw, 5.0, 0.0..=20000.0);
+    ui.weak(if s.draw > 0.0 && s.draw <= s.detail {
+        "Drawn in full out to the draw distance, none beyond.".to_string()
+    } else {
+        format!(
+            "In full out to {:.0} m, then each model's far model (pictures of it on crossed cards unless it has one){}.",
+            s.detail,
+            if s.draw > 0.0 {
+                format!(" out to {:.0} m", s.draw)
+            } else {
+                " however far".into()
+            }
+        )
+    });
     row(ui, "Strokes", |ui| ui.label(s.strokes.len().to_string()));
-    ui.horizontal(|ui| {
+    row(ui, "Single copies", |ui| {
+        ui.label(format!(
+            "{} planted, {} taken out",
+            s.placed.len(),
+            s.removed.len()
+        ));
+        if !s.removed.is_empty()
+            && ui
+                .small_button("Bring back")
+                .on_hover_text("The painted copies taken out, back where they were painted")
+                .clicked()
+        {
+            s.removed.clear();
+            changed = true;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
         let painting = c.tool.active == ToolKind::Scatter
             && c.tool.brush.scatter.as_deref() == Some(k.as_str());
         if ui
@@ -317,6 +502,7 @@ fn scatter_ui(
             .clicked()
         {
             c.tool.active = ToolKind::Scatter;
+            c.tool.brush.mode = ScatterMode::Paint;
             c.tool.brush.scatter = Some(k.clone());
         }
         let hidden = c.editor.shown.hidden_scatter.contains(k);
@@ -336,11 +522,72 @@ fn scatter_ui(
                 None,
             );
         }
+        if ui
+            .small_button("Save to my library…")
+            .on_hover_text(
+                "Keep it, its models, materials and brush, as a kind to paint in any project",
+            )
+            .clicked()
+        {
+            state.save_kind = Some((k.clone(), k.clone(), Category::Trees));
+        }
         if ui.small_button("Remove").clicked() {
             c.editor
                 .apply(vec![Op::RemoveScatter { name: k.clone() }], None);
         }
     });
+    if let Some((of, name, category)) = &mut state.save_kind
+        && of == k
+    {
+        let mut done = None;
+        ui.group(|ui| {
+            row(ui, "Name", |ui| ui.text_edit_singleline(name));
+            row(ui, "Shelf", |ui| {
+                egui::ComboBox::from_id_salt(("save kind shelf", k))
+                    .selected_text(category.label())
+                    .show_ui(ui, |ui| {
+                        for cat in Category::ALL {
+                            ui.selectable_value(category, cat, cat.label());
+                        }
+                    })
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                let size = c.tool.brush.size(ToolKind::Scatter);
+                let brush = BrushPreset {
+                    radius: size.radius,
+                    strength: size.strength,
+                    hardness: size.hardness,
+                };
+                let result = crate::vegetation::library_dir()
+                    .ok_or_else(|| "no folder for the library".to_string())
+                    .and_then(|dir| {
+                        crate::vegetation::save(c.editor, k, name.trim(), *category, brush, &dir)
+                            .map(|_| dir)
+                    });
+                c.editor.status = match result {
+                    Ok(dir) => format!(
+                        "saved \"{}\" to your library ({})",
+                        name.trim(),
+                        dir.display()
+                    ),
+                    Err(e) => format!("not saved: {e}"),
+                };
+                state.save_kind = None;
+            }
+            Some(false) => state.save_kind = None,
+            None => {}
+        }
+    }
     if changed {
         c.editor.apply(
             vec![Op::PutScatter { scatter: s }],

@@ -33,6 +33,13 @@ impl Jobs {
         self.bake.is_some()
     }
 
+    /// Drops the last bake's report and lap: another project was opened.
+    pub fn forget(&mut self) {
+        self.report = None;
+        self.passed = None;
+        self.lap.clear();
+    }
+
     /// Bakes the project into `<content>/tracks/<name>/`; `play` launches the game on it
     /// if it passes.
     pub fn bake(&mut self, project: &Project, dir: &Path, play: bool) {

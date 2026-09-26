@@ -12,8 +12,8 @@ use open_racing_track_render::to_bevy;
 use crate::commands::Ctx;
 use crate::properties::{row, section};
 use crate::state::Item;
-use crate::ui::{Focus, PropTab};
-use crate::viewport::View;
+use crate::ui::PropTab;
+use crate::viewport::{Part, View};
 
 /// Whether a strip or barrier of road `r` is held round one of its corners, as last
 /// built. One whose corner is gone (the road was straightened) is edited as any other.
@@ -29,9 +29,8 @@ pub fn held(built: &crate::preview::Built, r: usize, anchor: &Option<Anchor>) ->
 fn road_index(c: &Ctx) -> Option<usize> {
     let p = &c.editor.project;
     c.editor
-        .selection
         .road()
-        .filter(|&r| r < p.roads.len())
+        .map(|(r, _)| r)
         .or_else(|| p.road_index(&p.main_road))
 }
 
@@ -504,14 +503,14 @@ fn corner_ui(
             || k.covers(a, 40.0, smp.length, smp.closed)
             || k.covers(b, 40.0, smp.length, smp.closed)
     };
-    let mut parts: Vec<(String, PropTab, Focus)> = Vec::new();
+    let mut parts: Vec<(String, PropTab, Part)> = Vec::new();
     for side in [Side::Left, Side::Right] {
         for (i, s) in road.strips(side).iter().enumerate() {
             if s.corner.is_none() && s.ranges.iter().any(|g| near(g.from, g.to)) {
                 parts.push((
                     format!("☰ {} ({side:?}, {:.1} m)", s.name, s.width),
                     PropTab::Strips,
-                    Focus::Strip(side, i),
+                    Part::Strip(side, i),
                 ));
             }
         }
@@ -521,7 +520,7 @@ fn corner_ui(
             parts.push((
                 format!("🚧 {} ({:?}, {:.1} m out)", b.name, b.side, b.offset),
                 PropTab::Barriers,
-                Focus::Barrier(i),
+                Part::Barrier(i),
             ));
         }
     }

@@ -87,6 +87,9 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for s in &project.scatter {
         for m in &s.models {
             refs.push((portable(&m.model), format!("scatter {}", s.name)));
+            if let Some(far) = &m.far {
+                refs.push((portable(far), format!("scatter {} (far)", s.name)));
+            }
         }
     }
     if let Some(r) = &project.reference {
@@ -271,6 +274,27 @@ pub fn import(dir: &Path, file: &Path) -> Result<PathBuf, Error> {
     Ok(portable(target.strip_prefix(dir).unwrap_or(&target)))
 }
 
+/// As `import`, unless the same file is in the project already under its own name:
+/// then that one's path. Bringing the same model or texture in again copies nothing.
+pub fn import_once(dir: &Path, file: &Path) -> Result<PathBuf, Error> {
+    if let (Some(kind), Some(name)) = (Kind::of(file), file.file_name()) {
+        let is_gltf = file
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
+        let there = match file.file_stem() {
+            Some(stem) if is_gltf => dir.join(kind.dir()).join(stem).join(name),
+            _ => dir.join(kind.dir()).join(name),
+        };
+        if there.is_file()
+            && let (Ok(a), Ok(b)) = (std::fs::read(&there), std::fs::read(file))
+            && a == b
+        {
+            return Ok(portable(there.strip_prefix(dir).unwrap_or(&there)));
+        }
+    }
+    import(dir, file)
+}
+
 /// Operations that make the project refer to `to` wherever it refers to `from`.
 pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
     let (from, to) = (portable(from), portable(to));
@@ -367,10 +391,18 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
         }
     }
     for s in &project.scatter {
-        if s.models.iter().any(|m| portable(&m.model) == from) {
+        let uses = |m: &crate::project::ScatterModel| {
+            portable(&m.model) == from || m.far.as_ref().is_some_and(|f| portable(f) == from)
+        };
+        if s.models.iter().any(uses) {
             let mut s = s.clone();
-            for m in s.models.iter_mut().filter(|m| portable(&m.model) == from) {
-                m.model = to.clone();
+            for m in &mut s.models {
+                if portable(&m.model) == from {
+                    m.model = to.clone();
+                }
+                if m.far.as_ref().is_some_and(|f| portable(f) == from) {
+                    m.far = Some(to.clone());
+                }
             }
             ops.push(Op::PutScatter { scatter: s });
         }

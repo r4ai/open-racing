@@ -7126,10 +7126,10 @@ dependencies = [
  "bevy_mod_xr",
  "clap",
  "glam 0.33.8",
- "half",
  "open-racing-api",
  "open-racing-car",
  "open-racing-sim",
+ "open-racing-sky",
  "open-racing-track",
  "open-racing-track-render",
  "open-racing-train-burn",
@@ -7159,6 +7159,7 @@ dependencies = [
  "clap",
  "glam 0.33.8",
  "open-racing-sim",
+ "open-racing-sky",
  "open-racing-track",
  "open-racing-track-project",
  "open-racing-track-render",
@@ -7188,6 +7189,16 @@ dependencies = [
  "rayon",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "open-racing-sky"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam 0.33.8",
+ "half",
+ "open-racing-sim",
 ]
 
 [[package]]

@@ -16,13 +16,15 @@ use crate::assets::Library;
 use crate::commands::{self, Cmd, Ctx};
 use crate::edit;
 use crate::state::{Editor, Item};
-use crate::ui::{Focus, PropTab};
+use crate::ui::PropTab;
+use crate::viewport::Part;
 
 mod library;
 mod nature;
 mod object;
 mod road;
 mod track;
+mod world;
 
 pub use track::model_button;
 
@@ -49,6 +51,8 @@ pub struct State {
     pit_plan: Option<open_racing_track_project::pitlane::Plan>,
     /// The track's tab is shown only because nothing was selected.
     stand_in: bool,
+    /// A scatter being saved to the user's library: which, as what, on which shelf.
+    save_kind: Option<(String, String, crate::vegetation::Category)>,
 }
 
 fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
@@ -68,6 +72,11 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
             PropTab::Scatter,
             "🌳",
             "Scatter: woods, bushes and rocks painted over the ground",
+        ),
+        (
+            PropTab::World,
+            "☀",
+            "World: the sky and the light, the time of day and the weather",
         ),
         (
             PropTab::Reference,
@@ -165,7 +174,7 @@ pub fn show(
                 .item
                 .filter(|_| c.shell.tab >= PropTab::Object)
             {
-                let name = edit::item_name(&c.editor.project, item).unwrap_or_default();
+                let name = crate::state::item_name(&c.editor.project, item).unwrap_or_default();
                 ui.strong(name);
                 if !matches!(c.shell.tab, PropTab::Object) {
                     ui.weak("›");
@@ -191,7 +200,8 @@ pub fn show(
                 PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor, state, library),
                 PropTab::Terrain => terrain_tab(ui, c),
-                PropTab::Scatter => scatter_tab(ui, c, library),
+                PropTab::Scatter => scatter_tab(ui, c, library, state),
+                PropTab::World => world::world_tab(ui, c),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Library => library_tab(ui, c.editor, state, library),
                 PropTab::Object => match c.editor.selection.item {
@@ -338,7 +348,7 @@ fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, 
 
 /// The name field of an item: renames it when the field loses focus.
 fn name_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item) {
-    let name = edit::item_name(&c.editor.project, item)
+    let name = crate::state::item_name(&c.editor.project, item)
         .unwrap_or_default()
         .to_string();
     if !matches!(&state.rename, Some((i, _)) if *i == item) {
@@ -937,7 +947,18 @@ fn style_names(project: &Project) -> (Vec<String>, Vec<String>) {
 }
 
 /// Opens the panel the outliner pointed at, once.
-fn focused(c: &mut Ctx, focus: Focus) -> Option<bool> {
+/// A road part's header: scrolled to when the part was asked to open, and lighting the
+/// part up in the view while the pointer is over it.
+fn part_header(c: &mut Ctx, header: &egui::Response, open: Option<bool>, r: usize, part: Part) {
+    if open.is_some() {
+        header.scroll_to_me(Some(egui::Align::TOP));
+    }
+    if header.hovered() {
+        c.tool.part_hover = Some((r, part));
+    }
+}
+
+fn focused(c: &mut Ctx, focus: Part) -> Option<bool> {
     (c.shell.focus == Some(focus)).then(|| {
         c.shell.focus = None;
         true

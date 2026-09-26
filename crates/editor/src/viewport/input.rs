@@ -177,12 +177,12 @@ pub fn input(
     // A brush paints with the left button; the right button and the keys work as
     // ever, unless a stroke is being painted.
     if tool.active.is_brush() {
-        crate::brush::input(
-            editor, tool, &built, &buttons, &keys, over, anywhere, keys_free,
+        let took = crate::brush::input(
+            editor, tool, &built, view, &buttons, &keys, over, anywhere, keys_free,
         );
         tool.press = None;
         tool.boxing = None;
-        if tool.brush.stroke.is_some() || tool.brush.adjust.is_some() {
+        if took {
             return;
         }
     }
@@ -440,12 +440,9 @@ pub(super) fn circle_select(
     let mut hits: Vec<Item> = items(editor)
         .filter(|&i| editor.pickable(i))
         .filter(|&i| {
-            let smp = match i {
-                Item::Road(r) => built.roads.get(r),
-                Item::Spline(s) => built.splines.get(s),
-                Item::Prop(_) => None,
-            };
-            smp.is_some_and(|s| s.frames.iter().any(|f| within(f.pos)))
+            built
+                .sampled(i)
+                .is_some_and(|s| s.frames.iter().any(|f| within(f.pos)))
         })
         .collect();
     for (i, prop) in editor.project.props.iter().enumerate() {
@@ -458,14 +455,9 @@ pub(super) fn circle_select(
     let sel = &mut editor.selection;
     for item in hits {
         if remove {
-            sel.others.retain(|&o| o != item);
-            if sel.item == Some(item) {
-                sel.item = sel.others.pop();
-            }
-        } else if sel.item.is_none() {
-            sel.select(item);
-        } else if !sel.has(item) {
-            sel.others.push(item);
+            sel.remove(item);
+        } else {
+            sel.add(item);
         }
     }
 }
@@ -594,12 +586,7 @@ pub(super) fn box_select(
         editor.selection = Default::default();
     }
     for (item, _) in found {
-        let sel = &mut editor.selection;
-        if sel.item.is_none() {
-            sel.select(item);
-        } else if !sel.has(item) {
-            sel.others.push(item);
-        }
+        editor.selection.add(item);
     }
 }
 
@@ -683,13 +670,9 @@ pub fn delete(editor: &mut Editor) {
             })
             .collect()
     };
-    let whole = editor.selection.nodes.is_empty();
+    // A line deleted leaves the selection by itself.
     if editor.apply(ops, None) {
         editor.selection.nodes.clear();
-        // After removing the whole item its index names the next one in the list.
-        if whole || editor.line().is_none() {
-            editor.selection = Default::default();
-        }
     }
 }
 
@@ -735,28 +718,29 @@ fn delete_items(editor: &mut Editor) {
     }
 }
 
-/// Where a node goes along a line so that the line passes through `pos`: before the
-/// node after the nearest segment's middle.
+/// Where a node goes along a line so that the line passes through `pos`: into the
+/// segment nearest to it, in plan.
 pub(super) fn insert_index(
     nodes: &[open_racing_track_project::Node],
     closed: bool,
     pos: DVec3,
 ) -> usize {
     let n = nodes.len();
-    let segs = segments(n, closed);
-    let mid = |i: usize| (nodes[i].pos + nodes[(i + 1) % n].pos) * 0.5;
-    (0..segs)
-        .min_by(|&a, &b| {
-            mid(a)
-                .truncate()
-                .distance(pos.truncate())
-                .total_cmp(&mid(b).truncate().distance(pos.truncate()))
-        })
+    let p = pos.truncate();
+    let gap = |i: usize| {
+        let (a, b) = (nodes[i].pos.truncate(), nodes[(i + 1) % n].pos.truncate());
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        p.distance(a + ab * t)
+    };
+    (0..segments(n, closed))
+        .min_by(|&a, &b| gap(a).total_cmp(&gap(b)))
         .map_or(n, |i| i + 1)
 }
 
-/// Adds a node at the pointer to the selected road or spline: after the active node,
-/// or into the segment it fits best.
+/// Adds a node at the pointer to the selected road or spline: with the active node at
+/// an open line's end, beyond it (extending the line); else into the segment it fits
+/// best.
 pub fn add_node_at(editor: &mut Editor, built: &Built, pointer: Option<DVec3>) {
     let Some(pos) = pointer else { return };
     let Some(item) = editor.selection.item else {
@@ -767,17 +751,18 @@ pub fn add_node_at(editor: &mut Editor, built: &Built, pointer: Option<DVec3>) {
         return;
     };
     let before = match editor.selection.node() {
-        // At the open end: extend it.
+        // At an open end: extend it.
         Some(0) if !closed && nodes.len() > 1 => 0,
-        Some(n) => n + 1,
-        None => insert_index(nodes, closed, pos),
+        Some(n) if !closed && n + 1 == nodes.len() => n + 1,
+        _ => insert_index(nodes, closed, pos),
     };
     // A road node at the height of the road where it passes nearest.
     let pos = match item {
         Item::Road(r) => built
             .roads
             .get(r)
-            .map_or(pos, |smp| pos.with_z(smp.frames[smp.nearest(pos)].pos.z)),
+            .and_then(|smp| smp.frames.get(smp.nearest(pos)))
+            .map_or(pos, |f| pos.with_z(f.pos.z)),
         Item::Spline(_) | Item::Prop(_) => pos,
     };
     let line = name.to_string();
@@ -930,14 +915,7 @@ pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) 
     }
     editor.begin_drag();
     if editor.apply(ops, None) {
-        editor.selection = Default::default();
-        for item in copies {
-            if editor.selection.item.is_none() {
-                editor.selection.select(item);
-            } else {
-                editor.selection.others.push(item);
-            }
-        }
+        editor.selection.set_items(copies);
         tool.edit = false;
         start_modal(editor, tool, built, Mode::Grab, None, at, false);
     } else {

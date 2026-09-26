@@ -525,6 +525,36 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Curves (elevation, width and bank graphs below the view)",
+        &[
+            (
+                "Click / Shift click",
+                "Select a node or key / add or take it out",
+            ),
+            (
+                "Drag over empty space",
+                "Box select (Shift adds, Ctrl takes out)",
+            ),
+            ("A / Alt A", "Select all / none"),
+            (
+                "Drag / G",
+                "Move the selected (X along, Y value only; Shift fine; Ctrl snap)",
+            ),
+            ("Double-click / Ctrl click", "Add a node or key"),
+            ("X / Delete", "Delete the selected"),
+            (
+                "Numbers along the bottom",
+                "Select the road's nodes; double-click adds one",
+            ),
+            (
+                "Right click",
+                "Menu: add and delete keys and nodes, smooth, flat",
+            ),
+            ("Wheel / Ctrl wheel", "Zoom along the road / the values"),
+            ("Middle drag / Home", "Pan / fit"),
+        ],
+    ),
+    (
         "Anywhere",
         &[
             ("F3", "Search commands"),

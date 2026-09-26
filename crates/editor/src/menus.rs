@@ -282,7 +282,14 @@ fn object_menu(ui: &mut egui::Ui, c: &mut Ctx, item: Item) {
 
 /// The box being dragged out and the open menu, in window coordinates.
 pub fn overlay(ctx: &egui::Context, c: &mut Ctx) {
-    if let Some((a, b)) = c.tool.boxing {
+    // The view's box, or the Scatter tool's round copies once it is dragged out.
+    let copies = c
+        .tool
+        .brush
+        .plants
+        .boxing
+        .filter(|(a, b)| a.distance(*b) > 4.0);
+    if let Some((a, b)) = c.tool.boxing.or(copies) {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             "box select".into(),
@@ -414,7 +421,7 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
             ui.weak("Drag it along the road.");
         }
         Some(Hit::Body(it)) => {
-            let name = edit::item_name(&c.editor.project, it)
+            let name = crate::state::item_name(&c.editor.project, it)
                 .unwrap_or_default()
                 .to_string();
             if c.editor.selection.item != Some(it) {
@@ -438,7 +445,12 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
             }
             if let (Item::Road(r), Some(at)) = (it, menu.world)
                 && name == c.editor.project.main_road
-                && let Some(u) = c.built.roads.get(r).map(|s| s.frames[s.nearest(at)].u)
+                && let Some(u) = c
+                    .built
+                    .roads
+                    .get(r)
+                    .and_then(|s| s.frames.get(s.nearest(at)))
+                    .map(|f| f.u)
             {
                 if item(ui, "Start/finish line here", "") {
                     used = true;
@@ -610,12 +622,13 @@ fn strip_menu(
         used = true;
         c.shell.maximized = false;
         c.shell.tab = crate::ui::PropTab::Strips;
-        c.shell.focus = Some(crate::ui::Focus::Strip(side, i));
+        c.shell.focus = Some(crate::viewport::Part::Strip(side, i));
     }
     ui.separator();
-    if item(ui, "Remove strip", "") {
+    if item(ui, "Remove strip", "")
+        && let Some(road) = c.editor.project.roads.get(r).map(|x| x.name.clone())
+    {
         used = true;
-        let road = c.editor.project.roads[r].name.clone();
         c.editor.apply(
             vec![Op::RemoveStrip {
                 road,
@@ -633,7 +646,9 @@ fn add_line_at(c: &mut Ctx, r: usize, at: glam::DVec3, dashed: bool) {
     let (Some(road), Some(smp)) = (c.editor.project.roads.get(r), c.built.roads.get(r)) else {
         return;
     };
-    let f = &smp.frames[smp.nearest(at)];
+    let Some(f) = smp.frames.get(smp.nearest(at)) else {
+        return;
+    };
     let left = f.lateral.truncate().normalize_or(glam::DVec2::Y);
     let offset = ((at - f.pos).truncate().dot(left) * 20.0).round() / 20.0;
     let name = presets::free_name("line", |n| road.lines.iter().any(|l| l.name == n));
@@ -702,7 +717,7 @@ fn line_menu(ui: &mut egui::Ui, c: &mut Ctx, r: usize, i: usize) -> bool {
         used = true;
         c.shell.maximized = false;
         c.shell.tab = crate::ui::PropTab::Lines;
-        c.shell.focus = Some(crate::ui::Focus::Line(i));
+        c.shell.focus = Some(crate::viewport::Part::Line(i));
     }
     ui.separator();
     if item(ui, "Remove line", "") {

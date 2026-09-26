@@ -12,8 +12,10 @@ use open_racing_track_project::project::{ModelRun, Prop, Shape};
 
 use crate::assets::Library;
 use crate::commands::Ctx;
+use crate::curve_graph::{self, CurveGraph};
 use crate::jobs::Jobs;
 use crate::preview::Built;
+use crate::profile::ProfileView;
 use crate::reference::Shown;
 use crate::state::{Editor, Item};
 use crate::ui::{PropTab, Shell};
@@ -133,6 +135,8 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
             .map(|&(x, y)| glam::DVec2::new(x, y))
             .collect(),
         fill: false,
+        hardness: open_racing_track_project::project::HARDNESS,
+        stamp: None,
     };
     use open_racing_track_project::ops::StrokeTarget;
     use open_racing_track_project::project::Brush;
@@ -154,18 +158,15 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
     ops.push(Op::PutScatter {
         scatter: open_racing_track_project::project::Scatter {
             name: "woods".into(),
-            models: vec![open_racing_track_project::project::ScatterModel {
-                model: open_racing_track_project::shapes::path("pine"),
-                weight: 1.0,
+            strokes: vec![stroke(Brush::Paint, &[(-300.0, -100.0)])],
+            placed: vec![open_racing_track_project::project::Plant {
+                model: 0,
+                pos: glam::DVec2::new(-250.0, -60.0),
+                yaw: 0.5,
+                scale: 1.5,
             }],
             spacing: 8.0,
-            scale: [0.8, 1.2],
-            tilt: 0.0,
-            clearance: 3.0,
-            max_slope: 35.0,
-            collide: false,
-            strokes: vec![stroke(Brush::Paint, &[(-300.0, -100.0)])],
-            group: None,
+            ..crate::vegetation::builtin().remove(1).scatter
         },
     });
     let area = crate::presets::list(&e.project)
@@ -240,6 +241,7 @@ fn every_panel_draws_for_every_selection() {
     let (library, shown) = (Library::default(), Shown::default());
     let (mut props_state, mut outliner_state) =
         (properties::State::default(), outliner::State::default());
+    let (mut elevation, mut curves) = (ProfileView::default(), CurveGraph::default());
     let ctx = egui::Context::default();
     let tabs = [
         PropTab::Track,
@@ -297,6 +299,16 @@ fn every_panel_draws_for_every_selection() {
                         ui.horizontal(|ui| crate::brush::settings_ui(ui, &mut c, true));
                     }
                     c.tool.active = crate::viewport::ToolKind::Select;
+                    // Every graph of the Curves area.
+                    for shown in [
+                        curve_graph::Shown::Elevation,
+                        curve_graph::Shown::Left,
+                        curve_graph::Shown::Right,
+                        curve_graph::Shown::Bank,
+                    ] {
+                        curves.show(c.editor, shown);
+                        curve_graph::panel(ui, &mut c, &mut elevation, &mut curves);
+                    }
                 });
             }
         }

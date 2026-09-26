@@ -5,7 +5,6 @@
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
-use open_racing_track_project::project::Side;
 use open_racing_track_project::projects_dir;
 
 use crate::assets::{self, Library};
@@ -16,7 +15,7 @@ use crate::jobs::Jobs;
 use crate::preview::{Built, Props};
 use crate::profile::ProfileView;
 use crate::state::{Editor, Item};
-use crate::viewport::{EditorCamera, Hit, Orbit, Tool, ToolKind, View, ViewDir, ViewRect};
+use crate::viewport::{EditorCamera, Hit, Orbit, Part, Tool, ToolKind, View, ViewDir, ViewRect};
 use crate::{menus, outliner, overlay, popups, properties, sidebar};
 
 /// What the area below the 3D view shows.
@@ -37,6 +36,8 @@ pub enum PropTab {
     Terrain,
     /// Woods, bushes and rocks painted over the ground.
     Scatter,
+    /// The sky and the light: time of day, season, weather, exposure.
+    World,
     Reference,
     /// Strip and wall types, materials and surfaces.
     Library,
@@ -55,21 +56,12 @@ impl PropTab {
     pub fn named(name: &str) -> Option<Self> {
         use PropTab::*;
         [
-            Track, Markers, Terrain, Scatter, Reference, Library, Object, Corners, Strips, Lines,
-            Barriers, Rows,
+            Track, Markers, Terrain, Scatter, World, Reference, Library, Object, Corners, Strips,
+            Lines, Barriers, Rows,
         ]
         .into_iter()
         .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
     }
-}
-
-/// A part of a road the outliner asked the properties editor to open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Focus {
-    Strip(Side, usize),
-    Line(usize),
-    Barrier(usize),
-    Row(usize),
 }
 
 /// A popup over everything, taking the keys and clicks until it closes.
@@ -135,7 +127,8 @@ pub struct Shell {
     pub bottom: BottomTab,
     pub tab: PropTab,
     pub sidebar_tab: sidebar::Tab,
-    pub focus: Option<Focus>,
+    /// A part of the selected road the properties are to open.
+    pub focus: Option<Part>,
     /// The corner looked at last: its road and number.
     pub corner: Option<(usize, usize)>,
     /// The side kerbs and walls are laid along the selected nodes on.
@@ -233,6 +226,7 @@ pub fn ui(
     start: crate::Start,
     mut cmds: Commands,
     mut state: Local<UiState>,
+    mut palette: ResMut<crate::palette::Palette>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
@@ -271,7 +265,7 @@ pub fn ui(
         shell,
         pointer,
     };
-    let (start_corner, start_tab, start_distance, on_ground) = start;
+    let (start_corner, start_tab, start_curves, start_distance, on_ground) = start;
     if c.built.count > 0 {
         if let Some(n) = start_corner {
             crate::corners::step_to(&mut c, n.0);
@@ -280,6 +274,12 @@ pub fn ui(
         if let Some(t) = start_tab {
             c.shell.tab = t.0;
             cmds.remove_resource::<crate::StartTab>();
+        }
+        if let Some(s) = start_curves {
+            c.shell.bottom = BottomTab::Curves;
+            c.shell.bottom_open = true;
+            curve_graph.show(c.editor, s.0);
+            cmds.remove_resource::<crate::StartCurves>();
         }
         if let Some(d) = start_distance {
             c.orbit.distance = d.0;
@@ -300,6 +300,7 @@ pub fn ui(
     }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
+    c.tool.part_hover = None;
     c.tool.landforms = c.shell.tab == PropTab::Terrain && !c.shell.maximized;
     // What the panels change about the active item, the other selected items of its
     // kind take too.
@@ -356,6 +357,7 @@ pub fn ui(
                     asset_panel,
                     &mut library,
                     &props,
+                    &mut palette,
                 );
             });
         c.shell.bottom_open = open;
@@ -368,6 +370,10 @@ pub fn ui(
 
     menus::header(&mut root, &mut c);
     menus::tool_settings(&mut root, &mut c);
+    palette.assets_changed(library.revision);
+    if !c.shell.maximized {
+        crate::palette::show(&mut root, &mut c, &mut palette);
+    }
     let mut open = c.shell.sidebar;
     egui::Panel::right("sidebar")
         .resizable(true)
@@ -378,7 +384,7 @@ pub fn ui(
 
     if let (Some(item), Some(before)) = (active, before)
         && c.editor.selection.item == Some(item)
-        && !c.editor.dragging
+        && !c.editor.dragging()
     {
         let ops = crate::batch::spread_ops(c.editor, item, &before);
         let n = ops.len();
@@ -553,8 +559,12 @@ fn open_project(c: &mut Ctx, dir: std::path::PathBuf) {
     c.editor.switch(dir);
     if c.editor.dir != before {
         c.tool.reset();
+        c.jobs.forget();
+        c.orbit.walk = None;
+        c.orbit.replay = None;
         c.shell.popup = None;
         c.shell.focus = None;
+        c.shell.corner = None;
         crate::viewport::frame_all(c.editor, c.orbit);
     }
 }
@@ -799,7 +809,7 @@ fn mouse_hints(c: &Ctx) -> String {
         return t.hint.clone();
     }
     let name = |item| {
-        edit::item_name(&c.editor.project, item)
+        crate::state::item_name(&c.editor.project, item)
             .unwrap_or("")
             .to_string()
     };
@@ -914,6 +924,7 @@ fn bottom_area(
     asset_panel: &mut assets::Panel,
     library: &mut Library,
     props: &Props,
+    palette: &mut crate::palette::Palette,
 ) {
     ui.horizontal(|ui| {
         let failed = c.jobs.passed == Some(false);
@@ -947,9 +958,7 @@ fn bottom_area(
                 .id_salt("curves")
                 .auto_shrink([false, false])
                 .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
-                .show(ui, |ui| {
-                    curve_graph::panel(ui, c.editor, profile, curve_graph)
-                });
+                .show(ui, |ui| curve_graph::panel(ui, c, profile, curve_graph));
         }
         BottomTab::Checks => {
             egui::ScrollArea::vertical()
@@ -962,8 +971,11 @@ fn bottom_area(
                 .id_salt("assets")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    assets::panel(ui, c.editor, library, props, c.tool, asset_panel);
+                    assets::panel(ui, c.editor, library, props, c.tool, asset_panel, palette);
                 });
+            if let Some(model) = asset_panel.scatter.take() {
+                crate::palette::scatter_of_model(c, &model);
+            }
         }
         BottomTab::Report => {
             egui::ScrollArea::vertical()

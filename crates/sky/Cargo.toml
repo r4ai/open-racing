@@ -1,0 +1,12 @@
+[package]
+name = "open-racing-sky"
+description = "Bevy rendering of open-racing's simulated weather: atmosphere, sun, sky light, volumetric clouds and their shadows, shared by the app and the editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+open-racing-sim.workspace = true
+bevy.workspace = true
+glam.workspace = true
+half = "2.7"

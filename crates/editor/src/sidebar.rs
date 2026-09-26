@@ -47,7 +47,7 @@ fn item_tab(ui: &mut egui::Ui, c: &mut Ctx) {
         ui.weak("Nothing selected. Click a road, a node, a kerb or a prop in the view.");
         return;
     };
-    let name = edit::item_name(&c.editor.project, item)
+    let name = crate::state::item_name(&c.editor.project, item)
         .unwrap_or_default()
         .to_string();
     ui.horizontal(|ui| {

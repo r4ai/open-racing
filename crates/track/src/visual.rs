@@ -2,7 +2,10 @@
 //!
 //! Meshes are batched by material and by a coarse XY tile when the package is written:
 //! few enough draw calls for a whole circuit, while each batch stays small enough to be
-//! frustum-culled.
+//! frustum-culled. Models repeated many times (woods, bushes, rocks) are kept once, as
+//! shapes in their own frame, with a list of where each copy stands: the renderer draws
+//! the copies of a shape by instancing, so neither the file nor the memory grows with
+//! the number of copies.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -11,10 +14,7 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 4;
-/// Oldest version still read: version 4 only added `DetailMask::BaseAlpha` and
-/// `Detail::normal`.
-const OLDEST_VERSION: u32 = 3;
+const VERSION: u32 = 7;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
 /// Stored for an absent texture index.
@@ -64,6 +64,24 @@ pub struct Material {
     /// Render back faces too.
     pub double_sided: bool,
     pub detail: Option<Detail>,
+    /// Of a model drawn many times: it moves in the wind (a plant's), or takes each
+    /// copy's colour (a plant's leaves, spectators' clothes).
+    pub varies: Option<Varies>,
+}
+
+/// How a material of a model drawn many times varies: a plant's moves in the wind,
+/// and leaves or clothes take each copy's colour. The wind comes from the game's
+/// weather; a copy's colour is its `Instance::tint`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Varies {
+    /// How far it bends away from a 10 m/s wind at 1 m above the copy's foot, m; it
+    /// bends with the square of the height, and with the square of the wind.
+    pub sway: f32,
+    /// How far its leaves flutter in a 10 m/s wind, m.
+    pub flutter: f32,
+    /// It takes each copy's colour (leaves, clothes), and is left out of a copy that
+    /// has none: a bare tree's leaves.
+    pub tinted: bool,
 }
 
 impl Default for Material {
@@ -80,6 +98,7 @@ impl Default for Material {
             alpha_mode: AlphaMode::Opaque,
             double_sided: false,
             detail: None,
+            varies: None,
         }
     }
 }
@@ -147,11 +166,60 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
+/// Meshes in a model's own frame (m, Z up, its foot at the origin), drawn wherever
+/// `Instances` put copies of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shape {
+    pub meshes: Vec<Mesh>,
+}
+
+/// Copies of a model: the shape of each of its levels of detail, nearest first, and
+/// where each copy stands. Each copy shows the levels whose distances from the camera
+/// it is at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Instances {
+    pub levels: Vec<Level>,
+    pub copies: Vec<Instance>,
+}
+
+/// A level of detail of copies: its shape, drawn from `fade_in` to `fade_out` from the
+/// camera to each copy, fading in and out over those ranges, m. One level's `fade_out`
+/// is the next one's `fade_in`, so that they cross-fade.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Level {
+    /// Index into `Visual::shapes`.
+    pub shape: u32,
+    pub fade_in: [f32; 2],
+    pub fade_out: [f32; 2],
+}
+
+/// A distance standing for "however far", m.
+pub const FAR_AWAY: f32 = 1e9;
+
+/// Where a copy stands: the shape's points `p` go to `pos + rotation · (scale · p)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Instance {
+    pub pos: [f32; 3],
+    /// A unit quaternion (x, y, z, w).
+    pub rotation: [f32; 4],
+    pub scale: f32,
+    /// Its colour, for materials that take it (`Varies::tinted`): an sRGB colour and
+    /// how much of it (0 to 254 for 0 to 1) is mixed into their own, keeping their
+    /// brightness as the colour's is to a luminance of 0.2; or `BARE` (255) for none of
+    /// them at all.
+    pub tint: [u8; 4],
+}
+
+/// `Instance::tint` of a copy without its tinted parts: a tree with its leaves fallen.
+pub const BARE: [u8; 4] = [0, 0, 0, 255];
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Visual {
     pub textures: Vec<Texture>,
     pub materials: Vec<Material>,
     pub meshes: Vec<Mesh>,
+    pub shapes: Vec<Shape>,
+    pub instances: Vec<Instances>,
 }
 
 /// Collects textures, materials and meshes, removing duplicate textures and batching
@@ -188,6 +256,24 @@ impl VisualBuilder {
     pub fn add_material(&mut self, material: Material) -> u32 {
         self.visual.materials.push(material);
         (self.visual.materials.len() - 1) as u32
+    }
+
+    /// A material added before.
+    pub fn material(&self, i: u32) -> &Material {
+        &self.visual.materials[i as usize]
+    }
+
+    /// Adds a model's shape, to draw copies of; returns its index.
+    pub fn add_shape(&mut self, shape: Shape) -> u32 {
+        self.visual.shapes.push(shape);
+        (self.visual.shapes.len() - 1) as u32
+    }
+
+    /// Adds copies of shapes, unless there are none.
+    pub fn add_instances(&mut self, instances: Instances) {
+        if !instances.copies.is_empty() && !instances.levels.is_empty() {
+            self.visual.instances.push(instances);
+        }
     }
 
     /// Adds a mesh to the batch of its material, shadow flag and tile. `normals` and
@@ -262,7 +348,8 @@ impl Visual {
                 return bad("material refers to a missing texture");
             }
         }
-        for m in &self.meshes {
+        let meshes = self.meshes.iter();
+        for m in meshes.chain(self.shapes.iter().flat_map(|s| &s.meshes)) {
             if m.material as usize >= self.materials.len() {
                 return bad("mesh refers to a missing material");
             }
@@ -272,6 +359,17 @@ impl Visual {
             }
             if m.indices.len() % 3 != 0 || m.indices.iter().any(|&i| i as usize >= n) {
                 return bad("invalid triangle indices");
+            }
+        }
+        for l in self.instances.iter().flat_map(|i| &i.levels) {
+            if l.shape as usize >= self.shapes.len() {
+                return bad("copies of a missing shape");
+            }
+            if !(l.fade_in[0] <= l.fade_in[1]
+                && l.fade_in[1] <= l.fade_out[0]
+                && l.fade_out[0] <= l.fade_out[1])
+            {
+                return bad("a level of detail's distances out of order");
             }
         }
         Ok(())
@@ -298,6 +396,15 @@ impl Visual {
                 AlphaMode::Blend => (w.u8(2), w.f32(0.0)),
             };
             w.u8(m.double_sided.into());
+            match &m.varies {
+                None => w.u8(0),
+                Some(p) => {
+                    w.u8(1);
+                    w.f32(p.sway);
+                    w.f32(p.flutter);
+                    w.u8(p.tinted.into());
+                }
+            }
             match &m.detail {
                 None => w.u8(0),
                 Some(d) => {
@@ -317,20 +424,53 @@ impl Visual {
                 }
             }
         }
-        w.u32(self.meshes.len() as u32);
-        for m in &self.meshes {
-            w.u32(m.material);
-            w.u8(m.cast_shadows.into());
-            w.vecs(&m.positions);
-            w.vecs(&m.normals);
-            w.vecs(&m.uvs);
-            w.u32s(&m.indices);
+        let meshes = |w: &mut Writer, meshes: &[Mesh]| {
+            w.u32(meshes.len() as u32);
+            for m in meshes {
+                w.u32(m.material);
+                w.u8(m.cast_shadows.into());
+                w.vecs(&m.positions);
+                w.vecs(&m.normals);
+                w.vecs(&m.uvs);
+                w.u32s(&m.indices);
+            }
+        };
+        meshes(&mut w, &self.meshes);
+        w.u32(self.shapes.len() as u32);
+        for s in &self.shapes {
+            meshes(&mut w, &s.meshes);
+        }
+        w.u32(self.instances.len() as u32);
+        for i in &self.instances {
+            w.u32(i.levels.len() as u32);
+            for l in &i.levels {
+                w.u32(l.shape);
+                let [a, b] = l.fade_in;
+                let [c, d] = l.fade_out;
+                [a, b, c, d].into_iter().for_each(|v| w.f32(v));
+            }
+            let copies: Vec<[f32; 8]> = i
+                .copies
+                .iter()
+                .map(|c| {
+                    let [x, y, z] = c.pos;
+                    let [a, b, d, e] = c.rotation;
+                    [x, y, z, a, b, d, e, c.scale]
+                })
+                .collect();
+            w.vecs(&copies);
+            let leaves: Vec<u32> = i
+                .copies
+                .iter()
+                .map(|c| u32::from_le_bytes(c.tint))
+                .collect();
+            w.u32s(&leaves);
         }
         w.finish()
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self, Error> {
-        let mut r = Reader::new(buf, MAGIC, OLDEST_VERSION..=VERSION, "visual.bin")?;
+        let mut r = Reader::new(buf, MAGIC, VERSION..=VERSION, "visual.bin")?;
         let mut v = Visual::default();
         for _ in 0..r.u32()? {
             v.textures.push(Texture {
@@ -350,6 +490,14 @@ impl Visual {
                 (a, _) => return Err(Error::Format(format!("visual: unknown alpha mode {a}"))),
             };
             let double_sided = r.u8()? != 0;
+            let varies = match r.u8()? {
+                0 => None,
+                _ => Some(Varies {
+                    sway: r.f32()?,
+                    flutter: r.f32()?,
+                    tinted: r.u8()? != 0,
+                }),
+            };
             let detail = match r.u8()? {
                 0 => None,
                 kind => {
@@ -363,17 +511,12 @@ impl Visual {
                         *layer = (texture != NONE).then_some(DetailLayer { texture, scale });
                     }
                     let (multiplier, world_uv) = (r.f32()?, r.u8()? != 0);
-                    let normal = match r.version {
-                        3 => None,
-                        _ => {
-                            let (texture, scale, strength) = (r.u32()?, r.f32()?, r.f32()?);
-                            (texture != NONE).then_some(DetailNormal {
-                                texture,
-                                scale,
-                                strength,
-                            })
-                        }
-                    };
+                    let (texture, scale, strength) = (r.u32()?, r.f32()?, r.f32()?);
+                    let normal = (texture != NONE).then_some(DetailNormal {
+                        texture,
+                        scale,
+                        strength,
+                    });
                     Some(Detail {
                         mask,
                         layers,
@@ -394,17 +537,59 @@ impl Visual {
                 alpha_mode,
                 double_sided,
                 detail,
+                varies,
+            });
+        }
+        let meshes = |r: &mut Reader| -> Result<Vec<Mesh>, Error> {
+            (0..r.u32()?)
+                .map(|_| {
+                    Ok(Mesh {
+                        material: r.u32()?,
+                        cast_shadows: r.u8()? != 0,
+                        positions: r.vecs()?,
+                        normals: r.vecs()?,
+                        uvs: r.vecs()?,
+                        indices: r.u32s()?,
+                    })
+                })
+                .collect()
+        };
+        v.meshes = meshes(&mut r)?;
+        for _ in 0..r.u32()? {
+            v.shapes.push(Shape {
+                meshes: meshes(&mut r)?,
             });
         }
         for _ in 0..r.u32()? {
-            v.meshes.push(Mesh {
-                material: r.u32()?,
-                cast_shadows: r.u8()? != 0,
-                positions: r.vecs()?,
-                normals: r.vecs()?,
-                uvs: r.vecs()?,
-                indices: r.u32s()?,
-            });
+            let mut levels = Vec::new();
+            for _ in 0..r.u32()? {
+                let shape = r.u32()?;
+                let mut f = [0.0; 4];
+                for x in &mut f {
+                    *x = r.f32()?;
+                }
+                levels.push(Level {
+                    shape,
+                    fade_in: [f[0], f[1]],
+                    fade_out: [f[2], f[3]],
+                });
+            }
+            let places = r.vecs::<8>()?;
+            let leaves = r.u32s()?;
+            if leaves.len() != places.len() {
+                return Err(Error::Format("visual: copies' looks miscounted".into()));
+            }
+            let copies = places
+                .into_iter()
+                .zip(leaves)
+                .map(|([x, y, z, a, b, d, e, scale], leaves)| Instance {
+                    pos: [x, y, z],
+                    rotation: [a, b, d, e],
+                    scale,
+                    tint: leaves.to_le_bytes(),
+                })
+                .collect();
+            v.instances.push(Instances { levels, copies });
         }
         r.finish()?;
         Ok(v)
@@ -452,5 +637,51 @@ mod tests {
         assert_eq!(v.meshes.len(), 3);
         assert_eq!(v.meshes[0].indices, [0, 1, 2, 3, 4, 5]);
         assert_eq!(v.meshes[0].positions[3], [10.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn copies_of_shapes_round_trip() {
+        let mut b = VisualBuilder::new();
+        let m = b.add_material(Material {
+            varies: Some(Varies {
+                sway: 0.01,
+                flutter: 0.02,
+                tinted: true,
+            }),
+            ..Default::default()
+        });
+        add(&mut b, m, 0.0);
+        let shape = b.add_shape(Shape {
+            meshes: vec![Mesh {
+                material: m,
+                cast_shadows: false,
+                positions: TRI.to_vec(),
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                uvs: vec![[0.0; 2]; 3],
+                indices: vec![0, 1, 2],
+            }],
+        });
+        let copy = Instance {
+            pos: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 0.6, 0.8],
+            scale: 1.5,
+            tint: [200, 120, 30, 180],
+        };
+        b.add_instances(Instances {
+            levels: vec![Level {
+                shape,
+                fade_in: [0.0; 2],
+                fade_out: [900.0, 940.0],
+            }],
+            copies: vec![copy; 3],
+        });
+        let v = b.build();
+        v.validate().unwrap();
+        let back = Visual::decode(&v.encode()).unwrap();
+        assert_eq!(back, v);
+        assert_eq!(back.instances[0].copies[2], copy);
+        let mut bad = v;
+        bad.instances[0].levels[0].shape = 7;
+        assert!(bad.validate().is_err());
     }
 }

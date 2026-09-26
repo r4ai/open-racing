@@ -18,11 +18,11 @@ open-racing-api.workspace = true
 open-racing-track.workspace = true
 open-racing-car.workspace = true
 open-racing-track-render.workspace = true
+open-racing-sky.workspace = true
 open-racing-train-burn = { path = "../train-burn", optional = true }
 bevy.workspace = true
 serde.workspace = true
 ron.workspace = true
-half = "2.7"
 glam.workspace = true
 clap.workspace = true
 raw-window-handle = "0.6"

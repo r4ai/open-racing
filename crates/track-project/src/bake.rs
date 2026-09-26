@@ -12,19 +12,24 @@ use open_racing_sim::track::heading;
 use open_racing_sim::{GridSlot, Layout, PitLane, Pose, Track, TrackDef, TrackPoint};
 use open_racing_track::texture::{self, Mips};
 use open_racing_track::{
-    AlphaMode, Ground, Material, PatchKind, Texture, TrackPackage, Visual, VisualBuilder,
+    AlphaMode, Ground, Instances, Material, PatchKind, Shape, Texture, TrackPackage, Visual,
+    VisualBuilder,
 };
 
 use crate::Error;
 use crate::curve::Sampled;
+use crate::impostor::Paint;
 use crate::model::{self, Model, Placement};
-use crate::project::{Alpha, MaterialDef, Project, TextureSource};
+use crate::project::{Alpha, MaterialDef, Project, Scatter, ScatterModel, TextureSource};
 use crate::road::{self, RoadBuild, Solid, SolidPart};
 use crate::spline::{self, SplineBuild};
 use crate::terrain::{self, Grid, TerrainBuild};
 
 /// Spacing of the centreline's points, m. The simulation eases between them.
 const CENTRELINE_SPACING: f64 = 4.0;
+
+/// A scatter's models, and what stands in for each far from the camera.
+pub type ScatterModels = (Vec<Arc<Model>>, Vec<Option<Arc<Model>>>);
 
 /// Everything the project's meshes are built into.
 pub struct Scene {
@@ -266,6 +271,9 @@ fn surface_props(project: &Project) -> Vec<open_racing_sim::SurfaceProps> {
 pub struct Cache {
     textures: HashMap<TextureSource, (Option<SystemTime>, Vec<u8>)>,
     models: HashMap<PathBuf, (Option<SystemTime>, Arc<Model>)>,
+    /// Pictures of models on crossed cards, by the model and the materials used for
+    /// its own.
+    cards: HashMap<String, (Option<SystemTime>, Arc<Model>)>,
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -318,6 +326,106 @@ impl Cache {
         let m = Arc::new(model::load(&full)?);
         self.models.insert(path.to_path_buf(), (stamp, m.clone()));
         Ok(m)
+    }
+
+    /// How a scatter's model looks: its own materials, and the project's used in place
+    /// of some of them.
+    pub fn paints(
+        &mut self,
+        project: &Project,
+        dir: &Path,
+        model: &Model,
+        m: &ScatterModel,
+    ) -> Result<Vec<Paint>, Error> {
+        let mut paints = crate::impostor::paints(model);
+        for slot in &m.materials {
+            let (Some(paint), Some(i)) = (
+                paints.get_mut(slot.slot),
+                project.material_index(&slot.material),
+            ) else {
+                continue;
+            };
+            let def = &project.materials[i];
+            let [r, g, b] = def.color.map(srgb_to_linear);
+            *paint = Paint {
+                colour: [r, g, b, 1.0],
+                texture: self
+                    .texture(&def.texture, dir)?
+                    .and_then(|d| texture::decode(d).ok())
+                    .map(Arc::new),
+                cutoff: match def.alpha {
+                    Alpha::Opaque => None,
+                    Alpha::Mask(c) => Some(c),
+                    Alpha::Blend => Some(0.5),
+                },
+                leaves: paint.leaves,
+            };
+        }
+        Ok(paints)
+    }
+
+    /// What stands in for a scatter's model far from the camera: its own far model,
+    /// or pictures of it on crossed cards, made once for the model and its materials.
+    pub fn far(
+        &mut self,
+        project: &Project,
+        dir: &Path,
+        m: &ScatterModel,
+    ) -> Result<Arc<Model>, Error> {
+        if let Some(far) = &m.far {
+            return self.model(dir, far);
+        }
+        let stamp = match crate::shapes::name(&m.model) {
+            Some(_) => None,
+            None => modified(&dir.join(&m.model)),
+        };
+        let used: Vec<_> = m
+            .materials
+            .iter()
+            .map(|s| {
+                (
+                    s.slot,
+                    project
+                        .material_index(&s.material)
+                        .map(|i| &project.materials[i]),
+                )
+            })
+            .collect();
+        let key = format!("{}|{used:?}", m.model.display());
+        if let Some((s, cards)) = self.cards.get(&key)
+            && *s == stamp
+        {
+            return Ok(cards.clone());
+        }
+        let model = self.model(dir, &m.model)?;
+        let paints = self.paints(project, dir, &model, m)?;
+        let cards = Arc::new(crate::impostor::cards(&model, &paints));
+        self.cards.insert(key, (stamp, cards.clone()));
+        Ok(cards)
+    }
+
+    /// A scatter's models, and what stands in for each far from the camera unless it
+    /// is drawn no farther than its detail distance.
+    pub fn scatter_models(
+        &mut self,
+        project: &Project,
+        dir: &Path,
+        s: &Scatter,
+    ) -> Result<ScatterModels, Error> {
+        let near = s
+            .models
+            .iter()
+            .map(|m| self.model(dir, &m.model))
+            .collect::<Result<Vec<_>, _>>()?;
+        let far = if s.draw > 0.0 && s.draw <= s.detail {
+            vec![None; s.models.len()]
+        } else {
+            s.models
+                .iter()
+                .map(|m| self.far(project, dir, m).map(Some))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok((near, far))
     }
 }
 
@@ -382,19 +490,16 @@ pub fn materials(project: &Project, dir: &Path, cache: &mut Cache) -> Result<Vis
     Ok(visual.build())
 }
 
-/// Adds a model's textures and materials to `visual`; returns the new index of each
-/// of its materials.
-pub fn add_look(model: &Model, visual: &mut VisualBuilder) -> Vec<u32> {
-    let textures: Vec<u32> = model
-        .look
+/// Adds a model's textures and materials (its `look`) to `visual`; returns the new
+/// index of each of its materials.
+pub fn add_look(look: &Visual, visual: &mut VisualBuilder) -> Vec<u32> {
+    let textures: Vec<u32> = look
         .textures
         .iter()
         .map(|t| visual.add_texture(t.clone()))
         .collect();
     let remap = |i: Option<u32>| i.map(|i| textures[i as usize]);
-    model
-        .look
-        .materials
+    look.materials
         .iter()
         .map(|m| {
             visual.add_material(Material {
@@ -421,7 +526,7 @@ pub fn add_props(
         let model = cache.model(dir, &prop.model)?;
         let materials = looks
             .entry(prop.model.as_path())
-            .or_insert_with(|| add_look(&model, visual));
+            .or_insert_with(|| add_look(&model.look, visual));
         let at = Placement::of(prop, under);
         for m in &model.meshes {
             let positions: Vec<[f32; 3]> = m.positions.iter().map(|&p| at.point(p)).collect();
@@ -454,7 +559,7 @@ pub fn add_model_walls(
         let model = cache.model(dir, &line.run.model)?;
         let materials = looks
             .entry(line.run.model.clone())
-            .or_insert_with(|| add_look(&model, visual));
+            .or_insert_with(|| add_look(&model.look, visual));
         for m in model::along(&model, line) {
             visual.add_mesh(
                 materials[m.material as usize],
@@ -525,8 +630,58 @@ fn add_ground_layers(
     }))
 }
 
-/// Adds the scatters' copies: each model's look once, and the copies merged into
-/// meshes; those of scatters cars collide with to `ground` as well.
+/// The materials of a scatter's model in `visual`: its own as a plant of its kind,
+/// added once for the model and the kind, with the project's used in place of some of
+/// them (as the plant's, when it is one).
+fn scatter_look(
+    project: &Project,
+    m: &ScatterModel,
+    model: &Model,
+    looks: &mut HashMap<String, Vec<u32>>,
+    visual: &mut VisualBuilder,
+) -> Vec<u32> {
+    let kind = m.kind();
+    let own = crate::scatter::varied_look(model, kind);
+    let mut materials = looks
+        .entry(format!("{}|{kind:?}", m.model.display()))
+        .or_insert_with(|| add_look(&own, visual))
+        .clone();
+    for slot in &m.materials {
+        let (Some(to), Some(i)) = (
+            materials.get_mut(slot.slot),
+            project.material_index(&slot.material),
+        ) else {
+            continue;
+        };
+        *to = match own.materials[slot.slot].varies {
+            None => i as u32,
+            varies => visual.add_material(Material {
+                varies,
+                ..visual.material(i as u32).clone()
+            }),
+        };
+    }
+    materials
+}
+
+/// A model's meshes as a shape of `visual`, with its materials there and casting
+/// shadows if `shadows`.
+fn shape(model: &Model, materials: &[u32], shadows: bool) -> Shape {
+    Shape {
+        meshes: model
+            .meshes
+            .iter()
+            .map(|m| open_racing_track::Mesh {
+                material: materials.get(m.material as usize).copied().unwrap_or(0),
+                cast_shadows: m.cast_shadows && shadows,
+                ..m.clone()
+            })
+            .collect(),
+    }
+}
+
+/// Adds the scatters' copies: each model's shape once (and its far model's), and
+/// where each copy stands; those of scatters cars collide with to `ground` as well.
 pub fn add_scatter(
     project: &Project,
     roads: &[RoadBuild],
@@ -537,35 +692,63 @@ pub fn add_scatter(
     ground: &mut Ground,
 ) -> Result<(), Error> {
     let keepout = crate::scatter::Keepout::new(roads);
-    let mut looks: HashMap<PathBuf, Vec<u32>> = HashMap::new();
+    let mut looks: HashMap<String, Vec<u32>> = HashMap::new();
+    // Shapes by the model, its kind of plant, the project's materials used in its own,
+    // and shadows.
+    let mut shapes: HashMap<String, u32> = HashMap::new();
+    let month = plant_month(project);
     for s in &project.scatter {
-        let models = s
-            .models
-            .iter()
-            .map(|m| cache.model(dir, &m.model))
-            .collect::<Result<Vec<_>, _>>()?;
-        for (m, model) in s.models.iter().zip(&models) {
-            looks
-                .entry(m.model.clone())
-                .or_insert_with(|| add_look(model, visual));
-        }
+        let (near, far) = cache.scatter_models(project, dir, s)?;
         let copies = crate::scatter::copies(s, &keepout, under);
-        for (k, mesh) in crate::scatter::meshes(&models, &copies) {
-            let materials = &looks[&s.models[k].model];
-            visual.add_mesh(
-                materials[mesh.material as usize],
-                mesh.cast_shadows,
-                &mesh.positions,
-                &mesh.normals,
-                &mesh.uvs,
-                &mesh.indices,
+        let lists = crate::scatter::instances(s, month, &copies);
+        for (i, (m, list)) in s.models.iter().zip(lists).enumerate() {
+            if list.is_empty() {
+                continue;
+            }
+            let kind = m.kind();
+            let key = format!(
+                "{}|{kind:?}|{:?}|{}",
+                m.model.display(),
+                m.materials,
+                s.shadows
             );
+            let model = &near[i];
+            let near_shape = *shapes.entry(key).or_insert_with(|| {
+                let materials = scatter_look(project, m, model, &mut looks, visual);
+                visual.add_shape(shape(model, &materials, s.shadows))
+            });
+            let [mut first, mut second] = crate::scatter::fades(s, far[i].is_some());
+            first.shape = near_shape;
+            let mut levels = vec![first];
+            if let Some(f) = &far[i] {
+                let key = format!("far {:p}|{kind:?}|{}", Arc::as_ptr(f), s.shadows);
+                second.shape = *shapes.entry(key).or_insert_with(|| {
+                    let materials = add_look(&crate::scatter::varied_look(f, kind), visual);
+                    visual.add_shape(shape(f, &materials, s.shadows))
+                });
+                levels.push(second);
+            }
+            visual.add_instances(Instances {
+                levels,
+                copies: list,
+            });
             if s.collide {
-                ground.add(PatchKind::Wall, &mesh.positions, &[], &mesh.indices);
+                let these = crate::scatter::of_model(&copies, i);
+                for part in &model.meshes {
+                    let solid = crate::scatter::world_mesh(part, &these);
+                    ground.add(PatchKind::Wall, &solid.positions, &[], &solid.indices);
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The time of year the project's plants show (see `Environment::plant_month`).
+pub fn plant_month(project: &Project) -> f64 {
+    project
+        .environment
+        .plant_month(project.geo.map_or(48.0, |g| g.lat))
 }
 
 /// Bakes the project into a package. Textures and models are read from the project's directory
@@ -642,13 +825,17 @@ pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPac
         centreline,
         surfaces: surface_props(project),
         layout,
+        environment: Some(open_racing_track::Environment {
+            latitude: project.environment.latitude.or(project.geo.map(|g| g.lat)),
+            ..project.environment
+        }),
         ground: scene.ground,
         visual: Some(visual.build()),
     })
 }
 
 /// The main road's centre, starting at the start/finish line.
-fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
+pub fn centreline(project: &Project, main: &RoadBuild) -> TrackDef {
     let road = &project.roads[project.main_index()];
     let sampled = &main.sampled;
     let start = sampled.s_at(project.markers.start);

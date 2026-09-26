@@ -199,6 +199,16 @@ enum Command {
         #[arg(long, default_value_t = 4.0)]
         offset: f64,
     },
+    /// Shows how a model (a glTF file in the project, or builtin:<name>) is baked: its
+    /// triangles, size and materials (which are leaves), and saves a picture of it and
+    /// the far pictures it gets on crossed cards, as PNG.
+    Model {
+        project: String,
+        model: PathBuf,
+        /// Directory for the pictures; defaults to the project's.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Bakes the project and checks the package, without saving it.
     Check {
         project: String,
@@ -216,6 +226,18 @@ enum Command {
         #[arg(long)]
         no_lap: bool,
     },
+}
+
+/// A picture with alpha as PNG.
+fn rgba_png(image: &open_racing_track::texture::Image) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, image.width as u32, image.height as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().expect("PNG header");
+    w.write_image_data(&image.pixels).expect("PNG data");
+    w.finish().expect("PNG end");
+    out
 }
 
 /// A directory, or the name of one under the projects directory.
@@ -310,6 +332,86 @@ fn run(cli: Cli) -> Result<(), Error> {
                 picture.width,
                 picture.height
             );
+        }
+        Command::Model {
+            project,
+            model,
+            out,
+        } => {
+            let dir = resolve(&project);
+            let mut cache = open_racing_track_project::Cache::default();
+            let m = cache.model(&dir, &model)?;
+            let [lo, hi] = m.bounds;
+            println!(
+                "{}: {} triangles in {} meshes, {:.2} × {:.2} m across, {:.2} m tall",
+                model.display(),
+                m.triangles,
+                m.meshes.len(),
+                hi.x - lo.x,
+                hi.y - lo.y,
+                hi.z - lo.z
+            );
+            let kind = open_racing_track_project::project::ScatterModel::new(model.clone(), 1.0)
+                .kind();
+            println!("as a scatter's model: {kind:?} unless its kind says otherwise");
+            let plant = open_racing_track_project::scatter::varies(kind, &m);
+            for (i, mat) in m.look.materials.iter().enumerate() {
+                let leaves = mat.varies.is_some_and(|p| p.tinted);
+                let alpha = match mat.alpha_mode {
+                    open_racing_track::AlphaMode::Opaque => "opaque".to_string(),
+                    open_racing_track::AlphaMode::Mask(c) => format!("cut out below {c}"),
+                    open_racing_track::AlphaMode::Blend => "blended".into(),
+                };
+                let used = m.meshes.iter().any(|x| x.material as usize == i);
+                if !used {
+                    continue;
+                }
+                println!(
+                    "material {i}: {alpha}{}{}{}",
+                    if mat.double_sided { ", both sides" } else { "" },
+                    if mat.base_color_texture.is_some() { ", textured" } else { "" },
+                    match (leaves, plant) {
+                        (true, Some([_, p])) => format!(
+                            ", leaves: take each copy's colour, flutter {:.3} m, sway {:.4} m/m²",
+                            p.flutter, p.sway
+                        ),
+                        (false, Some([p, _])) => format!(", sways {:.4} m/m²", p.sway),
+                        _ => String::new(),
+                    }
+                );
+            }
+            let paints = open_racing_track_project::impostor::paints(&m);
+            let out = out.unwrap_or_else(|| dir.clone());
+            let stem = model
+                .file_stem()
+                .map_or("model".into(), |s| s.to_string_lossy().replace(':', "-"));
+            let stem = stem.strip_prefix("builtin-").unwrap_or(&stem).to_string();
+            let save = |name: String, image: &open_racing_track::texture::Image| {
+                let path = out.join(name);
+                std::fs::write(&path, rgba_png(image)).map_err(|e| Error::Io(path.clone(), e))?;
+                println!("wrote {} ({} × {})", path.display(), image.width, image.height);
+                Ok::<_, Error>(())
+            };
+            save(
+                format!("{stem}-picture.png"),
+                &open_racing_track_project::impostor::thumbnail(&m, &paints, 256),
+            )?;
+            let far = open_racing_track_project::impostor::cards(&m, &paints);
+            for (i, mat) in far.look.materials.iter().enumerate() {
+                let Some(t) = mat.base_color_texture else {
+                    continue;
+                };
+                let image = open_racing_track::texture::decode(&far.look.textures[t as usize].data)
+                    .map_err(|e| Error::Invalid(e.to_string()))?;
+                let what = if mat.varies.is_some_and(|p| p.tinted) {
+                    "leaves"
+                } else if far.look.materials.len() > 1 {
+                    "wood"
+                } else {
+                    "all"
+                };
+                save(format!("{stem}-far-{i}-{what}.png"), &image)?;
+            }
         }
         Command::Assets { project, json } => {
             let dir = resolve(&project);
@@ -659,14 +761,39 @@ fn print_summary(s: &inspect::Summary) {
                 lo[0], hi[0], lo[1], hi[1]
             )
         });
+        let single = if sc.planted + sc.taken_out > 0 {
+            format!(" ({} planted, {} taken out)", sc.planted, sc.taken_out)
+        } else {
+            String::new()
+        };
+        let draw = if sc.draw > 0.0 {
+            format!("{:.0} m", sc.draw)
+        } else {
+            "however far".into()
+        };
         println!(
-            "scatter \"{}\" of {}: {} strokes, {} copies{at}",
+            "scatter \"{}\" of {}: {} strokes, {} copies{single}{at}, in full to {:.0} m, drawn to {draw}",
             sc.name,
             sc.models.join(", "),
             sc.strokes,
-            sc.copies
+            sc.copies,
+            sc.detail
         );
     }
+    let e = &s.environment;
+    println!(
+        "sky and light: {} at {:02}:{:02} in month {}{}, exposure {:+.1} EV, haze {:.2}{}",
+        e.sky.name(),
+        (e.hour.floor() as u32) % 24,
+        ((e.hour.fract() * 60.0).round() as u32).min(59),
+        e.month,
+        e.latitude
+            .map_or(String::new(), |l| format!(" at {l:.1}° latitude")),
+        e.exposure,
+        e.haze,
+        e.season
+            .map_or(String::new(), |s| format!(", plants in {s:?}").to_lowercase())
+    );
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);
     for (i, sec) in m.sectors.iter().enumerate() {

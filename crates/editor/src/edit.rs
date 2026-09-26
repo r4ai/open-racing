@@ -8,16 +8,7 @@ use open_racing_track_project::curve::{handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Key, Road, StationCurve};
 
-use crate::state::{Editor, Item, item_line};
-
-/// The name of a road, spline or prop.
-pub fn item_name(project: &Project, item: Item) -> Option<&str> {
-    match item {
-        Item::Road(r) => project.roads.get(r).map(|r| r.name.as_str()),
-        Item::Spline(s) => project.splines.get(s).map(|s| s.name.as_str()),
-        Item::Prop(p) => project.props.get(p).map(|p| p.name.as_str()),
-    }
-}
+use crate::state::{Editor, Item, item_line, item_name};
 
 /// What kind of thing an item is, for labels.
 pub fn item_kind(item: Item) -> &'static str {
@@ -291,6 +282,57 @@ pub fn even_grade(editor: &mut Editor) {
     }
 }
 
+/// Adds a node to road `r` at `u` along it, on the road as it runs there (at height `z`
+/// if given), and selects it. Gives its number.
+pub fn insert_road_node(editor: &mut Editor, r: usize, u: f64, z: Option<f64>) -> Option<usize> {
+    let road = editor.project.roads.get(r)?;
+    let period = road.period();
+    let u = if road.closed {
+        u.rem_euclid(period.max(1e-9))
+    } else {
+        u.clamp(0.0, period)
+    };
+    if (u - u.round()).abs() < 0.05 {
+        editor.status = format!(
+            "node {} is there already",
+            u.round() as usize % road.nodes.len()
+        );
+        return None;
+    }
+    let mut pos = open_racing_track_project::curve::point(road, u);
+    if let Some(z) = z {
+        pos.z = z;
+    }
+    let at = u.floor() as usize + 1;
+    let op = Op::AddNode {
+        line: road.name.clone(),
+        pos,
+        before: (at < road.nodes.len()).then_some(at),
+    };
+    if !editor.apply(vec![op], None) {
+        return None;
+    }
+    editor.selection.select_node(Item::Road(r), at);
+    editor.status = format!("node {at} added");
+    Some(at)
+}
+
+/// Deletes the selected nodes of the selected road or spline; with none selected,
+/// nothing (not the whole line).
+pub fn delete_nodes(editor: &mut Editor) {
+    if editor.line().is_none() || editor.selection.nodes.is_empty() {
+        editor.status = "select the nodes to delete".into();
+        return;
+    }
+    let count = |e: &Editor| e.line().map_or(0, |(_, nodes, _)| nodes.len());
+    let before = count(editor);
+    crate::viewport::delete(editor);
+    let gone = before.saturating_sub(count(editor));
+    if gone > 0 {
+        editor.status = format!("{gone} nodes deleted");
+    }
+}
+
 /// Opens a closed road or spline, or closes an open one (Alt + C).
 pub fn toggle_closed(editor: &mut Editor) {
     let op = match editor.selection.item {
@@ -529,8 +571,16 @@ pub fn rename(editor: &mut Editor, item: Item, to: &str) -> bool {
         Item::Spline(_) => Op::RenameSpline { name, to },
         Item::Prop(_) => Op::RenameProp { name, to },
     };
-    // The renamed item keeps its place in the list, and so the selection.
-    editor.apply(vec![op], None)
+    // The renamed item keeps its place in the list, and so the selection, and stays
+    // hidden or locked.
+    let before = editor.named(item);
+    if !editor.apply(vec![op], None) {
+        return false;
+    }
+    if let (Some(from), Some(to)) = (before, editor.named(item)) {
+        editor.shown.rename(&from, to);
+    }
+    true
 }
 
 /// A road's profile: its left or right width, or its bank.
@@ -587,15 +637,10 @@ pub fn node_keys(
 /// Sets `curve` of the selected road to `value` at the selected nodes (all of them when
 /// none are), from the sidebar's fields.
 pub fn set_at_nodes(editor: &mut Editor, curve: Curve, value: f64, key: &str) {
-    let Some(r) = editor
-        .selection
-        .road()
-        .filter(|&r| r < editor.project.roads.len())
-    else {
+    let picked = editor.picked_nodes();
+    let Some((_, road)) = editor.road() else {
         return;
     };
-    let picked = editor.picked_nodes();
-    let road = &editor.project.roads[r];
     let count = road.nodes.len();
     let changes: Vec<(usize, f64)> = picked.into_iter().map(|n| (n, value)).collect();
     let curves: &[Curve] = match curve {
@@ -747,6 +792,44 @@ mod tests {
         reverse(&mut e);
         assert_eq!(e.selection.nodes, vec![3]);
         assert_eq!(e.project.roads[1].nodes[3].pos, DVec3::new(0.0, -50.0, 0.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_node_added_at_the_pointer_goes_where_it_was_asked_for() {
+        let (mut e, dir) = editor("add-node");
+        let built = crate::preview::Built::default();
+        // With node 2 active, a node near the far straight goes into it, between nodes
+        // 5 and 6, not after node 2.
+        e.selection.select_node(Item::Road(0), 2);
+        let at = DVec3::new(120.0, 262.0, 0.0);
+        crate::viewport::add_node_at(&mut e, &built, Some(at));
+        assert_eq!(e.project.roads[0].nodes[6].pos, at);
+        assert_eq!(e.selection.nodes, vec![6]);
+        // At an open line's end it extends the line.
+        assert!(e.apply(
+            vec![Op::AddRoad {
+                name: "pit".into(),
+                closed: false,
+                nodes: (0..3).map(|i| DVec3::new(i as f64 * 40.0, -50.0, 0.0)).collect(),
+                like: None,
+            }],
+            None
+        ));
+        e.selection.select_node(Item::Road(1), 2);
+        let at = DVec3::new(10.0, -60.0, 0.0);
+        crate::viewport::add_node_at(&mut e, &built, Some(at));
+        assert_eq!(e.project.roads[1].nodes[3].pos, at);
+        // And the graphs add nodes on the road where they are asked for.
+        let n = e.project.roads[0].nodes.len();
+        assert_eq!(insert_road_node(&mut e, 0, 0.5, Some(3.0)), Some(1));
+        let road = &e.project.roads[0];
+        assert_eq!((road.nodes.len(), road.nodes[1].pos.z), (n + 1, 3.0));
+        assert_eq!(
+            insert_road_node(&mut e, 0, 1.01, None),
+            None,
+            "a node is there"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

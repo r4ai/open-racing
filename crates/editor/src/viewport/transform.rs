@@ -56,16 +56,11 @@ pub fn start_modal(
             }
         }
         _ if matches!(mode, Mode::Width | Mode::Tilt) => {
-            let Some(r) = editor
-                .selection
-                .road()
-                .filter(|&r| r < editor.project.roads.len())
-            else {
+            let nodes = editor.picked_nodes();
+            let Some((_, road)) = editor.road() else {
                 editor.status = "Width and tilt change a road: select one, or its nodes".into();
                 return;
             };
-            let nodes = editor.picked_nodes();
-            let road = &editor.project.roads[r];
             Target::Shape {
                 road: road.name.clone(),
                 count: road.nodes.len(),
@@ -119,14 +114,15 @@ pub fn start_modal(
             }
         }
         Some(Hit::Line(road, line)) => {
-            let (Some(smp), Some(at)) = (built.roads.get(road), tool.pointer) else {
+            let Some(f) = built
+                .roads
+                .get(road)
+                .zip(tool.pointer)
+                .and_then(|(smp, at)| smp.frames.get(smp.nearest(at)))
+            else {
                 return;
             };
-            Target::Line {
-                road,
-                line,
-                s: smp.frames[smp.nearest(at)].s,
-            }
+            Target::Line { road, line, s: f.s }
         }
         Some(Hit::Reach(end)) => Target::Reach { end },
         Some(Hit::Edge(r, node, side)) => {
@@ -311,9 +307,9 @@ pub fn start_modal(
             (mode, shown_pos(editor, built, item, c))
         }
     };
-    if !by_drag || !editor.dragging {
-        editor.begin_drag();
-    }
+    // Extruding and duplicating began the drag already, with the nodes or items they
+    // add.
+    editor.begin_drag();
     tool.modal = Some(Modal {
         mode,
         target,
