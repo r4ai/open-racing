@@ -1,0 +1,28 @@
+(
+    description: "Rear drive through a plated limited-slip differential; the driveshafts.",
+    physical: (
+        shapes: [
+            (
+                name: "driveshafts",
+                kind: Cylinder(
+                    radius: 0.03,
+                    length: 1.4,
+                    axis: Y,
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 12.0,
+                colour: (0.25, 0.25, 0.27),
+                role: Link,
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Driveline((
+        drive: Rear,
+        differential: (
+            preload: 100.0,
+            power_ramp: 0.35,
+            coast_ramp: 0.25,
+        ),
+    )),
+)

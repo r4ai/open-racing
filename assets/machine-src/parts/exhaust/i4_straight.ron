@@ -1,0 +1,98 @@
+(
+    description: "A 4-into-1 and a straight pipe: no catalyst, no silencer.",
+    physical: (
+        shapes: [
+            (
+                name: "manifold",
+                kind: Box(
+                    size: (0.3, 0.4, 0.2),
+                ),
+                at: (0.0, -0.3, 0.2),
+                mass: 5.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Exhaust((
+        network: (
+            volumes: [
+                (
+                    name: "merge",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "primary.1",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.1"),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "primary.2",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.2"),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "primary.3",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.3"),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "primary.4",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.4"),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "tailpipe",
+                    length: 1.8,
+                    diameter: [
+                        (0.0, 0.055),
+                    ],
+                    wall_temperature: 650.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "merge",
+                    ),
+                    b: Ambient(
+                        at: (-3.9, 0.4, 0.3),
+                    ),
+                ),
+            ],
+            orifices: [],
+        ),
+    )),
+)

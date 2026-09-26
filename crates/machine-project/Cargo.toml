@@ -1,0 +1,23 @@
+[package]
+name = "open-racing-machine-project"
+description = "Machines built from parts (frame, engine, exhaust, suspension, tyres…), their operations, and their baking into car packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "open-racing-machinectl"
+path = "src/bin/machinectl.rs"
+
+[dependencies]
+open-racing-engine-sim.workspace = true
+open-racing-sim.workspace = true
+open-racing-car.workspace = true
+open-racing-track.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+rayon.workspace = true
+png = "0.18"

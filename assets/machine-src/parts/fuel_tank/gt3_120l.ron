@@ -1,0 +1,21 @@
+(
+    description: "120 l FIA safety cell.",
+    physical: (
+        shapes: [
+            (
+                name: "cell",
+                kind: Box(
+                    size: (0.5, 0.8, 0.35),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 14.0,
+                colour: (0.2, 0.2, 0.2),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: FuelTank((
+        capacity: 120.0,
+        density: 0.745,
+    )),
+)

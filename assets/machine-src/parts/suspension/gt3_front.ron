@@ -1,0 +1,92 @@
+(
+    description: "Double wishbones; the left corner\'s hardpoints relative to its wheel centre.",
+    physical: (
+        shapes: [
+            (
+                name: "upright",
+                kind: Box(
+                    size: (0.08, 0.06, 0.26),
+                ),
+                at: (0.0, -0.07, 0.0),
+                mass: 6.0,
+                colour: (0.25, 0.25, 0.27),
+                role: Hub,
+            ),
+            (
+                name: "disc",
+                kind: Cylinder(
+                    radius: 0.18,
+                    length: 0.035,
+                    axis: Y,
+                ),
+                at: (0.0, -0.11, 0.0),
+                mass: 11.0,
+                colour: (0.62, 0.62, 0.66),
+                role: Hub,
+            ),
+            (
+                name: "caliper",
+                kind: Box(
+                    size: (0.1, 0.05, 0.14),
+                ),
+                at: (-0.12, -0.13, 0.08),
+                mass: 4.0,
+                colour: (0.78, 0.08, 0.07),
+                role: Hub,
+            ),
+            (
+                name: "upper arm",
+                kind: Box(
+                    size: (0.3, 0.34, 0.02),
+                ),
+                at: (0.0, -0.28, 0.13),
+                mass: 3.0,
+                colour: (0.25, 0.25, 0.27),
+                role: Link,
+            ),
+            (
+                name: "lower arm",
+                kind: Box(
+                    size: (0.4, 0.48, 0.025),
+                ),
+                at: (0.0, -0.32, -0.15),
+                mass: 4.5,
+                colour: (0.25, 0.25, 0.27),
+                role: Link,
+            ),
+            (
+                name: "coil-over",
+                kind: Box(
+                    size: (0.07, 0.07, 0.3),
+                ),
+                at: (0.0, -0.45, 0.1),
+                mass: 3.0,
+                colour: (0.9, 0.7, 0.1),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Suspension((
+        track: 1.65,
+        linkage: DoubleWishbone(
+            upper: (
+                front: (0.15, -0.45, 0.106),
+                rear: (-0.15, -0.45, 0.094),
+                outer: (-0.04, -0.11, 0.17),
+            ),
+            lower: (
+                front: (0.2, -0.58, -0.171),
+                rear: (-0.2, -0.58, -0.159),
+                outer: (0.0, -0.06, -0.15),
+            ),
+            tie_rod: (
+                inner: (-0.13, -0.527, -0.065),
+                outer: (-0.13, -0.095, -0.02),
+            ),
+        ),
+        actuation: Wheel,
+        bump_travel: 0.04,
+        droop_travel: 0.07,
+        bump_stop_rate: 1000000.0,
+    )),
+)

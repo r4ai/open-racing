@@ -1,0 +1,221 @@
+(
+    description: "Both banks\' collectors into one silencer and a single central tailpipe.",
+    physical: (
+        shapes: [
+            (
+                name: "headers",
+                kind: Box(
+                    size: (0.5, 0.9, 0.2),
+                ),
+                at: (-2.0, 0.0, 0.2),
+                mass: 8.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+            (
+                name: "silencer",
+                kind: Cylinder(
+                    radius: 0.12,
+                    length: 0.45,
+                    axis: X,
+                ),
+                at: (-3.3, 0.0, 0.3),
+                mass: 9.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Exhaust((
+        network: (
+            volumes: [
+                (
+                    name: "collector.A",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "collector.B",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "merge",
+                    volume: 0.0006,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "silencer",
+                    volume: 0.007,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "primary.1",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.1"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.2",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.2"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.3",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.3"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.4",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.4"),
+                    b: Volume(
+                        name: "collector.A",
+                    ),
+                ),
+                (
+                    name: "primary.5",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.5"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.6",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.6"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.7",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.7"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "primary.8",
+                    length: 0.55,
+                    diameter: [
+                        (0.0, 0.042),
+                    ],
+                    wall_temperature: 950.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.8"),
+                    b: Volume(
+                        name: "collector.B",
+                    ),
+                ),
+                (
+                    name: "collector.A.pipe",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.072),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "collector.A",
+                    ),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "collector.B.pipe",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.072),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "collector.B",
+                    ),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "mid",
+                    length: 0.5,
+                    diameter: [
+                        (0.0, 0.09),
+                    ],
+                    wall_temperature: 650.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "merge",
+                    ),
+                    b: Volume(
+                        name: "silencer",
+                    ),
+                ),
+                (
+                    name: "tail",
+                    length: 0.5,
+                    diameter: [
+                        (0.0, 0.09),
+                    ],
+                    wall_temperature: 550.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "silencer",
+                    ),
+                    b: Ambient(
+                        at: (-3.9, 0.0, 0.3),
+                    ),
+                ),
+            ],
+            orifices: [],
+        ),
+    )),
+)

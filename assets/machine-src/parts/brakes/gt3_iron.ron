@@ -1,0 +1,35 @@
+(
+    description: "Ventilated iron discs, six-piston calipers front, four rear (discs and calipers are in the suspensions).",
+    physical: (
+        shapes: [
+            (
+                name: "master cylinders",
+                kind: Box(
+                    size: (0.15, 0.2, 0.1),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 3.0,
+                colour: (0.25, 0.25, 0.27),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Brakes((
+        brakes: (
+            max_torque: 11000.0,
+            front_bias: 0.6,
+            pad_friction: [
+                (0.0, 0.65),
+                (150.0, 0.85),
+                (350.0, 1.0),
+                (650.0, 1.0),
+                (800.0, 0.85),
+                (950.0, 0.6),
+            ],
+            disc_mass: Some((11.0, 8.5)),
+            disc_cooling: Some((110.0, 80.0)),
+            fluid_boiling_point: 320.0,
+            start_temperature: 300.0,
+        ),
+    )),
+)

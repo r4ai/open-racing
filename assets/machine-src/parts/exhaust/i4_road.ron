@@ -1,0 +1,235 @@
+(
+    description: "Road-car 4-2-1 with a catalyst, a resonator and a silencer.",
+    physical: (
+        shapes: [
+            (
+                name: "manifold",
+                kind: Box(
+                    size: (0.3, 0.4, 0.2),
+                ),
+                at: (0.0, -0.3, 0.2),
+                mass: 6.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+            (
+                name: "silencer",
+                kind: Cylinder(
+                    radius: 0.08,
+                    length: 0.45,
+                    axis: X,
+                ),
+                at: (-3.6, 0.4, 0.3),
+                mass: 7.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Exhaust((
+        network: (
+            volumes: [
+                (
+                    name: "merge.14",
+                    volume: 0.00015,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "merge.23",
+                    volume: 0.00015,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "merge",
+                    volume: 0.0003,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "cat.in",
+                    volume: 0.0008,
+                    wall_temperature: 320.0,
+                ),
+                (
+                    name: "cat.out",
+                    volume: 0.0008,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "primary.1",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.1"),
+                    b: Volume(
+                        name: "merge.14",
+                    ),
+                ),
+                (
+                    name: "primary.2",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.2"),
+                    b: Volume(
+                        name: "merge.23",
+                    ),
+                ),
+                (
+                    name: "primary.3",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.3"),
+                    b: Volume(
+                        name: "merge.23",
+                    ),
+                ),
+                (
+                    name: "primary.4",
+                    length: 0.7,
+                    diameter: [
+                        (0.0, 0.036),
+                    ],
+                    wall_temperature: 900.0,
+                    roughness: 0.0001,
+                    a: Terminal("exhaust.4"),
+                    b: Volume(
+                        name: "merge.14",
+                    ),
+                ),
+                (
+                    name: "secondary.14",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.045),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "merge.14",
+                    ),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "secondary.23",
+                    length: 0.4,
+                    diameter: [
+                        (0.0, 0.045),
+                    ],
+                    wall_temperature: 800.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "merge.23",
+                    ),
+                    b: Volume(
+                        name: "merge",
+                    ),
+                ),
+                (
+                    name: "downpipe",
+                    length: 1.0,
+                    diameter: [
+                        (0.0, 0.05),
+                    ],
+                    wall_temperature: 700.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "merge",
+                    ),
+                    b: Volume(
+                        name: "cat.in",
+                    ),
+                ),
+                (
+                    name: "catalyst",
+                    length: 0.15,
+                    diameter: [
+                        (0.0, 0.1),
+                    ],
+                    wall_temperature: 750.0,
+                    roughness: 0.0001,
+                    friction: 40.0,
+                    a: Volume(
+                        name: "cat.in",
+                    ),
+                    b: Volume(
+                        name: "cat.out",
+                    ),
+                ),
+                (
+                    name: "midpipe",
+                    length: 1.2,
+                    diameter: [
+                        (0.0, 0.05),
+                    ],
+                    wall_temperature: 550.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "cat.out",
+                    ),
+                    b: Join("resonator.in"),
+                ),
+                (
+                    name: "resonator",
+                    length: 0.35,
+                    diameter: [
+                        (0.0, 0.12),
+                    ],
+                    wall_temperature: 500.0,
+                    roughness: 0.0001,
+                    a: Join("resonator.in"),
+                    b: Join("resonator.out"),
+                ),
+                (
+                    name: "link",
+                    length: 0.9,
+                    diameter: [
+                        (0.0, 0.05),
+                    ],
+                    wall_temperature: 450.0,
+                    roughness: 0.0001,
+                    a: Join("resonator.out"),
+                    b: Join("silencer.in"),
+                ),
+                (
+                    name: "silencer",
+                    length: 0.45,
+                    diameter: [
+                        (0.0, 0.16),
+                    ],
+                    wall_temperature: 420.0,
+                    roughness: 0.0001,
+                    friction: 3.0,
+                    a: Join("silencer.in"),
+                    b: Join("silencer.out"),
+                ),
+                (
+                    name: "tailpipe",
+                    length: 0.35,
+                    diameter: [
+                        (0.0, 0.05),
+                    ],
+                    wall_temperature: 400.0,
+                    roughness: 0.0001,
+                    a: Join("silencer.out"),
+                    b: Ambient(
+                        at: (-4.2, 0.4, 0.3),
+                    ),
+                ),
+            ],
+            orifices: [],
+        ),
+    )),
+)

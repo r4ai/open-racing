@@ -20,7 +20,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (libraries and CPU trainer)
-        run: cargo clippy -p open-racing-sim -p open-racing-env -p open-racing-api -p open-racing-track -p open-racing-ac -p open-racing-train-burn --all-targets --no-default-features --features open-racing-train-burn/ndarray -- -D warnings
+        run: cargo clippy -p open-racing-sim -p open-racing-env -p open-racing-api -p open-racing-track -p open-racing-ac -p open-racing-train-burn -p open-racing-engine-sim -p open-racing-machine-project --all-targets --no-default-features --features open-racing-train-burn/ndarray -- -D warnings
       - name: Clippy (app default features)
         run: cargo clippy -p open-racing-app --all-targets -- -D warnings
 
@@ -35,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test simulation layers
-        run: cargo test -p open-racing-sim -p open-racing-env -p open-racing-api
+        run: cargo test -p open-racing-sim -p open-racing-env -p open-racing-api -p open-racing-engine-sim -p open-racing-machine-project
       - name: Build trainer (CPU backend)
         run: cargo build --release -p open-racing-train-burn --no-default-features --features ndarray
       - name: Build app
