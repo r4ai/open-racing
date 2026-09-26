@@ -209,6 +209,13 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Poly Haven's CC0 models and textures: find them, download and prepare them (a
+    /// model split into its variants, reduced to levels of detail, leaves cut out) into
+    /// a cache shared by all projects, and bring them into a project.
+    Polyhaven {
+        #[command(subcommand)]
+        command: Polyhaven,
+    },
     /// Bakes the project and checks the package, without saving it.
     Check {
         project: String,
@@ -226,6 +233,237 @@ enum Command {
         #[arg(long)]
         no_lap: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum Polyhaven {
+    /// Lists the assets whose name, tags or categories have every word of the query,
+    /// most downloaded first.
+    Search {
+        query: Vec<String>,
+        /// Textures instead of models.
+        #[arg(long)]
+        textures: bool,
+        /// Only those in this category (nature, trees, plants, grass, rocks, …).
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Shows an asset: what it is, who made it, its files' resolutions and, for a
+    /// model, the kind of plant it scatters as and whether it is prepared.
+    Info {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Downloads and prepares an asset in the cache, and shows the models it made.
+    Get {
+        id: String,
+        #[arg(long, default_value = open_racing_track_project::polyhaven::RES)]
+        res: String,
+    },
+    /// Brings an asset into a project, getting it first: a model's files with a scatter
+    /// of them, or a texture's files with a material of them, printed as an operation,
+    /// or applied with --add.
+    Import {
+        project: String,
+        id: String,
+        #[arg(long, default_value = open_racing_track_project::polyhaven::RES)]
+        res: String,
+        /// Name of the scatter or material; defaults to the asset's id.
+        #[arg(long)]
+        name: Option<String>,
+        /// Apply the operation to the project.
+        #[arg(long)]
+        add: bool,
+    },
+}
+
+/// Download progress on stderr, a line per tenth.
+fn progress() -> impl FnMut(u64, u64) {
+    let mut shown = u64::MAX;
+    move |done, total| {
+        if total == 0 {
+            return;
+        }
+        let tenth = done * 10 / total;
+        if tenth != shown {
+            shown = tenth;
+            eprintln!(
+                "downloading {:.1} of {:.1} MB",
+                done as f64 / 1e6,
+                total as f64 / 1e6
+            );
+        }
+    }
+}
+
+fn polyhaven(command: Polyhaven) -> Result<(), Error> {
+    use open_racing_track_project::polyhaven::{self as ph, AssetType};
+    let client = ph::Client::open().map_err(|e| Error::Invalid(e.to_string()))?;
+    let api = |e: ph::api::Error| Error::Invalid(e.to_string());
+    let no_hdri =
+        |id: &str| Error::Invalid(format!("{id} is an HDRI; tracks are lit by their sky"));
+    match command {
+        Polyhaven::Search {
+            query,
+            textures,
+            category,
+            limit,
+            json,
+        } => {
+            let kind = if textures {
+                AssetType::Textures
+            } else {
+                AssetType::Models
+            };
+            let query = query.join(" ");
+            let found: Vec<ph::Asset> = client
+                .catalog(kind)
+                .map_err(api)?
+                .into_iter()
+                .filter(|a| a.matches(&query))
+                .filter(|a| category.as_ref().is_none_or(|c| a.is_in(c)))
+                .take(limit)
+                .collect();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&found).expect("assets serialise")
+                );
+            } else {
+                for a in &found {
+                    let tris = a
+                        .polycount
+                        .map_or(String::new(), |n| format!(", {n} triangles"));
+                    println!(
+                        "{:<28} {}{tris} [{}]",
+                        a.id,
+                        a.name,
+                        a.categories.join(", ")
+                    );
+                }
+                println!("{}", ph::CREDIT);
+            }
+        }
+        Polyhaven::Info { id, json } => {
+            let asset = client.asset(&id).map_err(api)?;
+            let files = client.files(&id).map_err(api)?;
+            let main = match asset.asset_type() {
+                AssetType::Models => "gltf",
+                AssetType::Textures => "Diffuse",
+                AssetType::Hdris => "hdri",
+            };
+            let resolutions = files.resolutions(main);
+            let kind = ph::kind_of(&asset);
+            let ready = ph::is_ready(&client, &id, ph::RES);
+            if json {
+                let value = serde_json::json!({
+                    "asset": asset, "resolutions": resolutions, "kind": kind,
+                    "prepared": ready, "maps": files.maps().collect::<Vec<_>>(),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).expect("serialises")
+                );
+            } else {
+                println!(
+                    "{} ({:?}): {}",
+                    asset.name,
+                    asset.asset_type(),
+                    asset.page()
+                );
+                println!("{}", asset.credit());
+                if let Some(d) = &asset.description {
+                    println!("{d}");
+                }
+                println!("categories: {}", asset.categories.join(", "));
+                println!("tags: {}", asset.tags.join(", "));
+                println!("resolutions: {}", resolutions.join(", "));
+                if asset.asset_type() == AssetType::Models {
+                    let prepared = if ready { "prepared" } else { "not prepared" };
+                    println!("scatters as {kind:?}; {prepared} at {}", ph::RES);
+                }
+            }
+        }
+        Polyhaven::Get { id, res } => match client.asset(&id).map_err(api)?.asset_type() {
+            AssetType::Models => {
+                let ready = ph::model(&client, &id, &res, &mut progress())?;
+                println!("{} as {:?}: {}", ready.name, ready.kind, ready.credit);
+                for m in &ready.models {
+                    println!(
+                        "{}: {} triangles made {:?}, {:.2} × {:.2} m, {:.2} m tall",
+                        m.path.display(),
+                        m.source_triangles,
+                        m.triangles,
+                        m.size[0],
+                        m.size[2],
+                        m.size[1]
+                    );
+                }
+            }
+            AssetType::Textures => {
+                let ready = ph::texture(&client, &id, &res, &mut progress())?;
+                println!(
+                    "{}: {}{}, {} × {} m a repetition",
+                    ready.name,
+                    ready.color.display(),
+                    if ready.alpha {
+                        " (cut out by its alpha)"
+                    } else {
+                        ""
+                    },
+                    ready.tile[0],
+                    ready.tile[1]
+                );
+            }
+            AssetType::Hdris => return Err(no_hdri(&id)),
+        },
+        Polyhaven::Import {
+            project,
+            id,
+            res,
+            name,
+            add,
+        } => {
+            let dir = resolve(&project);
+            let mut p = Project::load(&dir)?;
+            let name = name.unwrap_or_else(|| id.clone());
+            let op = match client.asset(&id).map_err(api)?.asset_type() {
+                AssetType::Models => {
+                    let ready = ph::model(&client, &id, &res, &mut progress())?;
+                    let paths = ph::import_model(&dir, &ready)?;
+                    for path in &paths {
+                        eprintln!("{}", path.display());
+                    }
+                    ops::Op::PutScatter {
+                        scatter: ph::scatter(&name, &ready, &paths),
+                    }
+                }
+                AssetType::Textures => {
+                    let ready = ph::texture(&client, &id, &res, &mut progress())?;
+                    let material = ph::import_texture(&dir, &ready, &name)?;
+                    ops::Op::PutMaterial { material }
+                }
+                AssetType::Hdris => return Err(no_hdri(&id)),
+            };
+            if add {
+                ops::apply_all(&mut p, std::slice::from_ref(&op))?;
+                p.save(&dir)?;
+                println!("added {name}");
+            } else {
+                let pretty = ron::ser::PrettyConfig::default();
+                println!(
+                    "{}",
+                    ron::ser::to_string_pretty(&vec![op], pretty).expect("operations serialise")
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A picture with alpha as PNG.
@@ -351,6 +589,10 @@ fn run(cli: Cli) -> Result<(), Error> {
                 hi.y - lo.y,
                 hi.z - lo.z
             );
+            for (i, level) in m.lods.iter().enumerate() {
+                let triangles: usize = level.iter().map(|x| x.indices.len() / 3).sum();
+                println!("level of detail {}: {triangles} triangles", i + 1);
+            }
             let kind =
                 open_racing_track_project::project::ScatterModel::new(model.clone(), 1.0).kind();
             println!("as a scatter's model: {kind:?} unless its kind says otherwise");
@@ -445,6 +687,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 }
             }
         }
+        Command::Polyhaven { command } => polyhaven(command)?,
         Command::Import { project, files } => {
             let dir = resolve(&project);
             for f in &files {

@@ -366,6 +366,7 @@ fn assemble(parts: Vec<Part>) -> Model {
         });
     Model {
         meshes,
+        lods: vec![],
         look: look.build(),
         triangles,
         bounds,

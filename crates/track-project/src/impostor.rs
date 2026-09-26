@@ -444,6 +444,7 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
             Vec3::new(radius, radius, hi.z),
         ],
         meshes,
+        lods: vec![],
         look: look.build(),
     }
 }

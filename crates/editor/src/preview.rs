@@ -212,8 +212,8 @@ struct ScatterPart {
     materials: Vec<(usize, usize)>,
     /// Its far model, and the name of its look.
     far: Option<(String, Arc<Model>)>,
-    /// The distances the model in full and the far model show at.
-    levels: [Level; 2],
+    /// The distances the model's levels of detail and the far model show at.
+    levels: Vec<Level>,
     shadows: bool,
     copies: Vec<Instance>,
 }
@@ -383,7 +383,11 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
                     let look = format!("far {:p}|{kind:?}|{}", Arc::as_ptr(&f), s.shadows);
                     (look, f)
                 }),
-                levels: open_racing_track_project::scatter::fades(s, far[m].is_some()),
+                levels: open_racing_track_project::scatter::fades(
+                    s,
+                    near[m].lods.len(),
+                    far[m].is_some(),
+                ),
                 shadows: s.shadows,
                 copies: list,
             });
@@ -538,10 +542,14 @@ pub fn rebuild(
         for part in done.scatter {
             let key = (part.scatter.clone(), part.model);
             seen.insert(key.clone());
-            let mut make = |model: &Model, look: &str, slots: &[(usize, usize)]| {
+            let mut make = |model: &Model,
+                            level: &[open_racing_track::Mesh],
+                            look: &str,
+                            slots: &[(usize, usize)]| {
                 let parts = scattered.shapes.entry(look.to_string()).or_insert_with(|| {
                     shape_parts(
                         model,
+                        level,
                         look,
                         part.kind,
                         slots,
@@ -555,11 +563,23 @@ pub fn rebuild(
                 });
                 parts.clone()
             };
-            let near = make(&part.near, &part.near_look, &part.materials);
+            // Each level of the model with its own name, and the model's materials.
+            let near: Vec<(Vec<ShapePart>, Level)> = std::iter::once(&part.near.meshes)
+                .chain(&part.near.lods)
+                .zip(&part.levels)
+                .enumerate()
+                .map(|(i, (meshes, level))| {
+                    let look = match i {
+                        0 => part.near_look.clone(),
+                        i => format!("{}|lod {i}", part.near_look),
+                    };
+                    (make(&part.near, meshes, &look, &part.materials), *level)
+                })
+                .collect();
             let far = part.far.as_ref().map(|(look, far)| Far {
-                parts: make(far, look, &[]),
+                parts: make(far, &far.meshes, look, &[]),
                 model: far.clone(),
-                level: part.levels[1],
+                level: *part.levels.last().expect("a level at least"),
                 tiles: HashMap::new(),
             });
             let look = format!(
@@ -574,7 +594,7 @@ pub fn rebuild(
                 &mut meshes,
                 key,
                 look,
-                (near, part.levels[0]),
+                near,
                 far,
                 part.copies,
             );
@@ -623,17 +643,19 @@ pub fn rebuild(
 
 /// The name of a model's own materials among those made for models: its path (or
 /// what names its far model) and its kind of plant, without the project's materials
-/// used for some of them.
+/// used for some of them or its level of detail.
 fn model_look(look: &str) -> String {
     look.split('|').take(2).collect::<Vec<_>>().join("|")
 }
 
-/// A model's meshes ready to draw copies of: its own materials as a plant of
-/// `kind`, made once for the model and the kind, with the project's used for some
-/// of them (`slots`: the model's material, the project's), made the plant's too.
+/// Meshes of a model (those of one of its levels of detail) ready to draw copies of:
+/// the model's own materials as a plant of `kind`, made once for the model and the
+/// kind, with the project's used for some of them (`slots`: the model's material, the
+/// project's), made the plant's too.
 #[allow(clippy::too_many_arguments)]
 fn shape_parts(
     model: &Model,
+    level: &[open_racing_track::Mesh],
     look: &str,
     kind: Kind,
     slots: &[(usize, usize)],
@@ -651,8 +673,7 @@ fn shape_parts(
         .or_insert_with(|| render::add_materials(&plant, formats, 16, materials, images))
         .clone();
     let fallback = state.handles.first().cloned().unwrap_or_default();
-    model
-        .meshes
+    level
         .iter()
         .map(|m| {
             let slot = m.material as usize;
@@ -693,10 +714,11 @@ struct Group {
     entity: Entity,
     /// What the copies are drawn with: the model's looks, levels, and materials.
     look: String,
-    near: (Vec<ShapePart>, Level),
+    /// The model's levels of detail, each drawn at every copy.
+    near: Vec<(Vec<ShapePart>, Level)>,
     far: Option<Far>,
     copies: Vec<Instance>,
-    /// The entities of each copy in full.
+    /// The entities of each copy of the model.
     entities: Vec<Vec<Entity>>,
 }
 
@@ -721,7 +743,7 @@ impl Scattered {
         meshes: &mut Assets<Mesh>,
         key: (String, usize),
         look: String,
-        near: (Vec<ShapePart>, Level),
+        near: Vec<(Vec<ShapePart>, Level)>,
         far: Option<Far>,
         copies: Vec<Instance>,
     ) {
@@ -814,18 +836,23 @@ impl Scattered {
     }
 }
 
-/// The entities of one copy: each mesh of the model in full, under `group`.
+/// The entities of one copy: each mesh of each of the model's levels of detail, under
+/// `group`.
 fn spawn_copy(
     commands: &mut Commands,
     group: Entity,
-    (parts, level): &(Vec<ShapePart>, Level),
+    levels: &[(Vec<ShapePart>, Level)],
     c: &Instance,
 ) -> Vec<Entity> {
     let t = render::instance_transform(c);
-    let range = render::visibility_range(*level);
-    parts
+    levels
         .iter()
-        .map(|part| {
+        .flat_map(|(parts, level)| {
+            parts
+                .iter()
+                .map(move |part| (part, render::visibility_range(*level)))
+        })
+        .map(|(part, range)| {
             let mut e = commands.spawn((
                 Mesh3d(part.mesh.clone()),
                 MeshMaterial3d(part.material.clone()),

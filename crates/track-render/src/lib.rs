@@ -309,7 +309,7 @@ pub fn spawn_visual(
     for set in &visual.instances {
         for level in &set.levels {
             let shape = level.shape as usize;
-            if !merged(*level) {
+            if !merged(*level, &visual.shapes[shape]) {
                 for part in &shapes[shape] {
                     spawn_copies(commands, part, *level, &set.copies, extra.clone());
                 }
@@ -411,10 +411,16 @@ pub fn spawn_copies(
 /// only near the camera, so their copies stay entities of their own.
 pub const TILE: f32 = 32.0;
 
-/// Whether a level's copies are merged by tile: those of the levels that fade in,
-/// farther than the nearest.
-pub fn merged(level: Level) -> bool {
-    level.fade_in[1] > 0.0
+/// Triangles a shape may have for its copies to be merged by tile: pictures on cards,
+/// not a model's less detailed levels, whose copies merged would take far more memory
+/// than they save work.
+pub const MERGED_TRIANGLES: usize = 256;
+
+/// Whether a level's copies are merged by tile: those of the light levels that fade
+/// in, farther than the nearest.
+pub fn merged(level: Level, shape: &open_racing_track::Shape) -> bool {
+    let triangles: usize = shape.meshes.iter().map(|m| m.indices.len() / 3).sum();
+    level.fade_in[1] > 0.0 && triangles <= MERGED_TRIANGLES
 }
 
 /// The tile a copy stands in.

@@ -1,0 +1,12 @@
+[package]
+name = "open-racing-polyhaven"
+description = "Poly Haven's library of CC0 models and textures: its catalogue, and its files downloaded to a cache on disk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq = "2.12"
+md5 = "0.8"

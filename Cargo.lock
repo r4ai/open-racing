@@ -4689,6 +4689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "float-cmp"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "float-ord"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6258,6 +6267,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "meshopt"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01e77ead21976b3a9f01ec1724f766923da74f0726364e2b0f425658935d71a"
+dependencies = [
+ "bitflags 2.13.2",
+ "cc",
+ "float-cmp",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7222,6 +7243,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-racing-polyhaven"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "open-racing-sim"
 version = "0.1.0"
 dependencies = [
@@ -7262,6 +7293,8 @@ dependencies = [
  "clap",
  "glam 0.33.8",
  "gltf",
+ "meshopt",
+ "open-racing-polyhaven",
  "open-racing-sim",
  "open-racing-track",
  "png",

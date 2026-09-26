@@ -1,12 +1,12 @@
 //! 3D models for props: glTF files (.glb, or .gltf with its buffers and images) read into
 //! meshes and materials in the simulation's frame (Z up), and placed in the scene.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use glam::{DMat3, DVec3, Mat3, Mat4, Vec3};
 use open_racing_sim::GroundMesh;
-use open_racing_track::texture::{self, Image};
+use open_racing_track::texture::{self, Image, Mips};
 use open_racing_track::{AlphaMode, Material, Mesh, Texture, Varies, Visual, VisualBuilder};
 
 use crate::Error;
@@ -17,6 +17,9 @@ use crate::project::Prop;
 pub struct Model {
     /// Meshes with materials indexing `look.materials`.
     pub meshes: Vec<Mesh>,
+    /// Less detailed levels of the model, each lighter than the one before, with the
+    /// same materials: nodes named `<name>_LOD1`, `_LOD2`, … in the file.
+    pub lods: Vec<Vec<Mesh>>,
     /// The model's materials and their textures (no meshes).
     pub look: Visual,
     pub triangles: usize,
@@ -29,7 +32,7 @@ fn z_up(v: Vec3) -> Vec3 {
     Vec3::new(v.x, -v.z, v.y)
 }
 
-fn rgba(data: &gltf::image::Data) -> Option<Image> {
+pub(crate) fn rgba(data: &gltf::image::Data) -> Option<Image> {
     use gltf::image::Format as F;
     let px = &data.pixels;
     let pixels: Vec<u8> = match data.format {
@@ -62,24 +65,31 @@ pub fn load(path: &Path) -> Result<Model, Error> {
     let (doc, buffers, images) = gltf::import(path).map_err(|e| fail(&e))?;
 
     let mut look = VisualBuilder::new();
-    let mut textures: HashMap<usize, Option<u32>> = HashMap::new();
-    let mut texture = |look: &mut VisualBuilder, t: gltf::Texture| {
+    // By the image and, for colour cut out by its alpha, the cut-off: its mip levels
+    // keep as much standing, so that leaves do not thin out with distance.
+    let mut textures: HashMap<(usize, Option<u32>), Option<u32>> = HashMap::new();
+    let mut texture = |look: &mut VisualBuilder, t: gltf::Texture, cutoff: Option<f32>| {
         let i = t.source().index();
-        *textures.entry(i).or_insert_with(|| {
-            let image = rgba(images.get(i)?)?;
-            Some(look.add_texture(Texture {
-                data: texture::encode(image),
-            }))
-        })
+        *textures
+            .entry((i, cutoff.map(f32::to_bits)))
+            .or_insert_with(|| {
+                let image = rgba(images.get(i)?)?;
+                let mips = cutoff.map_or(Mips::Complete, Mips::AlphaTest);
+                Some(look.add_texture(Texture {
+                    data: texture::encode_with(image, mips),
+                }))
+            })
     };
     for m in doc.materials() {
         let pbr = m.pbr_metallic_roughness();
+        let cutoff = (m.alpha_mode() == gltf::material::AlphaMode::Mask)
+            .then(|| m.alpha_cutoff().unwrap_or(0.5));
         let base_color_texture = pbr
             .base_color_texture()
-            .and_then(|t| texture(&mut look, t.texture()));
+            .and_then(|t| texture(&mut look, t.texture(), cutoff));
         let normal_texture = m
             .normal_texture()
-            .and_then(|t| texture(&mut look, t.texture()));
+            .and_then(|t| texture(&mut look, t.texture(), None));
         look.add_material(Material {
             base_color: pbr.base_color_factor(),
             base_color_texture,
@@ -101,16 +111,18 @@ pub fn load(path: &Path) -> Result<Model, Error> {
     // For primitives without a material.
     let plain = look.add_material(Material::default());
 
-    let mut meshes = Vec::new();
+    // Meshes by their level of detail.
+    let mut levels: BTreeMap<usize, Vec<Mesh>> = BTreeMap::new();
     let scene = doc.default_scene().or_else(|| doc.scenes().next());
-    let mut stack: Vec<(gltf::Node, Mat4)> = scene
+    let mut stack: Vec<(gltf::Node, Mat4, usize)> = scene
         .iter()
         .flat_map(|s| s.nodes())
-        .map(|n| (n, Mat4::IDENTITY))
+        .map(|n| (n, Mat4::IDENTITY, 0))
         .collect();
-    while let Some((node, parent)) = stack.pop() {
+    while let Some((node, parent, level)) = stack.pop() {
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-        stack.extend(node.children().map(|c| (c, world)));
+        let level = node.name().and_then(lod_of).unwrap_or(level);
+        stack.extend(node.children().map(|c| (c, world, level)));
         let Some(mesh) = node.mesh() else { continue };
         let normal_matrix = Mat3::from_mat4(world).inverse().transpose();
         let flip = world.determinant() < 0.0;
@@ -144,7 +156,7 @@ pub fn load(path: &Path) -> Result<Model, Error> {
                 Some(uv) => uv.into_f32().collect(),
                 None => vec![[0.0; 2]; positions.len()],
             };
-            meshes.push(Mesh {
+            levels.entry(level).or_default().push(Mesh {
                 material: prim.material().index().map_or(plain, |i| i as u32),
                 cast_shadows: true,
                 positions: positions.iter().map(|p| p.to_array()).collect(),
@@ -154,6 +166,9 @@ pub fn load(path: &Path) -> Result<Model, Error> {
             });
         }
     }
+    let mut levels = levels.into_values();
+    let meshes = levels.next().unwrap_or_default();
+    let lods: Vec<Vec<Mesh>> = levels.collect();
     let triangles = meshes.iter().map(|m| m.indices.len() / 3).sum();
     let bounds = meshes
         .iter()
@@ -166,6 +181,7 @@ pub fn load(path: &Path) -> Result<Model, Error> {
     }
     Ok(Model {
         meshes,
+        lods,
         look: look.build(),
         triangles,
         bounds,
@@ -174,7 +190,7 @@ pub fn load(path: &Path) -> Result<Model, Error> {
 
 /// Whether a material of a plant's model is its leaves: cut out by its alpha, as leaf
 /// cards are, or named as leaves.
-fn leaves(m: &gltf::Material) -> bool {
+pub(crate) fn leaves(m: &gltf::Material) -> bool {
     let name = m.name().unwrap_or_default().to_lowercase();
     m.alpha_mode() != gltf::material::AlphaMode::Opaque
         || [
@@ -182,6 +198,15 @@ fn leaves(m: &gltf::Material) -> bool {
         ]
         .iter()
         .any(|w| name.contains(w))
+}
+
+/// The level of detail a node's name gives it: `tree_LOD2` is level 2.
+pub fn lod_of(name: &str) -> Option<usize> {
+    let (_, level) = name.rsplit_once('_')?;
+    let digits = level
+        .strip_prefix("LOD")
+        .or_else(|| level.strip_prefix("lod"))?;
+    digits.parse().ok()
 }
 
 /// Vertex normals averaged from the faces round each vertex.
@@ -365,6 +390,7 @@ mod tests {
                 uvs: vec![[0.0; 2]; n],
                 indices,
             }],
+            lods: vec![],
             look: VisualBuilder::new().build(),
             triangles: 12,
             bounds: [Vec3::new(0.0, -0.5, 0.0), Vec3::new(1.0, 0.5, 1.0)],

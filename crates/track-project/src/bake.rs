@@ -666,10 +666,9 @@ fn scatter_look(
 
 /// A model's meshes as a shape of `visual`, with its materials there and casting
 /// shadows if `shadows`.
-fn shape(model: &Model, materials: &[u32], shadows: bool) -> Shape {
+fn shape(meshes: &[open_racing_track::Mesh], materials: &[u32], shadows: bool) -> Shape {
     Shape {
-        meshes: model
-            .meshes
+        meshes: meshes
             .iter()
             .map(|m| open_racing_track::Mesh {
                 material: materials.get(m.material as usize).copied().unwrap_or(0),
@@ -713,20 +712,30 @@ pub fn add_scatter(
                 s.shadows
             );
             let model = &near[i];
-            let near_shape = *shapes.entry(key).or_insert_with(|| {
-                let materials = scatter_look(project, m, model, &mut looks, visual);
-                visual.add_shape(shape(model, &materials, s.shadows))
-            });
-            let [mut first, mut second] = crate::scatter::fades(s, far[i].is_some());
-            first.shape = near_shape;
-            let mut levels = vec![first];
-            if let Some(f) = &far[i] {
+            let mut levels = crate::scatter::fades(s, model.lods.len(), far[i].is_some());
+            // The model's levels, with the same materials, and the far model.
+            let mut materials: Option<Vec<u32>> = None;
+            let meshes = std::iter::once(&model.meshes).chain(&model.lods);
+            for (level, (lod, meshes)) in levels.iter_mut().zip(meshes.enumerate()) {
+                let key = format!("{key}|{lod}");
+                level.shape = match shapes.get(&key) {
+                    Some(&shape) => shape,
+                    None => {
+                        let materials = materials.get_or_insert_with(|| {
+                            scatter_look(project, m, model, &mut looks, visual)
+                        });
+                        let made = visual.add_shape(shape(meshes, materials, s.shadows));
+                        shapes.insert(key, made);
+                        made
+                    }
+                };
+            }
+            if let (Some(f), Some(level)) = (&far[i], levels.last_mut()) {
                 let key = format!("far {:p}|{kind:?}|{}", Arc::as_ptr(f), s.shadows);
-                second.shape = *shapes.entry(key).or_insert_with(|| {
+                level.shape = *shapes.entry(key).or_insert_with(|| {
                     let materials = add_look(&crate::scatter::varied_look(f, kind), visual);
-                    visual.add_shape(shape(f, &materials, s.shadows))
+                    visual.add_shape(shape(&f.meshes, &materials, s.shadows))
                 });
-                levels.push(second);
             }
             visual.add_instances(Instances {
                 levels,

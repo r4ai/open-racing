@@ -26,6 +26,8 @@ pub mod model;
 pub mod ops;
 pub mod overlap;
 pub mod pitlane;
+pub mod polyhaven;
+pub mod prepare;
 pub mod preview;
 pub mod project;
 pub mod road;

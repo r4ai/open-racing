@@ -18,7 +18,9 @@ ron.workspace = true
 serde_json.workspace = true
 png = "0.18"
 clap.workspace = true
-gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names", "KHR_texture_transform"] }
+meshopt = "0.6"
+open-racing-polyhaven.workspace = true
 urlencoding = "2.1.3"
 rayon.workspace = true
 tiff = "0.11"

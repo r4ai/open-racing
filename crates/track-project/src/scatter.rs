@@ -481,10 +481,12 @@ pub fn copies(s: &Scatter, keepout: &Keepout, ground: &GroundMesh) -> Vec<Copy> 
         .collect()
 }
 
-/// The distances over which a scatter's levels fade in and out, m: the models in full
-/// out to `detail`, the far models (if `far`) from there out to `draw`. Their shapes
-/// are left to be filled in.
-pub fn fades(s: &Scatter, far: bool) -> [Level; 2] {
+/// The distances over which a scatter's levels fade in and out, m: the model in full
+/// near the camera, then its `lods` less detailed levels, each taking over at twice the
+/// distance of the one before and the last out to `detail`, then the far model (if
+/// `far`) out to `draw`. Without a far model the last level shows out to `draw`. Their
+/// shapes are left to be filled in.
+pub fn fades(s: &Scatter, lods: usize, far: bool) -> Vec<Level> {
     let draw = if s.draw > 0.0 {
         s.draw as f32
     } else {
@@ -498,18 +500,31 @@ pub fn fades(s: &Scatter, far: bool) -> [Level; 2] {
             [d, d + (0.1 * d).clamp(4.0, 40.0)]
         }
     };
-    [
-        Level {
+    // Where each level of the model ends.
+    let ends: Vec<f32> = (0..=lods)
+        .map(|i| match lods - i {
+            0 if far => detail,
+            0 => draw,
+            n => detail / (1 << n) as f32,
+        })
+        .collect();
+    let mut levels: Vec<Level> = ends
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| Level {
             shape: 0,
-            fade_in: [0.0; 2],
-            fade_out: end(if far { detail } else { draw }),
-        },
-        Level {
+            fade_in: if i == 0 { [0.0; 2] } else { end(ends[i - 1]) },
+            fade_out: end(d),
+        })
+        .collect();
+    if far {
+        levels.push(Level {
             shape: 0,
             fade_in: end(detail),
             fade_out: end(draw),
-        },
-    ]
+        });
+    }
+    levels
 }
 
 /// Each of the scatter's models' copies, where the renderer draws them, with their
@@ -1060,15 +1075,29 @@ pub(crate) mod tests {
     #[test]
     fn far_models_take_over_at_the_detail_distance() {
         let s = woods(vec![]);
-        let [near, far] = fades(&s, true);
+        let [near, far] = fades(&s, 0, true)[..] else {
+            panic!("two levels")
+        };
         assert_eq!(near.fade_out, far.fade_in);
         assert_eq!(near.fade_out[0], 150.0);
         assert_eq!(far.fade_out[0], 2000.0);
         // Without far models the models in full show out to the draw distance.
-        let [near, _] = fades(&s, false);
-        assert_eq!(near.fade_out[0], 2000.0);
+        assert_eq!(fades(&s, 0, false)[0].fade_out[0], 2000.0);
         // Drawn however far: never faded out.
-        let [_, far] = fades(&Scatter { draw: 0.0, ..s }, true);
+        let far = fades(&Scatter { draw: 0.0, ..s }, 0, true)[1];
         assert_eq!(far.fade_out, [FAR_AWAY; 2]);
+    }
+
+    #[test]
+    fn levels_of_detail_take_over_at_doubling_distances() {
+        let s = woods(vec![]);
+        let levels = fades(&s, 2, true);
+        let starts: Vec<f32> = levels.iter().map(|l| l.fade_in[0]).collect();
+        assert_eq!(starts, [0.0, 37.5, 75.0, 150.0]);
+        for pair in levels.windows(2) {
+            assert_eq!(pair[0].fade_out, pair[1].fade_in);
+        }
+        // Without far models the last level shows out to the draw distance.
+        assert_eq!(fades(&s, 2, false)[2].fade_out[0], 2000.0);
     }
 }
