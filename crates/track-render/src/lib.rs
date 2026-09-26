@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, Face, ShaderType};
 use bevy::shader::ShaderRef;
 use glam::{DQuat, DVec3};
-use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, Visual};
+use open_racing_track::{AlphaMode as TrackAlpha, DetailMask, FAR_AWAY, Instance, Level, Visual};
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
 pub fn to_bevy(v: DVec3) -> Vec3 {
@@ -30,10 +30,14 @@ pub fn from_bevy(v: Vec3) -> DVec3 {
 }
 
 pub fn quat_to_bevy(q: DQuat) -> Quat {
-    let c = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     // The sim's glam and Bevy's glam may be different crate versions.
-    let q = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
-    c * q * c.inverse()
+    rotation_to_bevy([q.x as f32, q.y as f32, q.z as f32, q.w as f32])
+}
+
+/// A rotation (x, y, z, w) of the simulation's axes in Bevy's.
+pub fn rotation_to_bevy([x, y, z, w]: [f32; 4]) -> Quat {
+    let c = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    c * Quat::from_xyzw(x, y, z, w) * c.inverse()
 }
 
 pub type TrackMaterial = ExtendedMaterial<StandardMaterial, TrackExtension>;
@@ -160,8 +164,11 @@ impl Images<'_> {
     }
 }
 
-/// Spawns a package's render data: one entity per mesh batch, each with `extra` (e.g. a
-/// marker to find and despawn them again).
+/// Spawns a package's render data, each entity with `extra` (e.g. a marker to find and
+/// despawn them again): one per mesh batch; for copies of shapes, one per copy of each
+/// mesh of their nearest level, which share the mesh and its material so that the
+/// renderer draws them together by instancing, and their farther levels merged by tile
+/// (see `TILE`).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_visual(
     commands: &mut Commands,
@@ -174,44 +181,230 @@ pub fn spawn_visual(
     extra: impl Bundle + Clone,
 ) {
     let mats = add_materials(&visual, formats, anisotropy, materials, images);
-    for mut m in visual.meshes {
+    let shapes = add_shapes(&visual, &mats, meshes);
+    for m in visual.meshes {
         let (material, cast_shadows) = (mats[m.material as usize].clone(), m.cast_shadows);
-        let lod = level_of_detail(&mut m);
         let mut entity = commands.spawn((
             Mesh3d(meshes.add(to_mesh(m))),
             MeshMaterial3d(material),
             extra.clone(),
         ));
-        if let Some(lod) = lod {
-            entity.insert(lod);
-        }
         if !cast_shadows {
             entity.insert(NotShadowCaster);
         }
     }
-}
-
-/// For a mesh drawn within a range of distances: moves its positions to be about the
-/// centre the distances are measured from, and gives where to put it and the range.
-/// The levels of detail of the same things then share their place, so that they
-/// cross-fade.
-pub fn level_of_detail(m: &mut open_racing_track::Mesh) -> Option<(Transform, VisibilityRange)> {
-    let lod = m.lod?;
-    let [cx, cy, cz] = lod.center;
-    for p in &mut m.positions {
-        *p = [p[0] - cx, p[1] - cy, p[2] - cz];
+    for set in &visual.instances {
+        for level in &set.levels {
+            let shape = level.shape as usize;
+            if !merged(*level) {
+                for part in &shapes[shape] {
+                    spawn_copies(commands, part, *level, &set.copies, extra.clone());
+                }
+                continue;
+            }
+            for (tile, copies) in tiles(&set.copies) {
+                let (at, parts) = merge_tile(&visual.shapes[shape].meshes, &copies, tile);
+                for (m, part) in parts.into_iter().zip(&shapes[shape]) {
+                    spawn_tile(commands, meshes, part, m, at, *level, extra.clone());
+                }
+            }
+        }
     }
-    Some((
-        Transform::from_translation(to_bevy(DVec3::new(cx as f64, cy as f64, cz as f64))),
-        VisibilityRange {
-            start_margin: lod.fade_in[0]..lod.fade_in[1],
-            end_margin: lod.fade_out[0]..lod.fade_out[1],
-            use_aabb: false,
-        },
-    ))
 }
 
-/// The compressed texture formats the GPU supports, BC when not known yet.
+/// One mesh of a shape, ready to draw copies of.
+#[derive(Clone)]
+pub struct ShapePart {
+    pub mesh: Handle<Mesh>,
+    pub material: Handle<TrackMaterial>,
+    pub cast_shadows: bool,
+}
+
+/// The meshes of the package's shapes, each added once, with their materials among
+/// `mats` (from `add_materials`).
+pub fn add_shapes(
+    visual: &Visual,
+    mats: &[Handle<TrackMaterial>],
+    meshes: &mut Assets<Mesh>,
+) -> Vec<Vec<ShapePart>> {
+    visual
+        .shapes
+        .iter()
+        .map(|s| {
+            s.meshes
+                .iter()
+                .map(|m| ShapePart {
+                    mesh: meshes.add(to_mesh(m.clone())),
+                    material: mats.get(m.material as usize).cloned().unwrap_or_default(),
+                    cast_shadows: m.cast_shadows,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Where a copy stands, in Bevy's axes.
+pub fn instance_transform(c: &Instance) -> Transform {
+    let [x, y, z] = c.pos;
+    Transform {
+        translation: Vec3::new(x, z, -y),
+        rotation: rotation_to_bevy(c.rotation),
+        scale: Vec3::splat(c.scale),
+    }
+}
+
+/// The distances from the camera a level of detail shows at, unless it shows at any.
+pub fn visibility_range(level: Level) -> Option<VisibilityRange> {
+    (level.fade_in[1] > 0.0 || level.fade_out[0] < FAR_AWAY).then(|| VisibilityRange {
+        start_margin: level.fade_in[0]..level.fade_in[1],
+        end_margin: level.fade_out[0]..level.fade_out[1],
+        use_aabb: false,
+    })
+}
+
+/// Spawns a copy of a shape's mesh at each of `copies`, shown at the distances of
+/// `level`: the entities share the mesh and the material, and the renderer draws them
+/// in one go.
+pub fn spawn_copies(
+    commands: &mut Commands,
+    part: &ShapePart,
+    level: Level,
+    copies: &[Instance],
+    extra: impl Bundle + Clone,
+) {
+    let range = visibility_range(level);
+    for c in copies {
+        let mut e = commands.spawn((
+            Mesh3d(part.mesh.clone()),
+            MeshMaterial3d(part.material.clone()),
+            instance_transform(c),
+            extra.clone(),
+        ));
+        if let Some(range) = &range {
+            e.insert(range.clone());
+        }
+        if !part.cast_shadows {
+            e.insert(NotShadowCaster);
+        }
+    }
+}
+
+/// Edge of the square tiles the copies of far levels are merged in, m.
+///
+/// A far level shows for nearly every copy in view, and the renderer's work on the CPU
+/// grows with the entities in view: tens of thousands of copies of a few triangles each
+/// cost far more as entities than as the vertices they add. The levels in full show
+/// only near the camera, so their copies stay entities of their own.
+pub const TILE: f32 = 32.0;
+
+/// Whether a level's copies are merged by tile: those of the levels that fade in,
+/// farther than the nearest.
+pub fn merged(level: Level) -> bool {
+    level.fade_in[1] > 0.0
+}
+
+/// The tile a copy stands in.
+pub fn tile_of(c: &Instance) -> [i32; 2] {
+    [
+        (c.pos[0] / TILE).floor() as i32,
+        (c.pos[1] / TILE).floor() as i32,
+    ]
+}
+
+/// Copies grouped by their tile, in the order of the tiles.
+pub fn tiles(copies: &[Instance]) -> Vec<([i32; 2], Vec<Instance>)> {
+    let mut by: std::collections::BTreeMap<[i32; 2], Vec<Instance>> = Default::default();
+    for c in copies {
+        by.entry(tile_of(c)).or_default().push(*c);
+    }
+    by.into_iter().collect()
+}
+
+/// The copies in a tile merged: each of the shape's meshes at every copy, about the
+/// tile's middle, and where the middle is, whose distance from the camera the tile
+/// shows by.
+pub fn merge_tile(
+    meshes: &[open_racing_track::Mesh],
+    copies: &[Instance],
+    tile: [i32; 2],
+) -> (Transform, Vec<open_racing_track::Mesh>) {
+    let z = copies.iter().map(|c| c.pos[2]).sum::<f32>() / copies.len().max(1) as f32;
+    let middle = Vec3::new(
+        (tile[0] as f32 + 0.5) * TILE,
+        (tile[1] as f32 + 0.5) * TILE,
+        z,
+    );
+    let merged = meshes
+        .iter()
+        .map(|part| {
+            let mut m = open_racing_track::Mesh {
+                material: part.material,
+                cast_shadows: part.cast_shadows,
+                ..Default::default()
+            };
+            for c in copies {
+                let [x, y, z, w] = c.rotation;
+                let turn = Quat::from_xyzw(x, y, z, w);
+                let at = Vec3::from_array(c.pos) - middle;
+                let base = m.positions.len() as u32;
+                for (p, n) in part.positions.iter().zip(&part.normals) {
+                    m.positions
+                        .push((at + turn * (Vec3::from_array(*p) * c.scale)).to_array());
+                    m.normals.push((turn * Vec3::from_array(*n)).to_array());
+                }
+                m.uvs.extend(&part.uvs);
+                m.indices.extend(part.indices.iter().map(|i| i + base));
+            }
+            m
+        })
+        .collect();
+    let [x, y, z] = middle.to_array();
+    (Transform::from_translation(Vec3::new(x, z, -y)), merged)
+}
+
+/// The distances a far level's tile shows at: the level's, measured from the tile's
+/// middle rather than from each copy, so widened by half the tile's diagonal. A tile is
+/// in full by the time the copies of it nearest the camera have faded out of the level
+/// before, so that none go missing between the levels.
+pub fn tile_range(level: Level) -> Option<VisibilityRange> {
+    let h = TILE * std::f32::consts::FRAC_1_SQRT_2;
+    visibility_range(Level {
+        fade_in: level.fade_in.map(|d| (d - h).max(0.0)),
+        fade_out: level
+            .fade_out
+            .map(|d| if d >= FAR_AWAY { d } else { d + h }),
+        ..level
+    })
+}
+
+/// Spawns a tile of a far level: one of its shape's meshes merged at every copy in it
+/// (`merge_tile`), in the look of `part`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_tile(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    part: &ShapePart,
+    mesh: open_racing_track::Mesh,
+    at: Transform,
+    level: Level,
+    extra: impl Bundle,
+) -> Entity {
+    let mut e = commands.spawn((
+        Mesh3d(meshes.add(to_mesh(mesh))),
+        MeshMaterial3d(part.material.clone()),
+        at,
+        extra,
+    ));
+    if let Some(range) = tile_range(level) {
+        e.insert(range);
+    }
+    if !part.cast_shadows {
+        e.insert(NotShadowCaster);
+    }
+    e.id()
+}
+
+// The compressed texture formats the GPU supports, BC when not known yet.
 pub fn formats(support: Option<&CompressedImageFormatSupport>) -> CompressedImageFormats {
     support.map_or(CompressedImageFormats::BC, |f| f.0)
 }

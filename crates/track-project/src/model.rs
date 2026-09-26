@@ -147,7 +147,6 @@ pub fn load(path: &Path) -> Result<Model, Error> {
                 normals: normals.iter().map(|n| n.to_array()).collect(),
                 uvs,
                 indices,
-                lod: None,
             });
         }
     }
@@ -269,7 +268,6 @@ pub fn along(model: &Model, line: &crate::road::ModelLine) -> Vec<Mesh> {
                     normals: vec![],
                     uvs: vec![],
                     indices: vec![],
-                    lod: None,
                 };
                 for k in first..last {
                     let base = mesh.positions.len() as u32;
@@ -350,7 +348,6 @@ mod tests {
                 normals,
                 uvs: vec![[0.0; 2]; n],
                 indices,
-                lod: None,
             }],
             look: VisualBuilder::new().build(),
             triangles: 12,

@@ -372,7 +372,6 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
         normals,
         uvs,
         indices,
-        lod: None,
     };
     Model {
         triangles: mesh.indices.len() / 3,

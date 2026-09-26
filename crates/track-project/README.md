@@ -212,11 +212,15 @@ spectators.
   but on a road or kerb. `seed` (drawn from the name when 0) is where the painted copies'
   places come from; a rename keeps it, so the copies stay where they are.
 - Levels of detail: copies show their models in full out to `detail` metres from the
-  camera, then a lighter far model out to `draw` metres (0: however far), crossfading
-  tile by tile. A model's far model is its `far` file, or else pictures of it drawn
-  from three sides onto crossed cards when the project is built, so a wood of
-  thousands of trees costs a few triangles a tree in the distance. With `draw` no more
-  than `detail` the models are shown in full and nothing beyond.
+  camera, then a lighter far model out to `draw` metres (0: however far), crossfading.
+  A model's far model is its `far` file, or else pictures of it drawn from three sides
+  onto crossed cards when the project is built, so a wood of thousands of trees costs a
+  few triangles a tree in the distance. With `draw` no more than `detail` the models
+  are shown in full and nothing beyond.
+- The package keeps each model once, with a list of where each copy stands (32 bytes a
+  copy), and the game draws the copies by instancing: a wood of tens of thousands of
+  trees adds little to the file and the memory. The far models' copies are merged by
+  32 m tiles when the track loads, as few triangles cost less than many entities.
 - A model's `materials: [(slot, material)]` use the project's materials in place of its
   own, by their place in the model (its first material is slot 0): a bark or leaf
   texture of your own, laid by the model's UVs.

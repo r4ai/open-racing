@@ -1,6 +1,8 @@
 //! The 3D preview: the project's meshes, rebuilt in the background whenever the project
 //! changes, in the same materials the game renders them with, and its props, placed
-//! from the project every frame so that they follow edits at once.
+//! from the project every frame so that they follow edits at once. Scatters' copies are
+//! drawn by instancing as the game draws them, each copy an entity that is moved in
+//! place when only it changed.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -19,7 +21,8 @@ use open_racing_track_project::project::MaterialDef;
 use open_racing_track_project::road::MeshData;
 use open_racing_track_project::terrain::{PaintMask, TerrainBuild};
 use open_racing_track_project::{Cache, Project, bake};
-use open_racing_track_render::{self as render, TrackMaterial, to_bevy};
+use open_racing_track::{Instance, Level};
+use open_racing_track_render::{self as render, ShapePart, TrackMaterial, to_bevy};
 
 use crate::assets::Library;
 use crate::state::{Editor, Item};
@@ -42,9 +45,10 @@ pub struct PreviewRow(usize);
 #[derive(Component)]
 pub struct TerrainChunk(pub usize);
 
-/// Copies of models of scatter `.0`, merged.
+/// The copies of one of the models of the scatter named `.0`: their entities are its
+/// children.
 #[derive(Component)]
-pub struct PreviewScatter(pub usize);
+pub struct PreviewScatter(pub String);
 
 /// The painted ground's mask as the renderer has it: brushes paint on it while they
 /// are dragged.
@@ -170,7 +174,7 @@ struct Meshes {
     /// Walls models show: whose, the model, and its copies along them.
     walls: Vec<(Item, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
     terrain: Option<Arc<TerrainBuild>>,
-    /// Each scatter's copies merged by model and level of detail, and its copies.
+    /// The copies of each of each scatter's models, and the copies as they stand.
     scatter: Vec<ScatterPart>,
     scattered: Vec<usize>,
     copies: Vec<Arc<Vec<open_racing_track_project::scatter::Copy>>>,
@@ -186,18 +190,24 @@ struct Meshes {
     scene_failed: Vec<String>,
 }
 
-/// Copies of one of a scatter's models at one level of detail, merged by tile.
+/// The copies of one of a scatter's models, to draw by instancing.
 struct ScatterPart {
-    /// Which scatter.
-    scatter: usize,
-    /// Names the model's materials for the renderer: its path near, its far model's
-    /// own far.
-    look: String,
-    model: Arc<Model>,
+    /// The scatter's name, and which of its models.
+    scatter: String,
+    model: usize,
+    /// Names the model's look for the renderer: its path, the project's materials used
+    /// for some of its own, and whether it casts shadows.
+    near_look: String,
+    near: Arc<Model>,
     /// The project's materials used for some of the model's own: (its material, the
     /// project's).
     materials: Vec<(usize, usize)>,
-    meshes: Vec<open_racing_track::Mesh>,
+    /// Its far model, and the name of its look.
+    far: Option<(String, Arc<Model>)>,
+    /// The distances the model in full and the far model show at.
+    levels: [Level; 2],
+    shadows: bool,
+    copies: Vec<Instance>,
 }
 
 #[derive(Resource, Default)]
@@ -212,6 +222,9 @@ pub struct Rebuild {
     /// The materials of models walls and scatters show, made once per model and asset
     /// revision.
     wall_looks: HashMap<String, Vec<Handle<TrackMaterial>>>,
+    /// Counts the times the materials were made again: copies drawn with the old ones
+    /// are spawned again.
+    looks: u64,
     /// The painted ground's material, made again when the mask or the layers change.
     ground: Option<GroundLook>,
 }
@@ -231,7 +244,6 @@ pub(crate) fn to_mesh(m: MeshData) -> Mesh {
         normals: m.normals,
         uvs: m.uvs,
         indices: m.indices,
-        lod: None,
     })
 }
 
@@ -304,7 +316,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
     let keepout = open_racing_track_project::scatter::Keepout::new(&scene.roads);
     let (mut scatter, mut scattered, mut all_copies, mut sizes, mut colours) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (k, s) in project.scatter.iter().enumerate() {
+    for s in &project.scatter {
         let models = cache
             .lock()
             .expect("cache")
@@ -322,6 +334,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
         };
         let copies = open_racing_track_project::scatter::copies(s, &keepout, &ground);
         scattered.push(copies.len());
+        let lists = open_racing_track_project::scatter::instances(s.models.len(), &copies);
         sizes.push(
             near.iter()
                 .map(|m| {
@@ -338,37 +351,25 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
                 .map(|m| m.look.materials.iter().map(|x| x.base_color).collect())
                 .collect(),
         );
-        use open_racing_track_project::scatter::Level;
-        let mut parts: HashMap<(usize, bool), Vec<open_racing_track::Mesh>> = HashMap::new();
-        for (m, level, mesh) in open_racing_track_project::scatter::meshes(s, &near, &far, &copies)
-        {
-            parts
-                .entry((m, level == Level::Far))
-                .or_default()
-                .push(mesh);
-        }
         all_copies.push(Arc::new(copies));
-        let mut keys: Vec<_> = parts.keys().copied().collect();
-        keys.sort_unstable();
-        for key @ (m, is_far) in keys {
-            let def = &s.models[m];
-            let (look, model, materials) = if is_far {
-                let model = far[m].clone().expect("a far level has a far model");
-                (format!("far {:p}", Arc::as_ptr(&model)), model, vec![])
-            } else {
-                let slots = def
-                    .materials
-                    .iter()
-                    .filter_map(|x| Some((x.slot, project.material_index(&x.material)?)))
-                    .collect();
-                (def.model.display().to_string(), near[m].clone(), slots)
-            };
+        for (m, (def, list)) in s.models.iter().zip(lists).enumerate() {
+            let materials: Vec<(usize, usize)> = def
+                .materials
+                .iter()
+                .filter_map(|x| Some((x.slot, project.material_index(&x.material)?)))
+                .collect();
             scatter.push(ScatterPart {
-                scatter: k,
-                look,
-                model,
+                scatter: s.name.clone(),
+                model: m,
+                near_look: format!("{}|{materials:?}|{}", def.model.display(), s.shadows),
+                near: near[m].clone(),
                 materials,
-                meshes: parts.remove(&key).unwrap_or_default(),
+                far: far[m]
+                    .clone()
+                    .map(|f| (format!("far {:p}|{}", Arc::as_ptr(&f), s.shadows), f)),
+                levels: open_racing_track_project::scatter::fades(s, far[m].is_some()),
+                shadows: s.shadows,
+                copies: list,
             });
         }
     }
@@ -404,6 +405,7 @@ pub fn rebuild(
     mut state: ResMut<Rebuild>,
     mut built: ResMut<Built>,
     mut paint: ResMut<GroundPaint>,
+    mut scattered: ResMut<Scattered>,
     old: Query<Entity, With<PreviewMesh>>,
     formats: Option<Res<CompressedImageFormatSupport>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -431,6 +433,8 @@ pub fn rebuild(
         state.materials = editor.project.materials.clone();
         state.assets = library.revision;
         state.wall_looks.clear();
+        state.looks += 1;
+        scattered.shapes.clear();
         state.ground = None;
     }
 
@@ -506,48 +510,54 @@ pub fn rebuild(
                 ));
             }
         }
-        // The scatters' copies, each tile of each level faded in and out by its
-        // distance.
+        // The scatters' copies: near, each faded in and out by its own distance; far,
+        // merged by tile.
+        let formats = render::formats(formats.as_deref());
+        let mut seen = HashSet::new();
         for part in done.scatter {
-            let looks = state
-                .wall_looks
-                .entry(part.look)
-                .or_insert_with(|| {
-                    render::add_materials(
-                        &part.model.look,
-                        render::formats(formats.as_deref()),
-                        16,
+            let key = (part.scatter.clone(), part.model);
+            seen.insert(key.clone());
+            let mut make = |model: &Model, look: &str, slots: &[(usize, usize)]| {
+                let parts = scattered.shapes.entry(look.to_string()).or_insert_with(|| {
+                    shape_parts(
+                        model,
+                        look,
+                        slots,
+                        part.shadows,
+                        &mut state,
+                        formats,
+                        &mut meshes,
                         &mut materials,
                         &mut images,
                     )
-                })
-                .clone();
-            for mut m in part.meshes {
-                let slot = m.material as usize;
-                let handle = part
-                    .materials
-                    .iter()
-                    .find(|(s, _)| *s == slot)
-                    .and_then(|(_, i)| state.handles.get(*i))
-                    .or(looks.get(slot))
-                    .cloned()
-                    .unwrap_or(fallback.clone());
-                let shadows = m.cast_shadows;
-                let lod = render::level_of_detail(&mut m);
-                let mut e = commands.spawn((
-                    PreviewMesh(None),
-                    PreviewScatter(part.scatter),
-                    Mesh3d(meshes.add(render::to_mesh(m))),
-                    MeshMaterial3d(handle),
-                ));
-                if let Some(lod) = lod {
-                    e.insert(lod);
-                }
-                if !shadows {
-                    e.insert(NotShadowCaster);
-                }
-            }
+                });
+                parts.clone()
+            };
+            let near = make(&part.near, &part.near_look, &part.materials);
+            let far = part.far.as_ref().map(|(look, far)| Far {
+                parts: make(far, look, &[]),
+                model: far.clone(),
+                level: part.levels[1],
+                tiles: HashMap::new(),
+            });
+            let look = format!(
+                "{}|{:?}|{:?}|{}",
+                part.near_look,
+                part.far.as_ref().map(|f| &f.0),
+                part.levels,
+                state.looks
+            );
+            scattered.show(
+                &mut commands,
+                &mut meshes,
+                key,
+                look,
+                (near, part.levels[0]),
+                far,
+                part.copies,
+            );
         }
+        scattered.keep(&mut commands, &seen);
         let mut issues = done.issues;
         issues.extend(done.scene_failed.into_iter().map(|text| Issue {
             text,
@@ -585,6 +595,216 @@ pub fn rebuild(
             AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir, revision) }),
         );
     }
+}
+
+/// The name of a model's own materials among those made for models: its path (or
+/// what names its far model), without the project's materials used for some of them.
+fn model_look(look: &str) -> String {
+    look.split('|').next().unwrap_or(look).to_string()
+}
+
+/// A model's meshes ready to draw copies of: its own materials, made once for the
+/// model, with the project's used for some of them (`slots`: the model's material, the
+/// project's).
+#[allow(clippy::too_many_arguments)]
+fn shape_parts(
+    model: &Model,
+    look: &str,
+    slots: &[(usize, usize)],
+    shadows: bool,
+    state: &mut Rebuild,
+    formats: bevy::image::CompressedImageFormats,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<TrackMaterial>,
+    images: &mut Assets<Image>,
+) -> Vec<ShapePart> {
+    let own = state
+        .wall_looks
+        .entry(model_look(look))
+        .or_insert_with(|| render::add_materials(&model.look, formats, 16, materials, images))
+        .clone();
+    let fallback = state.handles.first().cloned().unwrap_or_default();
+    model
+        .meshes
+        .iter()
+        .map(|m| {
+            let slot = m.material as usize;
+            let material = slots
+                .iter()
+                .find(|(s, _)| *s == slot)
+                .and_then(|(_, i)| state.handles.get(*i))
+                .or(own.get(slot))
+                .cloned()
+                .unwrap_or(fallback.clone());
+            ShapePart {
+                mesh: meshes.add(render::to_mesh(m.clone())),
+                material,
+                cast_shadows: m.cast_shadows && shadows,
+            }
+        })
+        .collect()
+}
+
+/// The copies of the scatters' models as the view shows them: an entity for each
+/// model of each scatter, and under it one for each copy of each of the model's
+/// meshes, and one for each tile of its far model's copies, as the game draws them.
+#[derive(Resource, Default)]
+pub struct Scattered {
+    /// By the scatter's name and which of its models.
+    groups: HashMap<(String, usize), Group>,
+    /// Each model's meshes ready to draw copies of, by their look.
+    shapes: HashMap<String, Vec<ShapePart>>,
+}
+
+struct Group {
+    entity: Entity,
+    /// What the copies are drawn with: the model's looks, levels, and materials.
+    look: String,
+    near: (Vec<ShapePart>, Level),
+    far: Option<Far>,
+    copies: Vec<Instance>,
+    /// The entities of each copy in full.
+    entities: Vec<Vec<Entity>>,
+}
+
+/// The far model's copies, merged by tile.
+struct Far {
+    parts: Vec<ShapePart>,
+    model: Arc<Model>,
+    level: Level,
+    /// The entities of each tile.
+    tiles: HashMap<[i32; 2], Vec<Entity>>,
+}
+
+impl Scattered {
+    /// Shows the copies of a model of a scatter: moves those that moved, spawns those
+    /// that are new and despawns those gone, and merges the tiles of the far model
+    /// again where they changed; all of them again if they are drawn with something
+    /// else now.
+    #[allow(clippy::too_many_arguments)]
+    fn show(
+        &mut self,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        key: (String, usize),
+        look: String,
+        near: (Vec<ShapePart>, Level),
+        far: Option<Far>,
+        copies: Vec<Instance>,
+    ) {
+        if let Some(g) = self.groups.get(&key)
+            && g.look != look
+        {
+            commands.entity(g.entity).despawn();
+            self.groups.remove(&key);
+        }
+        let g = self.groups.entry(key.clone()).or_insert_with(|| Group {
+            entity: commands
+                .spawn((
+                    PreviewScatter(key.0.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .id(),
+            look,
+            near,
+            far,
+            copies: Vec::new(),
+            entities: Vec::new(),
+        });
+        let mut dirty = std::collections::BTreeSet::new();
+        for (i, c) in copies.iter().enumerate() {
+            match g.copies.get(i) {
+                Some(old) if old == c => {}
+                Some(old) => {
+                    let t = render::instance_transform(c);
+                    for &e in &g.entities[i] {
+                        commands.entity(e).insert(t);
+                    }
+                    dirty.extend([render::tile_of(old), render::tile_of(c)]);
+                }
+                None => {
+                    let entities = spawn_copy(commands, g.entity, &g.near, c);
+                    g.entities.push(entities);
+                    dirty.insert(render::tile_of(c));
+                }
+            }
+        }
+        for gone in g.entities.drain(copies.len()..) {
+            for e in gone {
+                commands.entity(e).despawn();
+            }
+        }
+        dirty.extend(g.copies.iter().skip(copies.len()).map(render::tile_of));
+        g.copies = copies;
+        let Some(far) = &mut g.far else {
+            return;
+        };
+        let mut in_tile: HashMap<[i32; 2], Vec<Instance>> = HashMap::new();
+        for c in &g.copies {
+            let t = render::tile_of(c);
+            if dirty.contains(&t) {
+                in_tile.entry(t).or_default().push(*c);
+            }
+        }
+        for tile in dirty {
+            for e in far.tiles.remove(&tile).into_iter().flatten() {
+                commands.entity(e).despawn();
+            }
+            let Some(these) = in_tile.get(&tile) else {
+                continue;
+            };
+            let (at, merged) = render::merge_tile(&far.model.meshes, these, tile);
+            let entities = merged
+                .into_iter()
+                .zip(&far.parts)
+                .map(|(m, part)| {
+                    render::spawn_tile(commands, meshes, part, m, at, far.level, ChildOf(g.entity))
+                })
+                .collect();
+            far.tiles.insert(tile, entities);
+        }
+    }
+
+    /// Despawns the copies of the models not in `seen`.
+    fn keep(&mut self, commands: &mut Commands, seen: &HashSet<(String, usize)>) {
+        self.groups.retain(|key, g| {
+            let keep = seen.contains(key);
+            if !keep {
+                commands.entity(g.entity).despawn();
+            }
+            keep
+        });
+    }
+}
+
+/// The entities of one copy: each mesh of the model in full, under `group`.
+fn spawn_copy(
+    commands: &mut Commands,
+    group: Entity,
+    (parts, level): &(Vec<ShapePart>, Level),
+    c: &Instance,
+) -> Vec<Entity> {
+    let t = render::instance_transform(c);
+    let range = render::visibility_range(*level);
+    parts
+        .iter()
+        .map(|part| {
+            let mut e = commands.spawn((
+                Mesh3d(part.mesh.clone()),
+                MeshMaterial3d(part.material.clone()),
+                t,
+                ChildOf(group),
+            ));
+            if let Some(range) = &range {
+                e.insert(range.clone());
+            }
+            if !part.cast_shadows {
+                e.insert(NotShadowCaster);
+            }
+            e.id()
+        })
+        .collect()
 }
 
 /// The painted ground's material: the ground's own texture and each layer's, blended
@@ -831,11 +1051,10 @@ pub fn props(
 pub fn show_items(
     editor: Res<Editor>,
     tool: Res<crate::viewport::Tool>,
-    mut meshes: Query<
-        (&PreviewMesh, Option<&PreviewScatter>, &mut Visibility),
-        Without<PreviewProp>,
-    >,
-    mut props: Query<(&PreviewProp, &mut Visibility), Without<PreviewMesh>>,
+    mut meshes: Query<&mut Visibility, (Without<PreviewProp>, Without<PreviewScatter>)>,
+    items: Query<(Entity, &PreviewMesh)>,
+    mut scatters: Query<(&PreviewScatter, &mut Visibility), Without<PreviewMesh>>,
+    mut props: Query<(&PreviewProp, &mut Visibility), (Without<PreviewMesh>, Without<PreviewScatter>)>,
 ) {
     let want = |shown: bool| {
         if shown {
@@ -844,18 +1063,19 @@ pub fn show_items(
             Visibility::Hidden
         }
     };
-    for (m, scatter, mut v) in &mut meshes {
+    for (e, m) in &items {
         let shown = match m.0 {
             Some(item) => editor.visible(item),
             None => editor.shown.local.is_none(),
-        } && scatter.is_none_or(|s| {
-            tool.overlays.scatter
-                && editor
-                    .project
-                    .scatter
-                    .get(s.0)
-                    .is_none_or(|x| !editor.shown.hidden_scatter.contains(&x.name))
-        });
+        };
+        if let Ok(mut v) = meshes.get_mut(e) {
+            v.set_if_neq(want(shown));
+        }
+    }
+    for (s, mut v) in &mut scatters {
+        let shown = editor.shown.local.is_none()
+            && tool.overlays.scatter
+            && !editor.shown.hidden_scatter.contains(&s.0);
         v.set_if_neq(want(shown));
     }
     for (p, mut v) in &mut props {

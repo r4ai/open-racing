@@ -12,7 +12,8 @@ use open_racing_sim::track::heading;
 use open_racing_sim::{GridSlot, Layout, PitLane, Pose, Track, TrackDef, TrackPoint};
 use open_racing_track::texture::{self, Mips};
 use open_racing_track::{
-    AlphaMode, Ground, Material, PatchKind, Texture, TrackPackage, Visual, VisualBuilder,
+    AlphaMode, Ground, Instances, Material, PatchKind, Shape, Texture, TrackPackage, Visual,
+    VisualBuilder,
 };
 
 use crate::Error;
@@ -655,9 +656,24 @@ fn scatter_look(
     materials
 }
 
-/// Adds the scatters' copies: each model's look once, and the copies merged into
-/// meshes by tile and level of detail; those of scatters cars collide with to `ground`
-/// as well.
+/// A model's meshes as a shape of `visual`, with its materials there and casting
+/// shadows if `shadows`.
+fn shape(model: &Model, materials: &[u32], shadows: bool) -> Shape {
+    Shape {
+        meshes: model
+            .meshes
+            .iter()
+            .map(|m| open_racing_track::Mesh {
+                material: materials.get(m.material as usize).copied().unwrap_or(0),
+                cast_shadows: m.cast_shadows && shadows,
+                ..m.clone()
+            })
+            .collect(),
+    }
+}
+
+/// Adds the scatters' copies: each model's shape once (and its far model's), and
+/// where each copy stands; those of scatters cars collide with to `ground` as well.
 pub fn add_scatter(
     project: &Project,
     roads: &[RoadBuild],
@@ -669,38 +685,44 @@ pub fn add_scatter(
 ) -> Result<(), Error> {
     let keepout = crate::scatter::Keepout::new(roads);
     let mut looks: HashMap<PathBuf, Vec<u32>> = HashMap::new();
-    let mut far_looks: HashMap<*const Model, Vec<u32>> = HashMap::new();
+    // Shapes by the model, the project's materials used in its own, and shadows.
+    let mut shapes: HashMap<String, u32> = HashMap::new();
     for s in &project.scatter {
         let (near, far) = cache.scatter_models(project, dir, s)?;
-        let near_looks: Vec<Vec<u32>> = s
-            .models
-            .iter()
-            .zip(&near)
-            .map(|(m, model)| scatter_look(project, m, model, &mut looks, visual))
-            .collect();
-        let far_looks: Vec<Vec<u32>> = far
-            .iter()
-            .map(|f| match f {
-                Some(model) => far_looks
-                    .entry(Arc::as_ptr(model))
-                    .or_insert_with(|| add_look(model, visual))
-                    .clone(),
-                None => vec![],
-            })
-            .collect();
         let copies = crate::scatter::copies(s, &keepout, under);
-        for (k, level, mesh) in crate::scatter::meshes(s, &near, &far, &copies) {
-            let materials = match level {
-                crate::scatter::Level::Near => &near_looks[k],
-                crate::scatter::Level::Far => &far_looks[k],
-            };
-            if s.collide && level == crate::scatter::Level::Near {
-                ground.add(PatchKind::Wall, &mesh.positions, &[], &mesh.indices);
+        let lists = crate::scatter::instances(s.models.len(), &copies);
+        for (i, (m, list)) in s.models.iter().zip(lists).enumerate() {
+            if list.is_empty() {
+                continue;
             }
-            visual.add_lod_mesh(open_racing_track::Mesh {
-                material: materials.get(mesh.material as usize).copied().unwrap_or(0),
-                ..mesh
+            let key = format!("{}|{:?}|{}", m.model.display(), m.materials, s.shadows);
+            let model = &near[i];
+            let near_shape = *shapes.entry(key).or_insert_with(|| {
+                let materials = scatter_look(project, m, model, &mut looks, visual);
+                visual.add_shape(shape(model, &materials, s.shadows))
             });
+            let [mut first, mut second] = crate::scatter::fades(s, far[i].is_some());
+            first.shape = near_shape;
+            let mut levels = vec![first];
+            if let Some(f) = &far[i] {
+                let key = format!("far {:p}|{}", Arc::as_ptr(f), s.shadows);
+                second.shape = *shapes.entry(key).or_insert_with(|| {
+                    let materials = add_look(f, visual);
+                    visual.add_shape(shape(f, &materials, s.shadows))
+                });
+                levels.push(second);
+            }
+            visual.add_instances(Instances {
+                levels,
+                copies: list,
+            });
+            if s.collide {
+                let these = crate::scatter::of_model(&copies, i);
+                for part in &model.meshes {
+                    let solid = crate::scatter::world_mesh(part, &these);
+                    ground.add(PatchKind::Wall, &solid.positions, &[], &solid.indices);
+                }
+            }
         }
     }
     Ok(())

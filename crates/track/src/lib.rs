@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
 pub use visual::{
-    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Lod, Material, Mesh, Texture, Visual,
-    VisualBuilder,
+    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, FAR_AWAY, Instance, Instances, Level,
+    Material, Mesh, Shape, Texture, Visual, VisualBuilder,
 };
 
 /// Version of the package layout and of `track.ron`.

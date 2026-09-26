@@ -7,27 +7,23 @@
 //! splines, and off ground too steep. A painted copy is known by its cell, so that it
 //! can be taken out on its own; copies planted one by one stand where they were put.
 //!
-//! Copies are merged into meshes by square tiles, one for each model part and level of
-//! detail: the models in full near the camera, their far models (or pictures of them on
+//! Each model is kept once, and its copies as a list of where each stands, drawn by
+//! instancing: the model in full near the camera, its far model (or pictures of it on
 //! crossed cards, see `impostor`) beyond the scatter's detail distance, and nothing
-//! beyond its draw distance, each faded in and out by the distance to the tile's middle.
+//! beyond its draw distance, each copy faded in and out by its own distance.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec2, DVec3};
 use open_racing_sim::{GroundMesh, Surface};
-use open_racing_track::{Lod, Mesh};
+use open_racing_track::{FAR_AWAY, Instance, Level, Mesh};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Model;
 use crate::project::{Brush, Plant, Scatter};
 use crate::road::RoadBuild;
 use crate::terrain::Lookup;
-
-/// Edge of the tiles copies are merged in, m: small enough for a tile's middle to say
-/// how far its copies are, large enough for few meshes.
-pub const TILE: f64 = 64.0;
 
 /// Which copy of a scatter: a painted one by its cell of the grid, or one planted on
 /// its own by its place in `Scatter::placed`.
@@ -53,11 +49,18 @@ pub struct Copy {
 
 impl Copy {
     /// Its turn: upright to its `up`, then about it.
-    pub fn rotation(&self) -> DMat3 {
-        DMat3::from_quat(DQuat::from_rotation_arc(
-            DVec3::Z,
-            self.up.normalize_or(DVec3::Z),
-        )) * DMat3::from_rotation_z(self.yaw)
+    pub fn rotation(&self) -> DQuat {
+        DQuat::from_rotation_arc(DVec3::Z, self.up.normalize_or(DVec3::Z))
+            * DQuat::from_rotation_z(self.yaw)
+    }
+
+    /// Where the renderer draws it.
+    pub fn instance(&self) -> Instance {
+        Instance {
+            pos: self.pos.as_vec3().to_array(),
+            rotation: self.rotation().as_quat().to_array(),
+            scale: self.scale as f32,
+        }
     }
 
     /// The copy as one planted on its own where it stands.
@@ -239,21 +242,10 @@ pub fn copies(s: &Scatter, keepout: &Keepout, ground: &GroundMesh) -> Vec<Copy> 
         .collect()
 }
 
-/// Which level of detail a mesh of copies is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Level {
-    /// The models in full, near the camera.
-    Near,
-    /// Their far models, beyond the detail distance.
-    Far,
-}
-
-/// Distances standing for "however far".
-const FAR_AWAY: f32 = 1e9;
-
 /// The distances over which a scatter's levels fade in and out, m: the models in full
-/// out to `detail`, the far models (if `far`) from there out to `draw`.
-pub fn fades(s: &Scatter, far: bool) -> [Lod; 2] {
+/// out to `detail`, the far models (if `far`) from there out to `draw`. Their shapes
+/// are left to be filled in.
+pub fn fades(s: &Scatter, far: bool) -> [Level; 2] {
     let draw = if s.draw > 0.0 {
         s.draw as f32
     } else {
@@ -268,29 +260,40 @@ pub fn fades(s: &Scatter, far: bool) -> [Lod; 2] {
         }
     };
     [
-        Lod {
-            center: [0.0; 3],
+        Level {
+            shape: 0,
             fade_in: [0.0; 2],
             fade_out: end(if far { detail } else { draw }),
         },
-        Lod {
-            center: [0.0; 3],
+        Level {
+            shape: 0,
             fade_in: end(detail),
             fade_out: end(draw),
         },
     ]
 }
 
-/// A mesh of copies of a model's part.
-fn copies_mesh(part: &Mesh, group: &[&Copy], lod: Lod, shadows: bool) -> Mesh {
+/// Each model's copies, where the renderer draws them.
+pub fn instances(models: usize, copies: &[Copy]) -> Vec<Vec<Instance>> {
+    let mut out = vec![Vec::new(); models];
+    for c in copies {
+        if let Some(list) = out.get_mut(c.model) {
+            list.push(c.instance());
+        }
+    }
+    out
+}
+
+/// A model's part at each of `copies`, merged in the world: what cars hit when the
+/// scatter is solid.
+pub fn world_mesh(part: &Mesh, copies: &[&Copy]) -> Mesh {
     let mut mesh = Mesh {
         material: part.material,
-        cast_shadows: part.cast_shadows && shadows,
-        lod: Some(lod),
+        cast_shadows: part.cast_shadows,
         ..Default::default()
     };
-    for c in group {
-        let turn = c.rotation();
+    for c in copies {
+        let turn = DMat3::from_quat(c.rotation());
         let base = mesh.positions.len() as u32;
         for (p, n) in part.positions.iter().zip(&part.normals) {
             let p = c.pos + turn * (DVec3::from(p.map(f64::from)) * c.scale);
@@ -304,54 +307,18 @@ fn copies_mesh(part: &Mesh, group: &[&Copy], lod: Lod, shadows: bool) -> Mesh {
     mesh
 }
 
-/// Copies of a scatter's models merged into meshes by tile and level of detail: (the
-/// model, its level, a mesh of one of its materials). `far` has each model's far model,
-/// if it has one.
-pub fn meshes(
-    s: &Scatter,
-    near: &[Arc<Model>],
-    far: &[Option<Arc<Model>>],
-    copies: &[Copy],
-) -> Vec<(usize, Level, Mesh)> {
-    let mut tiles: HashMap<(usize, i64, i64), Vec<&Copy>> = HashMap::new();
-    for c in copies {
-        let t = (c.pos.truncate() / TILE).floor();
-        tiles
-            .entry((c.model, t.x as i64, t.y as i64))
-            .or_default()
-            .push(c);
-    }
-    let mut keys: Vec<_> = tiles.keys().copied().collect();
-    keys.sort_unstable();
-    let mut out = Vec::new();
-    for key in keys {
-        let group = &tiles[&key];
-        // Every level of the tile fades by the distance to the same point.
-        let z = group.iter().map(|c| c.pos.z).sum::<f64>() / group.len() as f64;
-        let middle = (DVec2::new(key.1 as f64, key.2 as f64) + 0.5) * TILE;
-        let center = middle.extend(z).as_vec3().to_array();
-        let lighter = far.get(key.0).cloned().flatten();
-        let [near_lod, far_lod] = fades(s, lighter.is_some()).map(|l| Lod { center, ..l });
-        if let Some(model) = near.get(key.0) {
-            for part in &model.meshes {
-                out.push((
-                    key.0,
-                    Level::Near,
-                    copies_mesh(part, group, near_lod, s.shadows),
-                ));
-            }
-        }
-        if let Some(model) = lighter {
-            for part in &model.meshes {
-                out.push((
-                    key.0,
-                    Level::Far,
-                    copies_mesh(part, group, far_lod, s.shadows),
-                ));
-            }
-        }
-    }
-    out
+/// Which of the scatter's models each copy is, grouped: the copies of model `i`.
+pub fn of_model<'a>(copies: &'a [Copy], i: usize) -> Vec<&'a Copy> {
+    copies.iter().filter(|c| c.model == i).collect()
+}
+
+/// How many triangles the copies' models have in full.
+pub fn triangles(near: &[Arc<Model>], copies: &[Copy]) -> usize {
+    copies
+        .iter()
+        .filter_map(|c| near.get(c.model))
+        .map(|m| m.triangles)
+        .sum()
 }
 
 #[cfg(test)]
@@ -487,51 +454,34 @@ pub(crate) mod tests {
         assert_eq!(planted.len(), 1);
         assert_eq!(planted[0].id, CopyId::Placed(0));
 
-        let models = [
-            Arc::new(crate::shapes::model("pine").unwrap()),
-            Arc::new(crate::shapes::model("tree").unwrap()),
-        ];
-        let meshes = meshes(&s, &models, &[None, None], &copies);
-        let triangles: usize = meshes.iter().map(|(_, _, m)| m.indices.len() / 3).sum();
-        let expected: usize = copies.iter().map(|c| models[c.model].triangles).sum();
-        assert_eq!(triangles, expected);
-        // Without far models the models in full show out to the draw distance.
-        for (_, level, m) in &meshes {
-            assert_eq!(*level, Level::Near);
-            let lod = m.lod.unwrap();
-            assert_eq!(lod.fade_out[0], 2000.0);
-        }
+        // Each copy is drawn where it stands, turned and sized as it is.
+        let lists = instances(2, &copies);
+        assert_eq!(lists[0].len() + lists[1].len(), copies.len());
+        let c = copies.iter().find(|c| c.model == 1).unwrap();
+        let i = lists[1][0];
+        assert_eq!(i.pos, c.pos.as_vec3().to_array());
+        assert_eq!(i.scale, c.scale as f32);
+        let turn = glam::Quat::from_rotation_z(c.yaw as f32);
+        assert!(glam::Quat::from_array(i.rotation).dot(turn).abs() > 0.9999);
+        // Solid copies put their model's triangles in the world.
+        let pine = crate::shapes::model("pine").unwrap();
+        let pines = of_model(&copies, 0);
+        let solid = world_mesh(&pine.meshes[0], &pines);
+        assert_eq!(solid.indices.len(), pine.meshes[0].indices.len() * pines.len());
     }
 
     #[test]
-    fn far_models_take_over_at_the_detail_distance_in_the_same_tiles() {
+    fn far_models_take_over_at_the_detail_distance() {
         let s = woods(vec![]);
-        let pine = Arc::new(crate::shapes::model("pine").unwrap());
-        let copies: Vec<Copy> = (0..20)
-            .map(|k| Copy {
-                id: CopyId::Placed(k),
-                model: 0,
-                pos: DVec3::new(k as f64 * 10.0, 3.0, 1.0),
-                yaw: 0.0,
-                scale: 1.0,
-                up: DVec3::Z,
-            })
-            .collect();
-        let meshes = meshes(
-            &s,
-            std::slice::from_ref(&pine),
-            &[Some(pine.clone())],
-            &copies,
-        );
-        let near: Vec<_> = meshes.iter().filter(|m| m.1 == Level::Near).collect();
-        let far: Vec<_> = meshes.iter().filter(|m| m.1 == Level::Far).collect();
-        assert_eq!(near.len(), far.len());
-        for (a, b) in near.iter().zip(&far) {
-            let (a, b) = (a.2.lod.unwrap(), b.2.lod.unwrap());
-            assert_eq!(a.center, b.center);
-            assert_eq!(a.fade_out, b.fade_in);
-            assert_eq!(a.fade_out[0], 150.0);
-            assert_eq!(b.fade_out[0], 2000.0);
-        }
+        let [near, far] = fades(&s, true);
+        assert_eq!(near.fade_out, far.fade_in);
+        assert_eq!(near.fade_out[0], 150.0);
+        assert_eq!(far.fade_out[0], 2000.0);
+        // Without far models the models in full show out to the draw distance.
+        let [near, _] = fades(&s, false);
+        assert_eq!(near.fade_out[0], 2000.0);
+        // Drawn however far: never faded out.
+        let [_, far] = fades(&Scatter { draw: 0.0, ..s }, true);
+        assert_eq!(far.fade_out, [FAR_AWAY; 2]);
     }
 }
