@@ -8,7 +8,8 @@
 use std::f64::consts::PI;
 
 use crate::boundary::{
-    Reservoir, pipe_open_to_reservoir, pipe_to_pipe, pipe_to_reservoir, reservoir_to_reservoir,
+    Radiation, Reservoir, pipe_open_to_reservoir, pipe_radiating, pipe_to_pipe, pipe_to_reservoir,
+    reservoir_to_reservoir,
 };
 use crate::cam::Valvetrain;
 use crate::combustion::{self, Phase, Rng};
@@ -52,7 +53,6 @@ impl Quality {
     pub fn cell_length(self) -> f64 {
         1300.0 / self.rate() as f64 / 0.9
     }
-
 }
 
 /// The air round the engine.
@@ -227,6 +227,21 @@ pub struct Mouth {
     pub prev_flow: f64,
     /// Outward gas velocity, m/s.
     pub velocity: f64,
+    pub radiation: Radiation,
+}
+
+impl Mouth {
+    pub fn new(name: String, link: usize, position: [f64; 3]) -> Self {
+        Self {
+            name,
+            link,
+            position,
+            flow: 0.0,
+            prev_flow: 0.0,
+            velocity: 0.0,
+            radiation: Radiation::default(),
+        }
+    }
 }
 
 /// A cylinder's state over its cycle.
@@ -616,7 +631,15 @@ impl Model {
                         self.cda(&opening, area)
                     };
                     let res = self.reservoir(other);
-                    let f = if opening == Opening::Open && other != Port::Closed {
+                    let mouth = if other == Port::Ambient {
+                        self.mouths.iter().position(|m| m.link == li)
+                    } else {
+                        None
+                    };
+                    let f = if let (Opening::Open, Some(k)) = (&opening, mouth) {
+                        let rad = &mut self.mouths[k].radiation;
+                        pipe_radiating(&self.gas, &s, e.sign(), area, &res, rad, h)
+                    } else if opening == Opening::Open && other != Port::Closed {
                         pipe_open_to_reservoir(&self.gas, &s, e.sign(), area, &res)
                     } else {
                         let mut guess = self.links[li].guess;
@@ -632,9 +655,8 @@ impl Model {
                         lump.de += f[2];
                         lump.dmy += f[3];
                     }
-                    if other == Port::Ambient
-                        && let Some(m) = self.mouths.iter_mut().find(|m| m.link == li)
-                    {
+                    if let Some(k) = mouth {
+                        let m = &mut self.mouths[k];
                         let rho = s.w.rho;
                         m.flow += f[0] / rho * h / self.dt;
                         m.velocity += f[0] / (rho * area) * h / self.dt;

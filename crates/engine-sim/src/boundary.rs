@@ -2,12 +2,20 @@
 //!
 //! A pipe end opening through an effective area into a reservoir (a volume, a cylinder
 //! through its valves, the air) is solved as in Benson's method of characteristics: the
-//! wave arriving from inside the pipe is kept (p_f = p + ρc(u − u_f), the acoustic
-//! compatibility relation along the outgoing characteristic), and the face velocity is
+//! wave arriving from inside the pipe is kept (the shock or rarefaction that takes its
+//! gas from u to the face's u_f, p_f ≈ p + ρc(u − u_f) when weak), and the face velocity is
 //! whatever makes the pipe's mass flow equal the quasi-steady flow through the restriction.
 //! A shut valve (zero area) reflects the wave from a closed end; a pipe opening into the
 //! air reflects it inverted. The one mass, energy and burned-gas flux found this way is
 //! given to both the pipe and the reservoir, so both conserve exactly.
+//!
+//! A pipe's mouth to the open air is not quite a pressure release: the air it pushes
+//! out has mass (the end correction) and carries energy away as sound (the radiation
+//! resistance), so a mouth reflects a little less than all of a wave, less the higher its
+//! frequency, and a little later. Levine & Schwinger's unflanged pipe (*Phys. Rev.* 73,
+//! 1948) at low frequency, Z/ρ₀c₀ ≈ jkδ + (ka)²/4 with δ = 0.6133a, is matched by the mass
+//! ρ₀δ in parallel with the resistance 4(δ/a)²·ρ₀c₀ (Silva et al., *J. Sound Vib.* 322,
+//! 2009, on causal forms of it).
 //!
 //! Two pipes joined end to end exchange the HLLC flux of their end states; a change of
 //! section at the joint pushes on the step's wall.
@@ -129,8 +137,8 @@ pub fn pipe_to_reservoir(
     // g rises with vf (bar choking). Its root lies between a strong compression and the face emptied
     // to the floor pressure; a safeguarded secant from last step's root finds it in a few
     // evaluations.
-    let vacuum = 2.0 * s.c / (gamma - 1.0)
-        * (1.0 - (p_min / s.w.p).powf((gamma - 1.0) / (2.0 * gamma)));
+    let vacuum =
+        2.0 * s.c / (gamma - 1.0) * (1.0 - (p_min / s.w.p).powf((gamma - 1.0) / (2.0 * gamma)));
     // Gas rushing at the restriction may have to be stopped by a strong shock, and gas
     // can come in from the reservoir at up to its speed of sound: the bracket spans both.
     let c_res = (res.gamma * res.r * res.t).sqrt();
@@ -217,13 +225,55 @@ fn supersonic_mach(ratio: f64, g: f64) -> f64 {
     }
     for _ in 0..40 {
         let mid = 0.5 * (lo + hi);
-        if f(mid) < ratio {
-            lo = mid
-        } else {
-            hi = mid
-        }
+        if f(mid) < ratio { lo = mid } else { hi = mid }
     }
     0.5 * (lo + hi)
+}
+
+/// End correction of an unflanged pipe, in radii (Levine & Schwinger).
+pub const END_CORRECTION: f64 = 0.6133;
+
+/// The air in front of a mouth to the open air.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Radiation {
+    /// Outward velocity of the air in the end correction (the mass of the radiation
+    /// impedance), m/s.
+    pub plug: f64,
+    /// Sound pressure at the mouth over the air's, the last step, Pa.
+    pub pressure: f64,
+}
+
+/// Flux out of a pipe's open end into the air, `air` at rest, through the mouth's
+/// radiation impedance: the wave meets the air's pressure plus that of the impedance,
+/// linearised about the flow without it. `h` is the step, which advances `rad`.
+pub fn pipe_radiating(
+    gas: &Gas,
+    s: &State,
+    sign: f64,
+    area: f64,
+    air: &Reservoir,
+    rad: &mut Radiation,
+    h: f64,
+) -> Flux {
+    let f0 = pipe_open_to_reservoir(gas, s, sign, area, air);
+    let rho0 = air.density();
+    let c0 = (air.gamma * air.r * air.t).sqrt();
+    let z = s.w.rho * s.c;
+    let delta = END_CORRECTION * (area / std::f64::consts::PI).sqrt();
+    let resistance = 4.0 * END_CORRECTION * END_CORRECTION * rho0 * c0;
+    let rho_f = if f0[0] >= 0.0 { s.w.rho } else { rho0 };
+    let vf0 = f0[0] / (rho_f * area);
+    // p = R·(v − plug), with v = v₀ − p/z along the wave from inside.
+    let k = 1.0 + resistance / z;
+    let p = resistance * (vf0 - rad.plug) / k;
+    // ρ₀δ·d(plug)/dt = p, exactly over the step for a steady v₀.
+    rad.plug = vf0 + (rad.plug - vf0) * (-resistance * h / (rho0 * delta * k)).exp();
+    rad.pressure = p;
+    let res = Reservoir {
+        p: air.p + p,
+        ..*air
+    };
+    pipe_open_to_reservoir(gas, s, sign, area, &res)
 }
 
 /// Flux out of a pipe end opening without restriction into a reservoir (a plenum, a
@@ -326,6 +376,89 @@ mod tests {
     use super::*;
     use crate::pipe::Prim;
 
+    /// A pulse sent down a straight pipe comes back from its open end inverted, a little
+    /// weaker the higher its frequency: |R| ≈ 1 − (ka)²/2 (Levine & Schwinger).
+    #[test]
+    fn open_end_radiates_like_an_unflanged_pipe() {
+        use crate::pipe::{End, Pipe, PipeGeometry, conserved};
+        let gas = Gas::new();
+        let a = 0.025;
+        let g = PipeGeometry {
+            name: "tube".into(),
+            length: 6.0,
+            diameter: vec![(0.0, 2.0 * a)],
+            cell_length: 0.004,
+            wall_temperature: 300.0,
+            roughness: 0.0,
+            friction_scale: 0.0,
+            heat_scale: 0.0,
+        };
+        let air = Reservoir::new(&gas, 1e5, 300.0, 0.0);
+        let rest = Prim {
+            rho: air.density(),
+            u: 0.0,
+            p: 1e5,
+            y: 0.0,
+        };
+        let mut pipe = Pipe::new(&g, &gas, rest);
+        let n = pipe.cells();
+        for i in 0..n {
+            let x = (i as f64 + 0.5) * pipe.dx - 2.0;
+            let dp = 200.0 * (-x * x / (2.0 * 0.015f64.powi(2))).exp();
+            // A right-going pulse: u = p/ρc.
+            let st0 = State::of(&gas, rest);
+            let w = Prim {
+                rho: rest.rho * (1.0 + dp / 1e5 / st0.gamma),
+                u: dp / (rest.rho * st0.c),
+                p: 1e5 + dp,
+                y: 0.0,
+            };
+            let st = State::of(&gas, w);
+            pipe.q[i] = conserved(&st, pipe.area[i]);
+            pipe.s[i] = st;
+        }
+        let probe = (3.0 / pipe.dx) as usize;
+        let dt = 0.5 * pipe.dx / 400.0;
+        let mut rad = Radiation::default();
+        let mut trace = Vec::new();
+        for _ in 0..(0.024 / dt) as usize {
+            pipe.predict(&gas, dt);
+            let s = *pipe.end(End::Start);
+            let wall = face_pressure(&s, -s.w.u, 1.0);
+            pipe.set_end_flux(
+                End::Start,
+                [0.0, wall * pipe.end_area(End::Start), 0.0, 0.0],
+            );
+            let s = *pipe.end(End::End);
+            let f = pipe_radiating(&gas, &s, 1.0, pipe.end_area(End::End), &air, &mut rad, dt);
+            pipe.set_end_flux(End::End, f);
+            pipe.update(&gas, dt);
+            trace.push(pipe.s[probe].w.p - 1e5);
+        }
+        let rate = 1.0 / dt;
+        let c = State::of(&gas, rest).c;
+        // Incident at 1/c, back from the open end at 7/c (4 m on and 3 m back).
+        let window = |t: f64| {
+            let (i0, len) = (((t - 0.002) * rate) as usize, (0.004 * rate) as usize);
+            trace[i0..i0 + len].to_vec()
+        };
+        let (inc, back) = (window(1.0 / c), window(7.0 / c));
+        for ka in [0.3, 0.6] {
+            let f = ka / a * c / (2.0 * std::f64::consts::PI);
+            let r = crate::dsp::tone(&back, rate, f) / crate::dsp::tone(&inc, rate, f);
+            let theory = 1.0 - 0.5 * ka * ka;
+            assert!(
+                (r - theory).abs() < 0.04,
+                "ka {ka}: |R| {r:.3}, theory {theory:.3}"
+            );
+        }
+        // Inverted.
+        let peak = back
+            .iter()
+            .fold(0.0f64, |m, v| if v.abs() > m.abs() { *v } else { m });
+        assert!(peak < -80.0, "{peak}");
+    }
+
     #[test]
     fn closed_end_doubles_an_arriving_wave() {
         let gas = Gas::new();
@@ -344,7 +477,10 @@ mod tests {
         // A weak shock: the acoustic ρc·u, a little more.
         let rise = f[1] / 1e-3 - 1e5;
         let acoustic = 1.2 * s.c * 5.0;
-        assert!(rise > acoustic && rise < 1.01 * acoustic, "{rise} {acoustic}");
+        assert!(
+            rise > acoustic && rise < 1.01 * acoustic,
+            "{rise} {acoustic}"
+        );
     }
 
     #[test]

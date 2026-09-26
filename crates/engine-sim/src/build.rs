@@ -228,14 +228,11 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                             flow: 0.0,
                             guess: 0.0,
                         });
-                        m.mouths.push(Mouth {
-                            name: format!("{}:{}", sys.name, ps.name),
-                            link: m.links.len() - 1,
-                            position: add(sys.offset, *at),
-                            flow: 0.0,
-                            prev_flow: 0.0,
-                            velocity: 0.0,
-                        });
+                        m.mouths.push(Mouth::new(
+                            format!("{}:{}", sys.name, ps.name),
+                            m.links.len() - 1,
+                            add(sys.offset, *at),
+                        ));
                     }
                     spec::End::Terminal(t) => {
                         terminals.push((format!("{}:{t}", sys.name), p, which))
@@ -345,14 +342,8 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                 flow: 0.0,
                 guess: 0.0,
             });
-            m.mouths.push(Mouth {
-                name: name.clone(),
-                link: m.links.len() - 1,
-                position: [0.0; 3],
-                flow: 0.0,
-                prev_flow: 0.0,
-                velocity: 0.0,
-            });
+            m.mouths
+                .push(Mouth::new(name.clone(), m.links.len() - 1, [0.0; 3]));
             warnings.push(format!("{name} opens straight to the air"));
         } else {
             m.links.push(Link {
