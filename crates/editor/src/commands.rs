@@ -349,7 +349,8 @@ impl Cmd {
             Reveal => !e.shown.hidden.is_empty(),
             FrameSelected => sel.item.is_some(),
             ToggleEdit => line || c.tool.edit,
-            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess => line && c.tool.edit,
+            SelectAll | SelectNone => !c.tool.edit || line,
+            SelectInvert | SelectMore | SelectLess => line && c.tool.edit,
             Subdivide | ToggleClosed | SmoothHeights | SmoothShape | Flatten => line,
             EvenGrade => line && sel.nodes.len() >= 2,
             Extrude | Handles(_) | HandleMenu => node,
@@ -456,27 +457,15 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         ToggleSidebar => c.shell.sidebar = !c.shell.sidebar,
         ToggleMaximize => c.shell.maximized = !c.shell.maximized,
         ToggleSnap => c.tool.snap = !c.tool.snap,
-        ToggleProportional => c.tool.proportional.on = !c.tool.proportional.on,
+        ToggleProportional => c.editor.status = c.tool.toggle_proportional(),
         LocalView => viewport::toggle_local(c.editor, c.orbit),
-        Hide => {
-            let items = c.editor.selection.items();
-            c.editor.hide(&items);
-        }
-        HideOthers => {
-            let sel = c.editor.selection.items();
-            let others: Vec<Item> = c
-                .editor
-                .all_items()
-                .into_iter()
-                .filter(|i| !sel.contains(i))
-                .collect();
-            c.editor.hide(&others);
-        }
+        Hide => c.editor.hide_selected(),
+        HideOthers => c.editor.hide_unselected(),
         Reveal => c.editor.reveal(),
         Shortcuts => c.shell.shortcuts = !c.shell.shortcuts,
         ToggleEdit => viewport::toggle_edit(c.editor, c.tool),
-        SelectAll => viewport::select_all(c.editor),
-        SelectNone => c.editor.selection.nodes.clear(),
+        SelectAll => viewport::select_all(c.editor, c.tool.edit),
+        SelectNone => viewport::select_none(c.editor, c.tool.edit),
         SelectInvert => edit::select_invert(c.editor),
         SelectMore => edit::select_more(c.editor),
         SelectLess => edit::select_less(c.editor),

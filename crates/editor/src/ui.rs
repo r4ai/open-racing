@@ -396,7 +396,8 @@ pub fn ui(
         c.editor.status = format!("{n} copied: Ctrl V pastes them, here or in another project");
     }
     c.tool.blocked = c.shell.popup.is_some();
-    rect.ui_busy = ui_has_pointer(&ctx);
+    rect.ui_dragging = ctx.egui_is_using_pointer();
+    rect.ui_busy = rect.ui_dragging || on_panel_edge(&ctx);
     if c.shell.quit {
         exit.write(AppExit::Success);
     }
@@ -421,24 +422,23 @@ fn around(outer: egui::Rect, hole: egui::Rect, fill: egui::Color32) -> egui::Sha
     )
 }
 
-/// Whether the UI has the pointer: dragging something, or over a panel's edge (which a
-/// press there would resize), where the view must not start a box.
-fn ui_has_pointer(ctx: &egui::Context) -> bool {
+/// Whether the pointer is over a panel's edge, which a press there would resize: the UI
+/// shows a resize cursor.
+fn on_panel_edge(ctx: &egui::Context) -> bool {
     use egui::CursorIcon as C;
-    ctx.egui_is_using_pointer()
-        || matches!(
-            ctx.output(|o| o.cursor_icon),
-            C::ResizeHorizontal
-                | C::ResizeVertical
-                | C::ResizeColumn
-                | C::ResizeRow
-                | C::ResizeEast
-                | C::ResizeWest
-                | C::ResizeNorth
-                | C::ResizeSouth
-                | C::ResizeNeSw
-                | C::ResizeNwSe
-        )
+    matches!(
+        ctx.output(|o| o.cursor_icon),
+        C::ResizeHorizontal
+            | C::ResizeVertical
+            | C::ResizeColumn
+            | C::ResizeRow
+            | C::ResizeEast
+            | C::ResizeWest
+            | C::ResizeNorth
+            | C::ResizeSouth
+            | C::ResizeNeSw
+            | C::ResizeNwSe
+    )
 }
 
 fn list_projects() -> Vec<std::path::PathBuf> {

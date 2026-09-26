@@ -62,7 +62,7 @@ pub fn input(
         !wants.wants_any_pointer_input() && !rect.ui_busy && tool.menu.is_none() && !tool.blocked;
     // A panel's edge dragged from beside the view: whatever the press began here is the
     // panel's, not a box to select with.
-    if rect.ui_busy && tool.modal.is_none() {
+    if rect.ui_dragging && tool.modal.is_none() {
         tool.press = None;
         tool.boxing = None;
     }
@@ -286,40 +286,19 @@ pub fn input(
     } else if pressed(KeyCode::KeyA) && shift {
         open_menu(tool, at, hover, true);
     } else if pressed(KeyCode::KeyA) && alt {
-        if tool.edit {
-            editor.selection.nodes.clear();
-        } else {
-            editor.selection = Default::default();
-        }
+        select_none(editor, tool.edit);
     } else if pressed(KeyCode::KeyA) && !ctrl {
-        if tool.edit {
-            select_all(editor);
-        }
+        select_all(editor, tool.edit);
     } else if pressed(KeyCode::KeyH) && alt {
         editor.reveal();
     } else if pressed(KeyCode::KeyH) && shift {
-        let sel = editor.selection.items();
-        let others: Vec<Item> = editor
-            .all_items()
-            .into_iter()
-            .filter(|i| !sel.contains(i))
-            .collect();
-        editor.hide(&others);
+        editor.hide_unselected();
     } else if pressed(KeyCode::KeyH) && !ctrl {
-        let sel = editor.selection.items();
-        editor.hide(&sel);
+        editor.hide_selected();
     } else if pressed(KeyCode::NumpadDivide) || pressed(KeyCode::Slash) {
         toggle_local(editor, &mut orbit);
     } else if pressed(KeyCode::KeyO) && !ctrl && !alt {
-        tool.proportional.on = !tool.proportional.on;
-        editor.status = format!(
-            "proportional editing {}",
-            if tool.proportional.on {
-                "on: the wheel sets its reach while moving"
-            } else {
-                "off"
-            }
-        );
+        editor.status = tool.toggle_proportional();
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
         delete_selected(editor, tool);
     } else if pressed(KeyCode::NumpadAdd) && ctrl {
@@ -464,10 +443,34 @@ pub(super) fn box_select(
     }
 }
 
-pub fn select_all(editor: &mut Editor) {
-    if let Some((_, nodes, _)) = editor.line() {
-        let n = nodes.len();
-        editor.selection.nodes = (0..n).collect();
+/// A: in edit mode every node of the line, in object mode every item that can be
+/// picked (the active one staying active).
+pub fn select_all(editor: &mut Editor, edit: bool) {
+    if edit {
+        if let Some((_, nodes, _)) = editor.line() {
+            let n = nodes.len();
+            editor.selection.nodes = (0..n).collect();
+        }
+        return;
+    }
+    let items: Vec<Item> = editor
+        .all_items()
+        .into_iter()
+        .filter(|&i| editor.pickable(i))
+        .collect();
+    let sel = &mut editor.selection;
+    let active = sel.item.filter(|i| items.contains(i));
+    *sel = Default::default();
+    sel.item = active.or(items.first().copied());
+    sel.others = items.into_iter().filter(|&i| Some(i) != sel.item).collect();
+}
+
+/// Alt A: in edit mode no nodes, in object mode nothing.
+pub fn select_none(editor: &mut Editor, edit: bool) {
+    if edit {
+        editor.selection.nodes.clear();
+    } else {
+        editor.selection = Default::default();
     }
 }
 

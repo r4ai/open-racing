@@ -81,6 +81,47 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
             kind: open_racing_track_project::project::LandformKind::Raise(4.0),
         });
     ops.push(Op::SetTerrain { terrain });
+    // A kerb type in two colours with a model, and a kerb with nodes and a step.
+    let mut paint = e.project.materials[0].clone();
+    paint.name = "blue kerb".into();
+    paint.texture = open_racing_track_project::project::TextureSource::Builtin(
+        open_racing_track_project::project::BuiltinTexture::Stripes([30, 70, 200], [240, 205, 30]),
+    );
+    ops.push(Op::PutMaterial { material: paint });
+    let mut style = e.project.strip_style("kerb").unwrap().clone();
+    style.name = "blue kerb".into();
+    style.material = "blue kerb".into();
+    style.profile =
+        open_racing_track_project::project::Profile::Shape(vec![[0.0, 0.04], [1.0, 0.06]]);
+    style.model = Some(ModelRun {
+        model: "assets/models/kerb.glb".into(),
+        length: 2.0,
+        bend: true,
+        flip: false,
+    });
+    let mut strip = style.strip(
+        "keyed",
+        vec![open_racing_track_project::project::Range { from: 2.0, to: 4.0 }],
+    );
+    strip.keys = vec![
+        open_racing_track_project::project::StripKey {
+            u: 2.5,
+            width: 1.2,
+            height: 1.0,
+        },
+        open_racing_track_project::project::StripKey {
+            u: 3.0,
+            width: 2.5,
+            height: 1.5,
+        },
+    ];
+    ops.push(Op::PutStripStyle { style });
+    ops.push(Op::PutStrip {
+        road: "circuit".into(),
+        side: open_racing_track_project::project::Side::Right,
+        strip,
+        at: Some(0),
+    });
     ops.push(Op::PutProp {
         prop: Prop {
             group: Some("stands".into()),

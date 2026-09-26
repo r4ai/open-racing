@@ -584,6 +584,23 @@ impl Editor {
             .collect()
     }
 
+    /// H: hides what is selected.
+    pub fn hide_selected(&mut self) {
+        let sel = self.selection.items();
+        self.hide(&sel);
+    }
+
+    /// Shift H: hides everything but what is selected.
+    pub fn hide_unselected(&mut self) {
+        let sel = self.selection.items();
+        let others: Vec<Item> = self
+            .all_items()
+            .into_iter()
+            .filter(|i| !sel.contains(i))
+            .collect();
+        self.hide(&others);
+    }
+
     /// Hides items, dropping them from the selection.
     pub fn hide(&mut self, items: &[Item]) {
         let names: Vec<Named> = items.iter().filter_map(|&i| self.named(i)).collect();

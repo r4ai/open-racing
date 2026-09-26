@@ -115,9 +115,12 @@ impl Default for Orbit {
 #[derive(Resource, Default)]
 pub struct ViewRect {
     pub rect: Option<Rect>,
-    /// The pointer is on a panel's edge, or the UI is dragging something (a panel being
-    /// resized, a slider): the view takes no clicks, and a drag it began is dropped.
+    /// The pointer is on a panel's edge, or the UI is dragging something: the view
+    /// takes no clicks.
     pub ui_busy: bool,
+    /// The UI is dragging something (a panel being resized, a slider): a press the view
+    /// took as well is dropped.
+    pub ui_dragging: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -680,6 +683,19 @@ pub fn sync_mode(editor: &Editor, tool: &mut Tool) {
 }
 
 impl Tool {
+    /// O: proportional editing on or off; what to tell the user.
+    pub fn toggle_proportional(&mut self) -> String {
+        self.proportional.on = !self.proportional.on;
+        format!(
+            "proportional editing {}",
+            if self.proportional.on {
+                "on: the wheel sets its reach while moving"
+            } else {
+                "off"
+            }
+        )
+    }
+
     /// The tools as they start, in edit mode or object mode.
     pub fn editing(edit: bool) -> Self {
         Self { edit, ..default() }
@@ -1298,6 +1314,32 @@ mod tests {
         editor.selection.select_node(Item::Road(0), 1);
         sync_mode(&editor, &mut tool);
         assert!(tool.edit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_selects_every_node_in_edit_mode_and_every_item_in_object_mode() {
+        let (mut editor, _, _, _, dir) = top_down("select all", DVec3::ZERO);
+        let spline = crate::presets::named(&editor.project, "concrete wall")
+            .unwrap()
+            .spline(
+                &editor.project,
+                vec![DVec3::new(0.0, -30.0, 0.0), DVec3::new(50.0, -30.0, 0.0)],
+            )
+            .unwrap();
+        assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        editor.selection.select(Item::Road(0));
+        select_all(&mut editor, true);
+        assert_eq!(
+            editor.selection.nodes.len(),
+            editor.project.roads[0].nodes.len()
+        );
+        select_all(&mut editor, false);
+        assert_eq!(editor.selection.item, Some(Item::Road(0)));
+        assert_eq!(editor.selection.others, vec![Item::Spline(0)]);
+        assert!(editor.selection.nodes.is_empty());
+        select_none(&mut editor, false);
+        assert_eq!(editor.selection.item, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
