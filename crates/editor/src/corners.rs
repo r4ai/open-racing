@@ -29,9 +29,8 @@ pub fn held(built: &crate::preview::Built, r: usize, anchor: &Option<Anchor>) ->
 fn road_index(c: &Ctx) -> Option<usize> {
     let p = &c.editor.project;
     c.editor
-        .selection
         .road()
-        .filter(|&r| r < p.roads.len())
+        .map(|(r, _)| r)
         .or_else(|| p.road_index(&p.main_road))
 }
 

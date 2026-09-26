@@ -41,5 +41,6 @@ pub const SNAP: Color = Color::srgb(1.0, 0.2, 0.85);
 pub const SELECTED_UI: Color32 = Color32::from_rgb(255, 160, 40);
 pub const SELECTED_OTHER_UI: Color32 = Color32::from_rgb(217, 107, 13);
 pub const SELECTED_NODE_UI: Color32 = Color32::from_rgb(255, 115, 0);
+pub const ACTIVE_NODE_UI: Color32 = Color32::WHITE;
 pub const UNSELECTED_UI: Color32 = Color32::from_gray(215);
 pub const STRIP_UI: Color32 = Color32::from_rgb(51, 217, 191);

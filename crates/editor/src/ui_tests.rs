@@ -12,8 +12,10 @@ use open_racing_track_project::project::{ModelRun, Prop, Shape};
 
 use crate::assets::Library;
 use crate::commands::Ctx;
+use crate::curve_graph::{self, CurveGraph};
 use crate::jobs::Jobs;
 use crate::preview::Built;
+use crate::profile::ProfileView;
 use crate::reference::Shown;
 use crate::state::{Editor, Item};
 use crate::ui::{PropTab, Shell};
@@ -240,6 +242,7 @@ fn every_panel_draws_for_every_selection() {
     let (library, shown) = (Library::default(), Shown::default());
     let (mut props_state, mut outliner_state) =
         (properties::State::default(), outliner::State::default());
+    let (mut elevation, mut curves) = (ProfileView::default(), CurveGraph::default());
     let ctx = egui::Context::default();
     let tabs = [
         PropTab::Track,
@@ -297,6 +300,16 @@ fn every_panel_draws_for_every_selection() {
                         ui.horizontal(|ui| crate::brush::settings_ui(ui, &mut c, true));
                     }
                     c.tool.active = crate::viewport::ToolKind::Select;
+                    // Every graph of the Curves area.
+                    for shown in [
+                        curve_graph::Shown::Elevation,
+                        curve_graph::Shown::Left,
+                        curve_graph::Shown::Right,
+                        curve_graph::Shown::Bank,
+                    ] {
+                        curves.show(c.editor, shown);
+                        curve_graph::panel(ui, &mut c, &mut elevation, &mut curves);
+                    }
                 });
             }
         }

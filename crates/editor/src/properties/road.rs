@@ -4,15 +4,10 @@
 use super::*;
 
 pub(super) fn road_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
-    let Some(r) = c
-        .editor
-        .selection
-        .road()
-        .filter(|&r| r < c.editor.project.roads.len())
-    else {
+    let Some((r, road)) = c.editor.road() else {
         return;
     };
-    let road = c.editor.project.roads[r].clone();
+    let road = road.clone();
     let name = road.name.clone();
     let (surfaces, materials) = names(&c.editor.project);
     let period = road.period();
@@ -77,14 +72,26 @@ pub(super) fn road_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
         let mut keys = cv.keys.clone();
         let mut changed = false;
         let mut remove = None;
-        for (i, k) in keys.iter_mut().enumerate() {
+        // A road is never narrower than 10 cm a side.
+        let least = if curve == Curve::Bank { f64::MIN } else { 0.1 };
+        for i in 0..keys.len() {
+            // Each key stays between its neighbours, so that the list keeps its order
+            // (and the field its key) while a value is dragged; a closed road's last
+            // key stays short of its end, which is its start.
+            let lo = if i > 0 { keys[i - 1].u + 1e-3 } else { 0.0 };
+            let hi = match keys.get(i + 1) {
+                Some(next) => next.u - 1e-3,
+                None if road.closed => period - 1e-3,
+                None => period,
+            };
+            let k = &mut keys[i];
             row(ui, &format!("Key {i}"), |ui| {
                 ui.label("u");
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut k.u)
                             .speed(0.01)
-                            .range(0.0..=period),
+                            .range(lo..=hi.max(lo)),
                     )
                     .changed();
                 let mut v = k.value * scale;
@@ -93,7 +100,7 @@ pub(super) fn road_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
                     .add(egui::DragValue::new(&mut v).speed(0.05).suffix(unit))
                     .changed()
                 {
-                    k.value = v / scale;
+                    k.value = (v / scale).max(least);
                     changed = true;
                 }
                 if cv.keys.len() > 1 && ui.small_button("✖").clicked() {
@@ -105,7 +112,9 @@ pub(super) fn road_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State) {
             keys.remove(i);
             changed = true;
         }
-        if let Some(n) = c.editor.selection.node()
+        let n = c.editor.selection.node().filter(|&n| n < road.nodes.len());
+        if let Some(n) = n
+            && !keys.iter().any(|k| (k.u - n as f64).abs() < 1e-3)
             && ui.small_button(format!("+ Key at node {n}")).clicked()
         {
             let v = cv.eval(n as f64, period, road.closed);

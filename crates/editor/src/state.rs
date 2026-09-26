@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bevy::prelude::*;
 use open_racing_track_project::ops::{self, Op};
+use open_racing_track_project::project::Road;
 use open_racing_track_project::{Node, PROJECT_FILE, Project};
 
 /// Undo steps kept.
@@ -90,6 +91,34 @@ impl Selection {
             if let Some(active) = self.item.replace(item) {
                 self.others.push(active);
             }
+        }
+    }
+
+    /// Adds an item to the selection: the active one if nothing is selected yet.
+    pub fn add(&mut self, item: Item) {
+        if self.item.is_none() {
+            self.item = Some(item);
+            self.nodes.clear();
+            self.others.retain(|&o| o != item);
+        } else if !self.has(item) {
+            self.others.push(item);
+        }
+    }
+
+    /// Takes an item out of the selection; the next selected becomes the active one.
+    pub fn remove(&mut self, item: Item) {
+        self.others.retain(|&o| o != item);
+        if self.item == Some(item) {
+            self.item = self.others.pop();
+            self.nodes.clear();
+        }
+    }
+
+    /// Selects these items and nothing else, the first one active.
+    pub fn set_items(&mut self, items: impl IntoIterator<Item = Item>) {
+        *self = Self::default();
+        for item in items {
+            self.add(item);
         }
     }
 
@@ -182,7 +211,9 @@ pub struct Editor {
     pub selection: Selection,
     /// One line about what just happened.
     pub status: String,
-    pub dragging: bool,
+    /// A drag in progress: the project as it was when it began, and what it has done so
+    /// far. It becomes an undo step when it ends, if it changed anything.
+    drag: Option<Step>,
     pub shown: Shown,
 }
 
@@ -206,6 +237,7 @@ impl Editor {
             p
         };
         let status = format!("opened {}", dir.display());
+        let item = (!project.roads.is_empty()).then_some(Item::Road(0));
         Ok(Self {
             stamp: stamp(&dir),
             dir,
@@ -217,12 +249,11 @@ impl Editor {
             last_backup: None,
             last_edit: None,
             selection: Selection {
-                item: Some(Item::Road(0)),
-                nodes: Vec::new(),
-                others: vec![],
+                item,
+                ..Default::default()
             },
             status,
-            dragging: false,
+            drag: None,
             shown: Shown::default(),
         })
     }
@@ -264,20 +295,14 @@ impl Editor {
             self.status = e.to_string();
             return false;
         }
-        if !merge && !self.dragging {
-            self.push_undo(before, &describe(&ops));
-        } else if self.dragging
-            && let Some(step) = self.undo.back_mut()
-        {
+        match &mut self.drag {
             // A drag is named after what it does.
-            step.what = describe(&ops);
+            Some(drag) => drag.what = describe(&ops),
+            None if !merge => self.push_undo(before, &describe(&ops)),
+            None => {}
         }
         self.last_edit = key.map(|k| (k.to_string(), now));
-        self.revision += 1;
-        if !self.dragging {
-            self.save();
-        }
-        self.clamp_selection();
+        self.edited();
         true
     }
 
@@ -288,40 +313,56 @@ impl Editor {
             self.status = e.to_string();
             return false;
         }
+        self.edited();
+        true
+    }
+
+    /// After an edit: the preview rebuilds, the file is written (at the end of a drag)
+    /// and the selection keeps to what exists.
+    fn edited(&mut self) {
         self.revision += 1;
-        if !self.dragging {
+        if !self.dragging() {
             self.save();
         }
         self.clamp_selection();
-        true
+    }
+
+    /// Whether a drag is in progress.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     /// Starts a drag: the edits until `end_drag` undo as one step and are saved at the
     /// end.
     pub fn begin_drag(&mut self) {
-        if !self.dragging {
-            self.push_undo(self.project.clone(), "Drag");
+        if self.drag.is_none() {
+            self.drag = Some(Step {
+                project: self.project.clone(),
+                what: "Drag".into(),
+            });
             self.last_edit = None;
-            self.dragging = true;
         }
     }
 
+    /// Ends a drag: what it changed is one undo step, and saved. A drag that changed
+    /// nothing (a click on a node) leaves the history as it was.
     pub fn end_drag(&mut self) {
-        if self.dragging {
-            self.dragging = false;
+        if let Some(step) = self.drag.take()
+            && step.project != self.project
+        {
+            self.push_undo(step.project, &step.what);
             self.save();
         }
     }
 
     /// Ends a drag by putting everything back as it was when it began.
     pub fn cancel_drag(&mut self) {
-        if self.dragging {
-            self.dragging = false;
-            if let Some(step) = self.undo.pop_back() {
-                self.project = step.project;
-                self.revision += 1;
-                self.clamp_selection();
-            }
+        if let Some(step) = self.drag.take()
+            && step.project != self.project
+        {
+            self.project = step.project;
+            self.revision += 1;
+            self.clamp_selection();
         }
     }
 
@@ -377,11 +418,11 @@ impl Editor {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.dragging && !self.undo.is_empty()
+        !self.dragging() && !self.undo.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.dragging && !self.redo.is_empty()
+        !self.dragging() && !self.redo.is_empty()
     }
 
     fn changed(&mut self, what: &str) {
@@ -428,7 +469,7 @@ impl Editor {
 
     /// Loads `project.ron` again if something else changed it.
     pub fn watch(&mut self) {
-        if self.dragging || self.last_check.elapsed() < Duration::from_millis(400) {
+        if self.dragging() || self.last_check.elapsed() < Duration::from_millis(400) {
             return;
         }
         self.last_check = Instant::now();
@@ -448,12 +489,15 @@ impl Editor {
         }
     }
 
+    /// The selected road: its place in the list, and the road.
+    pub fn road(&self) -> Option<(usize, &Road)> {
+        let r = self.selection.road()?;
+        Some((r, self.project.roads.get(r)?))
+    }
+
     /// Name of the selected road.
     pub fn road_name(&self) -> Option<String> {
-        self.selection
-            .road()
-            .and_then(|r| self.project.roads.get(r))
-            .map(|r| r.name.clone())
+        self.road().map(|(_, r)| r.name.clone())
     }
 
     /// The selected road or spline: its name, nodes and whether it is closed.
@@ -608,14 +652,8 @@ impl Editor {
         let names: Vec<Named> = items.iter().filter_map(|&i| self.named(i)).collect();
         let n = names.len();
         self.shown.hidden.extend(names);
-        let sel = &mut self.selection;
-        if sel.item.is_some_and(|i| items.contains(&i)) {
-            sel.item = None;
-            sel.nodes.clear();
-        }
-        sel.others.retain(|o| !items.contains(o));
-        if sel.item.is_none() {
-            sel.item = sel.others.pop();
+        for &i in items {
+            self.selection.remove(i);
         }
         self.status = format!("{n} hidden (Alt H shows them again)");
     }
@@ -646,14 +684,9 @@ impl Editor {
             .filter(|&i| self.named(i).is_some_and(|n| hidden.contains(&n)))
             .collect();
         if !items.is_empty() {
-            let sel = &mut self.selection;
-            sel.nodes.clear();
-            for i in items.iter().copied() {
-                if sel.item.is_none() {
-                    sel.item = Some(i);
-                } else if !sel.has(i) {
-                    sel.others.push(i);
-                }
+            self.selection.nodes.clear();
+            for &i in &items {
+                self.selection.add(i);
             }
         }
         self.status = format!("{} shown again", items.len());
@@ -945,6 +978,39 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_that_changes_nothing_leaves_the_history_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "open-racing-editor-still-drag-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let rename = |to: &str| vec![Op::SetName { name: to.into() }];
+        assert!(editor.apply(rename("a"), None));
+        editor.undo();
+        // A click on a node: a drag that moved nothing.
+        editor.begin_drag();
+        editor.end_drag();
+        assert!(!editor.can_undo(), "no empty step");
+        assert!(editor.can_redo(), "the undone edit still redoes");
+        // A drag cancelled half way puts the project back and leaves no step either.
+        editor.begin_drag();
+        assert!(editor.apply(rename("b"), None));
+        editor.cancel_drag();
+        assert_ne!(editor.project.name, "b");
+        assert!(editor.can_redo());
+        // A drag that moved something is one step, named after what it did.
+        editor.begin_drag();
+        assert!(editor.apply(rename("c"), None));
+        assert!(editor.apply(rename("d"), None));
+        editor.end_drag();
+        assert_eq!(editor.history().0, vec!["SetName"]);
+        editor.undo();
+        assert_ne!(editor.project.name, "d");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn undo_waits_for_a_drag_and_ends_merging() {
         let dir = std::env::temp_dir().join(format!(
             "open-racing-editor-undo-merge-{}",
@@ -964,11 +1030,13 @@ mod tests {
         };
         assert!(editor.apply(crown(0.1), Some("crown")));
         editor.begin_drag();
+        assert!(editor.apply(crown(0.15), None));
         assert!(!editor.can_undo(), "no undo in the middle of a drag");
         editor.undo();
-        assert!(editor.dragging);
+        assert!(editor.dragging());
         editor.end_drag();
         editor.undo();
+        assert_eq!(editor.project.roads[0].crown, 0.1);
 
         // An edit with the same key right after an undo is a step of its own.
         assert!(editor.apply(crown(0.3), Some("crown")));

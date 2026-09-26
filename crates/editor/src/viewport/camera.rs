@@ -434,6 +434,8 @@ pub fn view_input(
     wants: Res<EguiWantsInput>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    rect: Res<ViewRect>,
+    window: Single<&Window, With<PrimaryWindow>>,
 ) {
     let free = tool.modal.is_none() && !tool.blocked && !wants.wants_any_keyboard_input();
     // Replaying the test lap: the view follows the car, at the lap's own pace (Shift
@@ -500,7 +502,9 @@ pub fn view_input(
         }
         return;
     }
-    if free {
+    // The view's keys work with the pointer over it, as Blender's areas: Home over a
+    // graph fits the graph.
+    if free && cursor(&window, &rect).is_some() {
         view_keys(&editor, &mut orbit, &keys, tool.active.is_brush());
     }
 }

@@ -1081,6 +1081,53 @@ mod tests {
         (editor, built, camera, t, dir)
     }
 
+    #[test]
+    fn the_nearest_of_a_node_and_a_stretch_end_is_picked() {
+        let n2 = DVec3::new(420.0, 20.0, 0.0);
+        let (mut editor, _, camera, _, dir) = top_down("pick nearest", n2);
+        // Seen from 1 km up, the kerb's end beside node 2 is a few pixels from it.
+        let t = GlobalTransform::from(
+            Transform::from_translation(to_bevy(n2) + Vec3::Y * 1000.0)
+                .looking_at(to_bevy(n2), Vec3::NEG_Z),
+        );
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        let mut kerb = editor.project.roads[0].left[0].clone();
+        kerb.ranges = vec![Range { from: 2.0, to: 4.4 }];
+        assert!(editor.apply(
+            vec![Op::PutStrip {
+                road: "circuit".into(),
+                side: Side::Left,
+                strip: kerb,
+                at: None,
+            }],
+            None
+        ));
+        let built = built_of(&editor);
+        editor.selection.select(Item::Road(0));
+        let road = &editor.project.roads[0];
+        let lifted = |p: DVec3| view.screen(p + DVec3::Z * LIFT).unwrap();
+        let node = lifted(road.nodes[2].pos);
+        let end = lifted(range_end_pos(
+            road,
+            &built.roads[0],
+            Part::Strip(Side::Left, 0),
+            2.0,
+        ));
+        assert!(node.distance(end) < PICK_RADIUS, "both within reach");
+        assert_eq!(
+            pick(&editor, &built, view, node, None, true),
+            Some(Hit::Node(Item::Road(0), 2))
+        );
+        assert!(matches!(
+            pick(&editor, &built, view, end, None, true),
+            Some(Hit::Range(RangeEnd { to: false, .. }))
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// What a build of the editor's project knows.
     fn built_of(editor: &Editor) -> Built {
         let scene = open_racing_track_project::bake::build(&editor.project);

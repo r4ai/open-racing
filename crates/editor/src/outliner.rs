@@ -384,11 +384,12 @@ fn collection(
     shown: &dyn Fn(&str) -> bool,
 ) {
     let p = &c.editor.project;
-    let members: Vec<(Item, String, &'static str)> = p
+    // Everything it holds; the filter only narrows what is listed.
+    let all: Vec<(Item, String, &'static str)> = p
         .splines
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.group.as_deref() == Some(group) && shown(&s.name))
+        .filter(|(_, s)| s.group.as_deref() == Some(group))
         .map(|(i, s)| {
             let icon = match s.shape {
                 open_racing_track_project::project::Shape::Wall { .. } => "🚧",
@@ -400,10 +401,13 @@ fn collection(
             p.props
                 .iter()
                 .enumerate()
-                .filter(|(_, x)| x.group.as_deref() == Some(group) && shown(&x.name))
+                .filter(|(_, x)| x.group.as_deref() == Some(group))
                 .map(|(i, x)| (Item::Prop(i), x.name.clone(), "📦")),
         )
         .collect();
+    let items: Vec<Item> = all.iter().map(|(item, ..)| *item).collect();
+    let members: Vec<&(Item, String, &'static str)> =
+        all.iter().filter(|(_, name, _)| shown(name)).collect();
     let id = ui.make_persistent_id(("outliner collection", group));
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
         .show_header(ui, |ui| {
@@ -430,42 +434,21 @@ fn collection(
                 .selectable_label(false, egui::RichText::new(format!("🗀 {group}")).strong())
                 .on_hover_text("Click: select all it holds · right click: menu");
             if resp.clicked() {
-                let sel = &mut c.editor.selection;
-                *sel = Default::default();
-                for (item, ..) in &members {
-                    if sel.item.is_none() {
-                        sel.select(*item);
-                    } else {
-                        sel.others.push(*item);
-                    }
-                }
+                c.editor.selection.set_items(items.iter().copied());
                 c.tool.edit = false;
             }
-            ui.weak(members.len().to_string());
+            ui.weak(items.len().to_string());
             resp.context_menu(|ui| {
                 if ui.button("Select all").clicked() {
-                    c.editor.selection = Default::default();
-                    for (item, ..) in &members {
-                        if c.editor.selection.item.is_none() {
-                            c.editor.selection.select(*item);
-                        } else {
-                            c.editor.selection.others.push(*item);
-                        }
-                    }
+                    c.editor.selection.set_items(items.iter().copied());
+                    c.tool.edit = false;
                     ui.close();
                 }
                 if ui
                     .button("Remove collection (keep what it holds)")
                     .clicked()
                 {
-                    c.editor.selection = Default::default();
-                    for (item, ..) in &members {
-                        if c.editor.selection.item.is_none() {
-                            c.editor.selection.select(*item);
-                        } else {
-                            c.editor.selection.others.push(*item);
-                        }
-                    }
+                    c.editor.selection.set_items(items.iter().copied());
                     c.editor.set_group(None);
                     ui.close();
                 }

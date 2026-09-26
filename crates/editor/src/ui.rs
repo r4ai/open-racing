@@ -271,7 +271,7 @@ pub fn ui(
         shell,
         pointer,
     };
-    let (start_corner, start_tab, start_distance, on_ground) = start;
+    let (start_corner, start_tab, start_curves, start_distance, on_ground) = start;
     if c.built.count > 0 {
         if let Some(n) = start_corner {
             crate::corners::step_to(&mut c, n.0);
@@ -280,6 +280,12 @@ pub fn ui(
         if let Some(t) = start_tab {
             c.shell.tab = t.0;
             cmds.remove_resource::<crate::StartTab>();
+        }
+        if let Some(s) = start_curves {
+            c.shell.bottom = BottomTab::Curves;
+            c.shell.bottom_open = true;
+            curve_graph.show(c.editor, s.0);
+            cmds.remove_resource::<crate::StartCurves>();
         }
         if let Some(d) = start_distance {
             c.orbit.distance = d.0;
@@ -378,7 +384,7 @@ pub fn ui(
 
     if let (Some(item), Some(before)) = (active, before)
         && c.editor.selection.item == Some(item)
-        && !c.editor.dragging
+        && !c.editor.dragging()
     {
         let ops = crate::batch::spread_ops(c.editor, item, &before);
         let n = ops.len();
@@ -553,8 +559,12 @@ fn open_project(c: &mut Ctx, dir: std::path::PathBuf) {
     c.editor.switch(dir);
     if c.editor.dir != before {
         c.tool.reset();
+        c.jobs.forget();
+        c.orbit.walk = None;
+        c.orbit.replay = None;
         c.shell.popup = None;
         c.shell.focus = None;
+        c.shell.corner = None;
         crate::viewport::frame_all(c.editor, c.orbit);
     }
 }
@@ -947,9 +957,7 @@ fn bottom_area(
                 .id_salt("curves")
                 .auto_shrink([false, false])
                 .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
-                .show(ui, |ui| {
-                    curve_graph::panel(ui, c.editor, profile, curve_graph)
-                });
+                .show(ui, |ui| curve_graph::panel(ui, c, profile, curve_graph));
         }
         BottomTab::Checks => {
             egui::ScrollArea::vertical()

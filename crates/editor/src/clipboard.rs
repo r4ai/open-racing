@@ -175,14 +175,7 @@ pub fn paste(editor: &mut Editor, text: &str) -> Result<usize, String> {
         return Err(editor.status.clone());
     }
     if !items.is_empty() {
-        editor.selection = Default::default();
-        for i in &items {
-            if editor.selection.item.is_none() {
-                editor.selection.select(*i);
-            } else {
-                editor.selection.others.push(*i);
-            }
-        }
+        editor.selection.set_items(items.iter().copied());
     }
     Ok(items.len())
 }

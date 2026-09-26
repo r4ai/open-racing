@@ -3,8 +3,9 @@
 
 use super::*;
 
-/// What is under the pointer: range ends, the nearest node or active handle,
-/// then markers and the roads and splines themselves.
+/// What is under the pointer: the nearest node, active handle, strip key, stretch end
+/// or edge (a node winning a tie), then painted lines and strips, props, markers and
+/// the roads and splines themselves.
 pub(super) fn pick(
     editor: &Editor,
     built: &Built,
@@ -15,51 +16,7 @@ pub(super) fn pick(
 ) -> Option<Hit> {
     let near = |p: DVec3, r: f32| view.screen(p).map(|s| s.distance(at)).filter(|&d| d < r);
     let sel = &editor.selection;
-    // Stretch ends of the selected road's strips and barriers, and its strips' keys.
-    if let Some(r) = sel.road()
-        && let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r))
-    {
-        for key in strip_keys(road, r) {
-            if key_pos(road, smp, key)
-                .is_some_and(|p| near(p + DVec3::Z * LIFT, PICK_RADIUS).is_some())
-            {
-                return Some(Hit::StripKey(key));
-            }
-        }
-        for (part, ranges) in parts(road) {
-            for (range, rg) in ranges.iter().enumerate() {
-                for (to, u) in [(false, rg.from), (true, rg.to)] {
-                    let p = range_end_pos(road, smp, part, u) + DVec3::Z * LIFT;
-                    if near(p, PICK_RADIUS).is_some() {
-                        return Some(Hit::Range(RangeEnd {
-                            road: r,
-                            part,
-                            range,
-                            to,
-                        }));
-                    }
-                }
-                let p = reach_pos(road, smp, part, rg) + DVec3::Z * LIFT;
-                if near(p, PICK_RADIUS).is_some() {
-                    return Some(Hit::Reach(RangeEnd {
-                        road: r,
-                        part,
-                        range,
-                        to: false,
-                    }));
-                }
-            }
-        }
-        // The road's edges at its selected nodes.
-        for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
-            for side in [Side::Left, Side::Right] {
-                let p = edge_pos(smp, n, side) + DVec3::Z * LIFT;
-                if near(p, PICK_RADIUS).is_some() {
-                    return Some(Hit::Edge(r, n, side));
-                }
-            }
-        }
-    }
+    // The nearest of the nodes and handles under the pointer; a node wins a tie.
     let mut best: Option<(Hit, f32)> = None;
     // In edit mode, the nodes of the line being edited; none in object mode.
     if let Some(item) = sel.item.filter(|_| edit)
@@ -82,6 +39,46 @@ pub(super) fn pick(
                 view.screen(base + h + DVec3::Z * LIFT),
                 at,
             );
+        }
+    }
+    // The selected road's strips' keys, the ends and outer edges of its stretches, and
+    // its edges at its selected nodes.
+    if let Some(r) = sel.road()
+        && let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r))
+    {
+        let lifted = |p: DVec3| view.screen(p + DVec3::Z * LIFT);
+        for key in strip_keys(road, r) {
+            if let Some(p) = key_pos(road, smp, key) {
+                consider_pick(&mut best, Hit::StripKey(key), lifted(p), at);
+            }
+        }
+        for (part, ranges) in parts(road) {
+            for (range, rg) in ranges.iter().enumerate() {
+                for (to, u) in [(false, rg.from), (true, rg.to)] {
+                    let end = RangeEnd {
+                        road: r,
+                        part,
+                        range,
+                        to,
+                    };
+                    let p = range_end_pos(road, smp, part, u);
+                    consider_pick(&mut best, Hit::Range(end), lifted(p), at);
+                }
+                let end = RangeEnd {
+                    road: r,
+                    part,
+                    range,
+                    to: false,
+                };
+                let p = reach_pos(road, smp, part, rg);
+                consider_pick(&mut best, Hit::Reach(end), lifted(p), at);
+            }
+        }
+        for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
+            for side in [Side::Left, Side::Right] {
+                let p = edge_pos(smp, n, side);
+                consider_pick(&mut best, Hit::Edge(r, n, side), lifted(p), at);
+            }
         }
     }
     if let Some((hit, _)) = best {

@@ -14,6 +14,7 @@ mod commands;
 mod corners;
 mod curve_graph;
 mod edit;
+mod graph;
 mod jobs;
 mod lay;
 mod menus;
@@ -69,6 +70,10 @@ struct Args {
     /// object, corners, strips, lines or barriers.
     #[arg(long)]
     tab: Option<String>,
+    /// Show this graph in the Curves area below the view: elevation, left, right (the
+    /// road's widths) or bank.
+    #[arg(long)]
+    curves: Option<String>,
     /// How far the camera stands from what it looks at, m.
     #[arg(long)]
     distance: Option<f32>,
@@ -95,6 +100,9 @@ struct Args {
 pub struct StartCorner(pub usize);
 #[derive(Resource)]
 pub struct StartTab(pub ui::PropTab);
+/// The graph the Curves area shows, from the command line.
+#[derive(Resource)]
+pub struct StartCurves(pub curve_graph::Shown);
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -142,6 +150,7 @@ pub struct StartOnGround;
 pub type Start<'w> = (
     Option<Res<'w, StartCorner>>,
     Option<Res<'w, StartTab>>,
+    Option<Res<'w, StartCurves>>,
     Option<Res<'w, StartDistance>>,
     Option<Res<'w, StartOnGround>>,
 );
@@ -258,6 +267,17 @@ fn main() {
             }
             None => {
                 eprintln!("no properties tab \"{name}\"");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(name) = &args.curves {
+        match curve_graph::Shown::named(name) {
+            Some(shown) => {
+                app.insert_resource(StartCurves(shown));
+            }
+            None => {
+                eprintln!("no graph \"{name}\": elevation, left, right or bank");
                 std::process::exit(1);
             }
         }
