@@ -30,8 +30,11 @@ rayon = "1.12"
 criterion = "0.8"
 clap = { version = "4.6", features = ["derive"] }
 
+# Only line tables for our own crates: panics and backtraces keep their file and line,
+# while builds, links and each worktree's target/ shrink without the full debug info.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 # The track editor rebuilds the whole track in the background on every edit: its
 # builder runs optimised, so long circuits show edits in a fraction of a second.
