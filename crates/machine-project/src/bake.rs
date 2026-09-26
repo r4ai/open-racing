@@ -516,3 +516,39 @@ pub fn drive_check(model: &CarModel) -> DriveCheck {
 pub fn package_dir(name: &str) -> std::path::PathBuf {
     open_racing_car::cars_dir().join(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sample machine bakes into a package the game loads, matching the GT3 it was
+    /// derived from where it should, and drives.
+    #[test]
+    fn the_sample_machine_bakes_into_a_car_the_game_loads() {
+        let lib = crate::samples::library("t");
+        let o = BakeOptions {
+            quality: Quality::Draft,
+            rpm_step: 1500.0,
+            drive: true,
+        };
+        let (pkg, report) = bake(&lib, "gt3_v8", &o).unwrap();
+        let dir = std::env::temp_dir().join(format!("open-racing-bake-{}", std::process::id()));
+        pkg.save(&dir).unwrap();
+        let back = CarPackage::load(&dir, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(back.visual.is_some_and(|v| !v.visual.meshes.is_empty()));
+        let p = &back.params;
+        assert!((p.wheelbase - 2.65).abs() < 1e-6);
+        assert!((p.front_weight - 0.45).abs() < 0.02, "{}", p.front_weight);
+        assert!((p.cg_height - 0.42).abs() < 0.03, "{}", p.cg_height);
+        assert!(
+            p.engine.torque_curve.iter().any(|t| t.1 > 350.0),
+            "{:?}",
+            p.engine.torque_curve
+        );
+        CarModel::new(back.params, back.front_tire, back.rear_tire).unwrap();
+        let d = report.drive.unwrap();
+        assert!(d.settle.abs() < 0.02, "settles {}", d.settle);
+        assert!(d.zero_100.is_some_and(|t| t < 6.0), "{:?}", d.zero_100);
+    }
+}
