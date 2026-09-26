@@ -19,6 +19,8 @@ pub struct Summary {
     pub splines: Vec<SplineSummary>,
     pub terrain: Option<TerrainSummary>,
     pub scatter: Vec<ScatterSummary>,
+    /// The sky and the light the track is shown in.
+    pub environment: open_racing_track::Environment,
     pub markers: MarkerSummary,
     pub surfaces: Vec<String>,
     pub materials: Vec<String>,
@@ -52,6 +54,13 @@ pub struct ScatterSummary {
     pub models: Vec<String>,
     pub strokes: usize,
     pub copies: usize,
+    /// Copies planted one by one, and painted ones taken out.
+    pub planted: usize,
+    pub taken_out: usize,
+    /// Distances, m: the models in full out to `detail`, drawn out to `draw` (0: however
+    /// far).
+    pub detail: f64,
+    pub draw: f64,
     /// Where they stand: [[min x, min y], [max x, max y]], m; none without copies.
     pub bounds: Option<[[f64; 2]; 2]>,
 }
@@ -606,6 +615,10 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
                         .collect(),
                     strokes: s.strokes.len(),
                     copies: copies.len(),
+                    planted: s.placed.len(),
+                    taken_out: s.removed.len(),
+                    detail: s.detail,
+                    draw: s.draw,
                     bounds,
                 }
             })
@@ -619,6 +632,7 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
         splines,
         terrain,
         scatter,
+        environment: project.environment,
         markers,
         surfaces: project.surfaces.iter().map(|s| s.name.clone()).collect(),
         materials: project.materials.iter().map(|m| m.name.clone()).collect(),

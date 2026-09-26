@@ -510,6 +510,8 @@ pub struct Overlays {
     /// Lines, nodes and handles drawn through the ground and what stands on it, as
     /// Blender's X-ray (Alt Z): nodes under a sculpted hill stay in sight.
     pub xray: bool,
+    /// The view lit by the project's sky and light (the World tab), rather than evenly.
+    pub sky: bool,
 }
 
 impl Default for Overlays {
@@ -523,6 +525,7 @@ impl Default for Overlays {
             props: true,
             scatter: true,
             xray: false,
+            sky: true,
         }
     }
 }

@@ -303,6 +303,7 @@ fn assemble(parts: Vec<Part>) -> Model {
             normals: part.normals.iter().map(|n| n.to_array()).collect(),
             uvs: vec![[0.0; 2]; n],
             indices: part.indices,
+            lod: None,
         });
     }
     let triangles = meshes.iter().map(|m| m.indices.len() / 3).sum();

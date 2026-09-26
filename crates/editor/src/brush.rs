@@ -4,8 +4,10 @@
 //! when the button is let go; while it is dragged the view shows what it does.
 //!
 //! Ctrl turns a brush round (lowers, paints the ground's own material back, wipes
-//! models out), Shift smooths; F sets the radius and Shift F the strength by moving the
-//! mouse, [ and ] the radius in steps.
+//! models out), Shift smooths; F sets the radius, Shift F the strength and Ctrl F the
+//! hardness (how much of the radius acts fully) by moving the mouse, [ and ] the
+//! radius in steps. The Scatter tool also plants and selects single copies (1, 2, 3:
+//! paint, plant, select; see `plants`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,16 +17,17 @@ use bevy_egui::egui;
 use glam::{DVec2, DVec3};
 use open_racing_track_project::ops::{Op, StrokeTarget};
 use open_racing_track_project::project::{
-    Brush, GroundLayer, LayerStroke, MAX_LAYERS, Scatter, ScatterModel, Stroke,
+    Brush, GroundLayer, HARDNESS, LayerStroke, MAX_LAYERS, Stroke,
 };
 use open_racing_track_project::terrain::{Grid, PaintMask, TerrainBuild};
 use open_racing_track_render::to_bevy;
 
 use crate::commands::Ctx;
+use crate::plants::{Plants, ScatterMode};
 use crate::preview::{Built, GroundPaint, TerrainChunk};
 use crate::properties::{row, section};
 use crate::state::Editor;
-use crate::viewport::{Tool, ToolKind};
+use crate::viewport::{Tool, ToolKind, View};
 
 /// What the Sculpt tool does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,6 +83,8 @@ pub struct Size {
     pub radius: f64,
     /// 0 to 1: how far a stroke goes towards its target.
     pub strength: f64,
+    /// 0 to 1: the share of the radius a stroke acts fully within.
+    pub hardness: f64,
 }
 
 /// The brushes' settings, and the stroke being painted.
@@ -100,6 +105,10 @@ pub struct Brushes {
     pub erase: bool,
     /// Lasso fill: a stroke's path is an outline, acting fully inside it (L).
     pub fill: bool,
+    /// What the Scatter tool's left button does: paint, plant or select.
+    pub mode: ScatterMode,
+    /// Single copies planted and selected with the Scatter tool.
+    pub plants: Plants,
     pub stroke: Option<Live>,
     /// F or Shift F: the radius or strength being set with the mouse.
     pub adjust: Option<Adjust>,
@@ -113,14 +122,17 @@ impl Default for Brushes {
                 Size {
                     radius: 25.0,
                     strength: 0.5,
+                    hardness: HARDNESS,
                 },
                 Size {
                     radius: 6.0,
                     strength: 1.0,
+                    hardness: HARDNESS,
                 },
                 Size {
                     radius: 25.0,
                     strength: 0.7,
+                    hardness: HARDNESS,
                 },
             ],
             height: 2.0,
@@ -129,6 +141,8 @@ impl Default for Brushes {
             scatter: None,
             erase: false,
             fill: false,
+            mode: ScatterMode::Paint,
+            plants: Plants::default(),
             stroke: None,
             adjust: None,
         }
@@ -144,6 +158,7 @@ impl Brushes {
             height: self.height,
             erase: self.erase,
             fill: self.fill,
+            mode: self.mode,
             ..Default::default()
         }
     }
@@ -170,6 +185,7 @@ impl Brushes {
 pub enum Setting {
     Radius,
     Strength,
+    Hardness,
 }
 
 /// Setting the radius or strength with the mouse: its value when it began, and where
@@ -248,6 +264,7 @@ fn start(
             strength: size.strength,
             points: vec![p],
             fill: b.fill,
+            hardness: size.hardness,
         },
         base: built.terrain.clone(),
         grid: None,
@@ -316,23 +333,46 @@ fn round(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-/// The brush under the pointer: strokes, F and Shift F, [ and ]. Called by the view's
-/// input while a brush tool is active; true while it has the pointer.
+/// The brush under the pointer: strokes, F, Shift F and Ctrl F, [ and ]; with the
+/// Scatter tool, 1, 2 and 3 switch between painting, planting and selecting copies.
+/// Called by the view's input while a brush tool is active; returns whether it took
+/// the input (a stroke or a setting under way, or the Scatter tool planting or
+/// selecting).
 #[allow(clippy::too_many_arguments)]
 pub fn input(
     editor: &mut Editor,
     tool: &mut Tool,
     built: &Built,
+    view: View,
     buttons: &ButtonInput<MouseButton>,
     keys: &ButtonInput<KeyCode>,
     over: Option<Vec2>,
     anywhere: Option<Vec2>,
     keys_free: bool,
-) {
+) -> bool {
     settle(editor, &mut tool.brush);
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let kind = tool.active;
+    let busy = tool.brush.stroke.is_some()
+        || tool.brush.adjust.is_some()
+        || tool.brush.plants.changing.is_some();
+    if kind == ToolKind::Scatter && keys_free && over.is_some() && !busy {
+        for (key, mode) in [
+            (KeyCode::Digit1, ScatterMode::Paint),
+            (KeyCode::Digit2, ScatterMode::Plant),
+            (KeyCode::Digit3, ScatterMode::Select),
+        ] {
+            if keys.just_pressed(key) {
+                tool.brush.mode = mode;
+            }
+        }
+    }
+    if kind == ToolKind::Scatter && tool.brush.mode != ScatterMode::Paint {
+        return crate::plants::input(
+            editor, tool, built, view, buttons, keys, over, anywhere, keys_free,
+        );
+    }
     // Setting the radius or strength with the mouse.
     if let Some(a) = &tool.brush.adjust {
         let dx = anywhere.map_or(0.0, |p| (p.x - a.from.x) as f64);
@@ -341,11 +381,13 @@ pub fn input(
         match what {
             Setting::Radius => size.radius = (start * 2f64.powf(dx / 150.0)).clamp(0.5, 500.0),
             Setting::Strength => size.strength = (start + dx / 300.0).clamp(0.01, 1.0),
+            Setting::Hardness => size.hardness = (start + dx / 300.0).clamp(0.0, 1.0),
         }
         let size = *size;
         tool.hint = match what {
             Setting::Radius => format!("Radius {:.1} m", size.radius),
             Setting::Strength => format!("Strength {:.0} %", size.strength * 100.0),
+            Setting::Hardness => format!("Hardness {:.0} %", size.hardness * 100.0),
         } + " · move the mouse · click or Enter sets it · right click or Esc goes back";
         if buttons.just_pressed(MouseButton::Left)
             || keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter])
@@ -356,10 +398,11 @@ pub fn input(
             match what {
                 Setting::Radius => size.radius = start,
                 Setting::Strength => size.strength = start,
+                Setting::Hardness => size.hardness = start,
             }
             tool.brush.adjust = None;
         }
-        return;
+        return true;
     }
 
     // A stroke: pressed on the ground, points added as the pointer moves, saved when
@@ -382,7 +425,7 @@ pub fn input(
             editor.status = "stroke dropped".into();
         }
         tool.hint = "Painting a stroke · let go to finish · Esc drops it".into();
-        return;
+        return true;
     }
     if over.is_some()
         && buttons.just_pressed(MouseButton::Left)
@@ -395,13 +438,15 @@ pub fn input(
     }
     tool.hint = hint(tool, ctrl, shift);
     if !keys_free || over.is_none() {
-        return;
+        return tool.brush.stroke.is_some();
     }
     if keys.just_pressed(KeyCode::KeyL) {
         tool.brush.fill = !tool.brush.fill;
     }
     if keys.just_pressed(KeyCode::KeyF) {
-        let what = if shift {
+        let what = if ctrl {
+            Setting::Hardness
+        } else if shift {
             Setting::Strength
         } else {
             Setting::Radius
@@ -412,6 +457,7 @@ pub fn input(
             start: match what {
                 Setting::Radius => size.radius,
                 Setting::Strength => size.strength,
+                Setting::Hardness => size.hardness,
             },
             from: over.unwrap_or_default(),
         });
@@ -422,6 +468,7 @@ pub fn input(
         let size = tool.brush.size_mut(kind);
         size.radius = (size.radius * 1.25f64.powi(step)).clamp(0.5, 500.0);
     }
+    tool.brush.stroke.is_some() || tool.brush.adjust.is_some()
 }
 
 /// What the mouse does with the active brush, for the header and status bar.
@@ -462,10 +509,16 @@ fn hint(tool: &Tool, ctrl: bool, shift: bool) -> String {
     } else {
         ("Drag to", "L: lasso fill")
     };
+    let modes = if tool.active == ToolKind::Scatter {
+        " · 2 plants, 3 selects single copies"
+    } else {
+        ""
+    };
     format!(
-        "{drag} {what} · radius {:.1} m (F, [ ]) · strength {:.0} % (Shift F) · {turn} · {lasso}",
+        "{drag} {what} · radius {:.1} m (F, [ ]) · strength {:.0} % (Shift F) · hardness {:.0} % (Ctrl F) · {turn} · {lasso}{modes}",
         size.radius,
-        size.strength * 100.0
+        size.strength * 100.0,
+        size.hardness * 100.0
     )
 }
 
@@ -485,6 +538,7 @@ fn commit(editor: &mut Editor, live: Live) {
         .collect();
     stroke.radius = round(stroke.radius);
     stroke.strength = (stroke.strength * 1000.0).round() / 1000.0;
+    stroke.hardness = round(stroke.hardness);
     let n = stroke.points.len();
     if editor.apply(
         vec![Op::AddStroke {
@@ -606,9 +660,10 @@ pub fn live(
             let ground = built.ground.as_deref();
             live.dots = open_racing_track_project::scatter::planned(&s)
                 .into_iter()
-                .filter(|(p, ..)| p.cmpge(lo).all() && p.cmple(hi).all())
+                .map(|c| c.pos)
+                .filter(|p| p.cmpge(lo).all() && p.cmple(hi).all())
                 .take(4000)
-                .map(|(p, ..)| {
+                .map(|p| {
                     let top = p.extend(1e4);
                     ground
                         .and_then(|g| g.raycast_down(top, 2e4))
@@ -623,6 +678,10 @@ pub fn live(
 /// in; and the stroke's scatter.
 pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
     if !tool.active.is_brush() || tool.modal.is_some() {
+        return;
+    }
+    if tool.active == ToolKind::Scatter && tool.brush.mode != ScatterMode::Paint {
+        crate::plants::draw(tool, built, gizmos);
         return;
     }
     let ground = built.ground.as_deref();
@@ -664,7 +723,8 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
         }
     }
     let Some(at) = tool.pointer else { return };
-    let radius = b.size(tool.active).radius;
+    let size = b.size(tool.active);
+    let radius = size.radius;
     // A lasso: a small ring at the pointer, the outline being what fills.
     if b.fill && b.stroke.is_none() {
         let ring: Vec<Vec3> = (0..=24)
@@ -676,7 +736,10 @@ pub fn draw(tool: &Tool, built: &Built, gizmos: &mut Gizmos) {
         gizmos.linestrip(ring, colour);
         return;
     }
-    for (r, alpha) in [(radius, 1.0), (0.5 * radius, 0.45)] {
+    for (r, alpha) in [(radius, 1.0), (size.hardness * radius, 0.45)] {
+        if r < 0.05 {
+            continue;
+        }
         let ring: Vec<Vec3> = (0..=64)
             .map(|k| {
                 let a = k as f64 / 64.0 * std::f64::consts::TAU;
@@ -700,58 +763,23 @@ const LAYER_KINDS: [(&str, &str, &str); 4] = [
     ("asphalt", "runoff", "asphalt"),
 ];
 
-/// A kind of scatter to start from: a name, its built-in models with their weights, the
-/// spacing and the sizes.
-pub type ScatterKind = (&'static str, &'static [(&'static str, f64)], f64, [f64; 2]);
-
-/// Kinds of scatters to start from.
-pub const SCATTER_KINDS: [ScatterKind; 5] = [
-    (
-        "woods",
-        &[("pine", 3.0), ("tree", 2.0), ("poplar", 1.0)],
-        7.0,
-        [0.8, 1.25],
-    ),
-    ("pines", &[("pine", 1.0)], 6.0, [0.75, 1.3]),
-    ("bushes", &[("bush", 3.0), ("rock", 1.0)], 4.0, [0.7, 1.4]),
-    ("long grass", &[("grass", 1.0)], 1.2, [0.7, 1.5]),
-    ("rocks", &[("rock", 1.0)], 5.0, [0.5, 1.8]),
-];
-
-/// A new scatter of a kind, named so that it is free.
-fn new_scatter(editor: &Editor, kind: usize) -> Scatter {
-    let (name, models, spacing, scale) = SCATTER_KINDS[kind];
-    let p = &editor.project;
-    Scatter {
-        name: crate::presets::free_name(name, |n| p.scatter.iter().any(|s| s.name == n)),
-        models: models
-            .iter()
-            .map(|(m, w)| ScatterModel {
-                model: open_racing_track_project::shapes::path(m),
-                weight: *w,
-            })
-            .collect(),
-        spacing,
-        scale,
-        tilt: if name == "rocks" { 0.6 } else { 0.1 },
-        clearance: 3.0,
-        max_slope: 35.0,
-        collide: false,
-        strokes: vec![],
-        group: None,
-    }
-}
-
-/// Adds a scatter of a kind of `SCATTER_KINDS`, and paints it next.
-pub fn add_scatter(c: &mut Ctx, kind: usize) {
-    let s = new_scatter(c.editor, kind);
-    let name = s.name.clone();
-    if c.editor.apply(vec![Op::PutScatter { scatter: s }], None) {
-        c.tool.brush.scatter = Some(name.clone());
-        c.tool.active = ToolKind::Scatter;
-        c.editor.status = format!(
-            "\"{name}\": drag over the ground to plant it (the Scatter tab sets its models)"
-        );
+/// Adds a scatter of a kind of vegetation (see `vegetation`), with the files it
+/// needs from `library`, and paints it next with the kind's brush.
+pub fn add_scatter(c: &mut Ctx, kind: &crate::vegetation::Kind, library: Option<&std::path::Path>) {
+    match crate::vegetation::add(c.editor, kind, library) {
+        Ok(name) => {
+            c.tool.brush.scatter = Some(name.clone());
+            c.tool.active = ToolKind::Scatter;
+            c.tool.brush.mode = ScatterMode::Paint;
+            c.tool.brush.erase = false;
+            let size = c.tool.brush.size_mut(ToolKind::Scatter);
+            (size.radius, size.strength, size.hardness) =
+                (kind.brush.radius, kind.brush.strength, kind.brush.hardness);
+            c.editor.status = format!(
+                "\"{name}\": drag over the ground to plant it (the Scatter tab sets its models)"
+            );
+        }
+        Err(e) => c.editor.status = e,
     }
 }
 
@@ -829,21 +857,40 @@ pub fn settings_ui(ui: &mut egui::Ui, c: &mut Ctx, compact: bool) {
                     }
                 });
             ui.menu_button("+ New", |ui| {
-                for (k, (name, models, ..)) in SCATTER_KINDS.iter().enumerate() {
-                    let what: Vec<&str> = models.iter().map(|m| m.0).collect();
+                for kind in crate::vegetation::builtin() {
                     if ui
-                        .button(*name)
-                        .on_hover_text(format!("Built-in {}", what.join(", ")))
+                        .button(&kind.name)
+                        .on_hover_text(format!("Built-in {}", kind.category.label().to_lowercase()))
                         .clicked()
                     {
-                        add_scatter(c, k);
+                        add_scatter(c, &kind, None);
                         ui.close();
                     }
                 }
-            });
+            })
+            .response
+            .on_hover_text("More kinds, and your own, are on the palette below the view");
+            ui.separator();
             let b = &mut c.tool.brush;
-            ui.selectable_value(&mut b.erase, false, "Add");
-            ui.selectable_value(&mut b.erase, true, "Wipe out");
+            for m in ScatterMode::ALL {
+                ui.selectable_value(&mut b.mode, m, m.label())
+                    .on_hover_text(m.tip());
+            }
+            ui.separator();
+            match b.mode {
+                ScatterMode::Paint => {
+                    ui.selectable_value(&mut b.erase, false, "Add");
+                    ui.selectable_value(&mut b.erase, true, "Wipe out");
+                }
+                ScatterMode::Plant => {
+                    plant_ui(ui, c);
+                    return;
+                }
+                ScatterMode::Select => {
+                    select_ui(ui, c);
+                    return;
+                }
+            }
         }
         _ => return,
     }
@@ -866,6 +913,156 @@ pub fn settings_ui(ui: &mut egui::Ui, c: &mut Ctx, compact: bool) {
         {
             size.strength = percent / 100.0;
         }
+    }
+    let mut percent = size.hardness * 100.0;
+    if slider(ui, &mut percent, 0.0..=100.0, "Hardness", " %", compact)
+        .on_hover_text(
+            "How much of the radius acts fully: 0 eases out from the middle, 100 is a hard edge (Ctrl F in the view)",
+        )
+        .changed()
+    {
+        size.hardness = percent / 100.0;
+    }
+}
+
+/// The scatter being planted: the model each click puts down.
+fn plant_ui(ui: &mut egui::Ui, c: &mut Ctx) {
+    let Some(s) = c
+        .tool
+        .brush
+        .scatter
+        .as_ref()
+        .and_then(|n| c.editor.project.scatter.iter().find(|s| &s.name == n))
+    else {
+        return;
+    };
+    let models: Vec<String> = s
+        .models
+        .iter()
+        .map(|m| crate::assets::model_name(&m.model))
+        .collect();
+    let p = &mut c.tool.brush.plants;
+    ui.label("Model");
+    egui::ComboBox::from_id_salt("plant model")
+        .selected_text(match p.model {
+            Some(m) if m < models.len() => models[m].clone(),
+            _ => "any, by weight".into(),
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut p.model, None, "any, by weight");
+            for (i, m) in models.iter().enumerate() {
+                ui.selectable_value(&mut p.model, Some(i), m);
+            }
+        });
+    ui.weak("click to plant · drag to turn · Ctrl + click takes one out");
+}
+
+/// The copies selected: how many, and their model, size and turn to set at once.
+fn select_ui(ui: &mut egui::Ui, c: &mut Ctx) {
+    let Some(s) = c
+        .tool
+        .brush
+        .scatter
+        .as_ref()
+        .and_then(|n| c.editor.project.scatter.iter().find(|s| &s.name == n))
+        .cloned()
+    else {
+        return;
+    };
+    let selected = c.tool.brush.plants.selected.clone();
+    let n = selected.len();
+    ui.label(format!("{n} selected"));
+    if !s.removed.is_empty()
+        && ui
+            .small_button(format!("Bring back {}", s.removed.len()))
+            .on_hover_text("The painted copies taken out, back where they were painted")
+            .clicked()
+    {
+        let mut back = s.clone();
+        back.removed.clear();
+        c.editor.apply(vec![Op::PutScatter { scatter: back }], None);
+    }
+    if n == 0 {
+        ui.weak("click or box copies · A all");
+        return;
+    }
+    let chosen: Vec<_> = c
+        .built
+        .names
+        .iter()
+        .position(|x| *x == s.name)
+        .and_then(|b| c.built.copies.get(b))
+        .map(|copies| {
+            copies
+                .iter()
+                .filter(|x| selected.contains(&x.id))
+                .copied()
+                .collect()
+        })
+        .unwrap_or_else(Vec::new);
+    let Some(first) = chosen.first().copied() else {
+        return;
+    };
+    let models: Vec<String> = s
+        .models
+        .iter()
+        .map(|m| crate::assets::model_name(&m.model))
+        .collect();
+    let mut model = first.model;
+    let same = chosen.iter().all(|x| x.model == model);
+    egui::ComboBox::from_id_salt("selected model")
+        .selected_text(if same {
+            models.get(model).cloned().unwrap_or_default()
+        } else {
+            "several".into()
+        })
+        .show_ui(ui, |ui| {
+            for (i, m) in models.iter().enumerate() {
+                ui.selectable_value(&mut model, i, m);
+            }
+        });
+    if model != first.model || (!same && chosen.iter().any(|x| x.model != model)) {
+        crate::plants::set(c.editor, c.tool, c.built, |p| p.model = model);
+    }
+    let mut size = first.scale;
+    if ui
+        .add(
+            egui::DragValue::new(&mut size)
+                .speed(0.01)
+                .range(0.05..=20.0)
+                .prefix("size ×"),
+        )
+        .on_hover_text("The size of each selected copy (S in the view resizes them together)")
+        .changed()
+    {
+        crate::plants::set(c.editor, c.tool, c.built, |p| p.scale = size);
+    }
+    let mut turn = first.yaw.to_degrees().rem_euclid(360.0);
+    if ui
+        .add(
+            egui::DragValue::new(&mut turn)
+                .speed(1.0)
+                .range(0.0..=360.0)
+                .suffix("°"),
+        )
+        .on_hover_text("The turn of each selected copy (R in the view turns them together)")
+        .changed()
+    {
+        crate::plants::set(c.editor, c.tool, c.built, |p| p.yaw = turn.to_radians());
+    }
+    if ui
+        .small_button("Delete")
+        .on_hover_text("X in the view")
+        .clicked()
+    {
+        let copies = std::mem::take(&mut c.tool.brush.plants.selected);
+        c.editor.apply(
+            vec![Op::RemoveCopies {
+                scatter: s.name.clone(),
+                copies,
+            }],
+            None,
+        );
     }
 }
 
@@ -922,7 +1119,7 @@ pub fn sidebar(ui: &mut egui::Ui, c: &mut Ctx) {
         ui.weak(match c.tool.active {
             ToolKind::Sculpt => "Drag over the terrain. Ctrl: the other way · Shift: smooth · F: radius. The ground by the roads stays where it meets them. A small terrain cell (Terrain tab) shows finer shapes.",
             ToolKind::Paint => "Drag over the terrain to paint the layer; each layer drives with the grip of its surface. Ctrl paints the ground's own material back.",
-            _ => "Drag over the ground to plant the scatter's models; paint again for more. Ctrl wipes them out. They keep off roads, kerbs and steep ground. Its models, spacing and sizes are in the Scatter tab.",
+            _ => "Paint (1): drag over the ground to plant the scatter's models; paint again for more, Ctrl wipes them out. Plant (2): a click puts one copy down. Select (3): pick copies to move (G), turn (R), resize (S) or delete (X). Painted copies keep off roads, kerbs and steep ground. The palette below the view holds more kinds and your own; the Scatter tab sets models, distances and materials.",
         });
     });
 }
@@ -968,14 +1165,16 @@ mod tests {
             keys.press(KeyCode::ControlLeft);
         }
         let over = Some(Vec2::new(400.0, 300.0));
+        let (cam, t) = (Camera::default(), GlobalTransform::default());
+        let view = View { cam: &cam, t: &t };
         buttons.press(MouseButton::Left);
         for k in 0..=10 {
             tool.pointer = Some(from.lerp(to, k as f64 / 10.0).extend(0.0));
-            input(editor, tool, built, &buttons, &keys, over, over, true);
+            input(editor, tool, built, view, &buttons, &keys, over, over, true);
             buttons.clear();
         }
         buttons.release(MouseButton::Left);
-        input(editor, tool, built, &buttons, &keys, over, over, true);
+        input(editor, tool, built, view, &buttons, &keys, over, over, true);
     }
 
     #[test]
@@ -1093,7 +1292,7 @@ mod tests {
         tool.active = ToolKind::Scatter;
         drag(&mut editor, &mut tool, &built, a, b, false);
         assert!(editor.status.contains("scatter"), "{}", editor.status);
-        let s = new_scatter(&editor, 0);
+        let s = crate::vegetation::builtin().remove(0).scatter;
         assert!(editor.apply(vec![Op::PutScatter { scatter: s }], None));
         drag(&mut editor, &mut tool, &built, a, b, false);
         drag(&mut editor, &mut tool, &built, a, b, true);

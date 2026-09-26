@@ -659,14 +659,37 @@ fn print_summary(s: &inspect::Summary) {
                 lo[0], hi[0], lo[1], hi[1]
             )
         });
+        let single = if sc.planted + sc.taken_out > 0 {
+            format!(" ({} planted, {} taken out)", sc.planted, sc.taken_out)
+        } else {
+            String::new()
+        };
+        let draw = if sc.draw > 0.0 {
+            format!("{:.0} m", sc.draw)
+        } else {
+            "however far".into()
+        };
         println!(
-            "scatter \"{}\" of {}: {} strokes, {} copies{at}",
+            "scatter \"{}\" of {}: {} strokes, {} copies{single}{at}, in full to {:.0} m, drawn to {draw}",
             sc.name,
             sc.models.join(", "),
             sc.strokes,
-            sc.copies
+            sc.copies,
+            sc.detail
         );
     }
+    let e = &s.environment;
+    println!(
+        "sky and light: {} at {:02}:{:02} in month {}{}, exposure {:+.1} EV, haze {:.2}",
+        e.sky.name(),
+        (e.hour.floor() as u32) % 24,
+        ((e.hour.fract() * 60.0).round() as u32).min(59),
+        e.month,
+        e.latitude
+            .map_or(String::new(), |l| format!(" at {l:.1}° latitude")),
+        e.exposure,
+        e.haze
+    );
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);
     for (i, sec) in m.sectors.iter().enumerate() {

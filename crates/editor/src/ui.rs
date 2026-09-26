@@ -37,6 +37,8 @@ pub enum PropTab {
     Terrain,
     /// Woods, bushes and rocks painted over the ground.
     Scatter,
+    /// The sky and the light: time of day, season, weather, exposure.
+    World,
     Reference,
     /// Strip and wall types, materials and surfaces.
     Library,
@@ -55,8 +57,8 @@ impl PropTab {
     pub fn named(name: &str) -> Option<Self> {
         use PropTab::*;
         [
-            Track, Markers, Terrain, Scatter, Reference, Library, Object, Corners, Strips, Lines,
-            Barriers, Rows,
+            Track, Markers, Terrain, Scatter, World, Reference, Library, Object, Corners, Strips,
+            Lines, Barriers, Rows,
         ]
         .into_iter()
         .find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
@@ -233,6 +235,7 @@ pub fn ui(
     start: crate::Start,
     mut cmds: Commands,
     mut state: Local<UiState>,
+    mut palette: ResMut<crate::palette::Palette>,
     camera: Single<(&Camera, &GlobalTransform), With<EditorCamera>>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
@@ -362,6 +365,7 @@ pub fn ui(
                     asset_panel,
                     &mut library,
                     &props,
+                    &mut palette,
                 );
             });
         c.shell.bottom_open = open;
@@ -374,6 +378,10 @@ pub fn ui(
 
     menus::header(&mut root, &mut c);
     menus::tool_settings(&mut root, &mut c);
+    palette.assets_changed(library.revision);
+    if !c.shell.maximized {
+        crate::palette::show(&mut root, &mut c, &mut palette);
+    }
     let mut open = c.shell.sidebar;
     egui::Panel::right("sidebar")
         .resizable(true)
@@ -924,6 +932,7 @@ fn bottom_area(
     asset_panel: &mut assets::Panel,
     library: &mut Library,
     props: &Props,
+    palette: &mut crate::palette::Palette,
 ) {
     ui.horizontal(|ui| {
         let failed = c.jobs.passed == Some(false);
@@ -970,8 +979,11 @@ fn bottom_area(
                 .id_salt("assets")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    assets::panel(ui, c.editor, library, props, c.tool, asset_panel);
+                    assets::panel(ui, c.editor, library, props, c.tool, asset_panel, palette);
                 });
+            if let Some(model) = asset_panel.scatter.take() {
+                crate::palette::scatter_of_model(c, &model);
+            }
         }
         BottomTab::Report => {
             egui::ScrollArea::vertical()

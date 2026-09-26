@@ -23,6 +23,7 @@ mod nature;
 mod object;
 mod road;
 mod track;
+mod world;
 
 pub use track::model_button;
 
@@ -49,6 +50,8 @@ pub struct State {
     pit_plan: Option<open_racing_track_project::pitlane::Plan>,
     /// The track's tab is shown only because nothing was selected.
     stand_in: bool,
+    /// A scatter being saved to the user's library: which, as what, on which shelf.
+    save_kind: Option<(String, String, crate::vegetation::Category)>,
 }
 
 fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
@@ -68,6 +71,11 @@ fn tabs(c: &Ctx) -> Vec<(PropTab, &'static str, &'static str)> {
             PropTab::Scatter,
             "🌳",
             "Scatter: woods, bushes and rocks painted over the ground",
+        ),
+        (
+            PropTab::World,
+            "☀",
+            "World: the sky and the light, the time of day and the weather",
         ),
         (
             PropTab::Reference,
@@ -191,7 +199,8 @@ pub fn show(
                 PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor, state, library),
                 PropTab::Terrain => terrain_tab(ui, c),
-                PropTab::Scatter => scatter_tab(ui, c, library),
+                PropTab::Scatter => scatter_tab(ui, c, library, state),
+                PropTab::World => world::world_tab(ui, c),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Library => library_tab(ui, c.editor, state, library),
                 PropTab::Object => match c.editor.selection.item {

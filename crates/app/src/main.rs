@@ -70,9 +70,11 @@ fn main() {
     if args.track.is_none() {
         args.track = driving::policy_track(&args);
     }
-    let weather = weather::WeatherConfig::load(&args);
+    let environment =
+        open_racing_api::track_environment(args.track.as_deref().unwrap_or("lakeside"));
+    let weather = weather::WeatherConfig::load(&args, environment);
     let realism = realism::RealismSettings::load();
-    let (mut sim, track_model, car_model) = driving::Simulation::new(&args, weather.0)
+    let (mut sim, track_model, car_model) = driving::Simulation::new(&args, weather.settings)
         .unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);

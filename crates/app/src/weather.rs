@@ -25,6 +25,7 @@ use bevy::render::render_resource::{
 use bevy::render::{Render, RenderApp, RenderSystems};
 use glam::DVec3;
 use open_racing_sim::{Sky, WeatherSettings};
+use open_racing_track::Environment;
 use serde::{Deserialize, Serialize};
 
 use crate::Args;
@@ -69,36 +70,73 @@ const COVER_CHANGE: f64 = 0.004;
 const SKY_REFRESH: f32 = 1.0;
 const EARTH_RADIUS: f32 = 6_360_000.0;
 /// Weather settings kept between runs (the seed is new each run).
-#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WeatherConfig(pub WeatherSettings);
+pub struct WeatherConfig {
+    pub settings: WeatherSettings,
+    /// Tracks that give their own sky and light start in them.
+    pub track: bool,
+    /// The sky and light the track gives, if it does.
+    #[serde(skip)]
+    pub environment: Option<Environment>,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            settings: WeatherSettings::default(),
+            track: true,
+            environment: None,
+        }
+    }
+}
+
+/// `settings` with the sky, time, season, temperature and latitude a track gives.
+pub fn with_track(settings: WeatherSettings, e: &Environment) -> WeatherSettings {
+    WeatherSettings {
+        sky: e.sky,
+        dynamic: e.changing,
+        hour: e.hour,
+        month: e.month,
+        temperature_offset: e.temperature,
+        latitude: e.latitude.unwrap_or(settings.latitude),
+        ..settings
+    }
+}
 
 impl WeatherConfig {
-    /// The saved settings, with the command line's weather and time on top.
-    pub fn load(args: &Args) -> Self {
+    /// The saved settings, or the track's sky and light when it gives them, with the
+    /// command line's weather and time on top.
+    pub fn load(args: &Args, environment: Option<Environment>) -> Self {
         let mut config: Self = bindings::load_config(SETTINGS_FILE);
+        config.environment = environment;
+        if config.track
+            && let Some(e) = &environment
+        {
+            config.settings = with_track(config.settings, e);
+        }
         if let Some(sky) = args.weather.as_deref().and_then(Sky::parse) {
-            config.0.sky = sky;
+            config.settings.sky = sky;
         }
         if let Some(hour) = args.time {
-            config.0.hour = hour;
+            config.settings.hour = hour;
         }
-        config.0.seed = std::time::SystemTime::now()
+        config.settings.seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
         // Reproducible captures do not overwrite the user's saved weather.
         if let Ok(seed) = std::env::var("OPEN_RACING_WEATHER_SEED")
             && let Ok(seed) = seed.parse()
         {
-            config.0.seed = seed;
-            config.0.dynamic = false;
+            config.settings.seed = seed;
+            config.settings.dynamic = false;
         }
         if let Ok(scale) = std::env::var("OPEN_RACING_WEATHER_SPEED")
             && let Ok(scale) = scale.parse::<f64>()
             && scale.is_finite()
             && (0.0..=120.0).contains(&scale)
         {
-            config.0.time_scale = scale;
+            config.settings.time_scale = scale;
         }
         config
     }
@@ -579,6 +617,7 @@ fn update_exposure_and_haze(
     sim: Res<Simulation>,
     graphics: Res<GraphicsSettings>,
     mut made: ResMut<Made>,
+    weather: Res<WeatherConfig>,
     mut exposures: Query<&mut Exposure>,
     mut fogs: Query<&mut DistanceFog>,
 ) {
@@ -590,8 +629,10 @@ fn update_exposure_and_haze(
         None => target,
     };
     made.ev = Some(ev);
+    // The track's own exposure brightens or darkens what the daylight calls for.
+    let look = weather.environment.unwrap_or_default();
     for mut e in &mut exposures {
-        e.ev100 = ev;
+        e.ev100 = ev - look.exposure as f32;
     }
     if !graphics.haze {
         return;
@@ -601,7 +642,8 @@ fn update_exposure_and_haze(
     // Visibility: long in dry clear air, shorter in humid, grey weather.
     let visibility = 30_000.0
         * (1.0 - 0.6 * w.relative_humidity() as f32)
-        * (1.0 - 0.3 * w.cloud_cover() as f32);
+        * (1.0 - 0.3 * w.cloud_cover() as f32)
+        / (look.haze as f32).max(0.02);
     let haze = light.horizon * exposure;
     let glare = light.sun_lux * exposure * 0.02 * (1.0 - w.cloud_cover() as f32);
     for mut fog in &mut fogs {

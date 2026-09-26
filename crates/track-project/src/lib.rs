@@ -19,6 +19,7 @@ pub mod corners;
 pub mod curve;
 pub mod dem;
 pub mod geo;
+pub mod impostor;
 pub mod inspect;
 pub mod lines;
 pub mod model;

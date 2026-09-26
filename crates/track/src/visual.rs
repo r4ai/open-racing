@@ -11,9 +11,9 @@ use crate::Error;
 use crate::bin::{Reader, Writer};
 
 const MAGIC: &[u8; 4] = b"ORVS";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Oldest version still read: version 4 only added `DetailMask::BaseAlpha` and
-/// `Detail::normal`.
+/// `Detail::normal`, version 5 `Mesh::lod`.
 const OLDEST_VERSION: u32 = 3;
 /// Edge of the XY tiles meshes are batched by, in m.
 const BATCH_TILE: f32 = 250.0;
@@ -145,6 +145,20 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
+    /// Drawn only within a range of distances from the camera, as one level of detail
+    /// of what it shows.
+    pub lod: Option<Lod>,
+}
+
+/// The distances from the camera to `center` a mesh is drawn at, fading in over
+/// `fade_in` and out over `fade_out`, m. The levels of detail of the same things share
+/// their centre, and one's `fade_out` is the next one's `fade_in`, so that they
+/// cross-fade.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Lod {
+    pub center: [f32; 3],
+    pub fade_in: [f32; 2],
+    pub fade_out: [f32; 2],
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -188,6 +202,14 @@ impl VisualBuilder {
     pub fn add_material(&mut self, material: Material) -> u32 {
         self.visual.materials.push(material);
         (self.visual.materials.len() - 1) as u32
+    }
+
+    /// Adds a mesh drawn within a range of distances, as it is: it is one tile of its
+    /// level of detail already.
+    pub fn add_lod_mesh(&mut self, mesh: Mesh) {
+        if !mesh.indices.is_empty() {
+            self.visual.meshes.push(mesh);
+        }
     }
 
     /// Adds a mesh to the batch of its material, shadow flag and tile. `normals` and
@@ -273,6 +295,13 @@ impl Visual {
             if m.indices.len() % 3 != 0 || m.indices.iter().any(|&i| i as usize >= n) {
                 return bad("invalid triangle indices");
             }
+            if let Some(l) = m.lod
+                && !(l.fade_in[0] <= l.fade_in[1]
+                    && l.fade_in[1] <= l.fade_out[0]
+                    && l.fade_out[0] <= l.fade_out[1])
+            {
+                return bad("a level of detail's distances out of order");
+            }
         }
         Ok(())
     }
@@ -325,6 +354,16 @@ impl Visual {
             w.vecs(&m.normals);
             w.vecs(&m.uvs);
             w.u32s(&m.indices);
+            match &m.lod {
+                None => w.u8(0),
+                Some(l) => {
+                    w.u8(1);
+                    [l.center.as_slice(), &l.fade_in, &l.fade_out]
+                        .concat()
+                        .into_iter()
+                        .for_each(|v| w.f32(v));
+                }
+            }
         }
         w.finish()
     }
@@ -397,14 +436,27 @@ impl Visual {
             });
         }
         for _ in 0..r.u32()? {
-            v.meshes.push(Mesh {
+            let mut mesh = Mesh {
                 material: r.u32()?,
                 cast_shadows: r.u8()? != 0,
                 positions: r.vecs()?,
                 normals: r.vecs()?,
                 uvs: r.vecs()?,
                 indices: r.u32s()?,
-            });
+                lod: None,
+            };
+            if r.version >= 5 && r.u8()? != 0 {
+                let mut f = [0.0; 7];
+                for v in &mut f {
+                    *v = r.f32()?;
+                }
+                mesh.lod = Some(Lod {
+                    center: [f[0], f[1], f[2]],
+                    fade_in: [f[3], f[4]],
+                    fade_out: [f[5], f[6]],
+                });
+            }
+            v.meshes.push(mesh);
         }
         r.finish()?;
         Ok(v)
@@ -452,5 +504,31 @@ mod tests {
         assert_eq!(v.meshes.len(), 3);
         assert_eq!(v.meshes[0].indices, [0, 1, 2, 3, 4, 5]);
         assert_eq!(v.meshes[0].positions[3], [10.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn levels_of_detail_round_trip() {
+        let mut b = VisualBuilder::new();
+        let m = b.add_material(Material::default());
+        add(&mut b, m, 0.0);
+        let lod = Lod {
+            center: [1.0, 2.0, 3.0],
+            fade_in: [100.0, 110.0],
+            fade_out: [900.0, 940.0],
+        };
+        b.add_lod_mesh(Mesh {
+            material: m,
+            cast_shadows: false,
+            positions: TRI.to_vec(),
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0; 2]; 3],
+            indices: vec![0, 1, 2],
+            lod: Some(lod),
+        });
+        let v = b.build();
+        v.validate().unwrap();
+        let back = Visual::decode(&v.encode()).unwrap();
+        assert_eq!(back, v);
+        assert_eq!(back.meshes[1].lod, Some(lod));
     }
 }

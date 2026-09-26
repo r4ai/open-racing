@@ -1,7 +1,8 @@
 //! open-racing's track package format.
 //!
 //! A package is a directory holding one track:
-//! - `track.ron`: format version, centreline and surface table. Small and readable.
+//! - `track.ron`: format version, centreline, surface table, race layout and the sky
+//!   and light the track is shown in. Small and readable.
 //! - `ground.bin`: drivable surfaces and walls for the physics.
 //! - `visual.bin` (optional): meshes, materials and textures for rendering.
 //!
@@ -20,12 +21,12 @@ pub mod visual;
 
 use std::path::{Path, PathBuf};
 
-use open_racing_sim::{Layout, SurfaceProps, Track, TrackDef, TrackError};
+use open_racing_sim::{Layout, Sky, SurfaceProps, Track, TrackDef, TrackError};
 use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
 pub use visual::{
-    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Material, Mesh, Texture, Visual,
+    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Lod, Material, Mesh, Texture, Visual,
     VisualBuilder,
 };
 
@@ -93,6 +94,67 @@ pub fn list() -> Vec<String> {
     names
 }
 
+/// The sky and the light a track is shown in: the time of day and the season, the
+/// weather, and how the picture is exposed. The app starts in them unless its weather
+/// settings say otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Environment {
+    pub sky: Sky,
+    /// Whether the sky changes by itself as time goes by.
+    pub changing: bool,
+    /// Time of day, h (local solar time).
+    pub hour: f64,
+    /// Month, 1 to 12.
+    pub month: u32,
+    /// Latitude of the place, degrees north: where the sun runs.
+    pub latitude: Option<f64>,
+    /// Added to the air temperature the month and the sky give, K.
+    pub temperature: f64,
+    /// Brightens (above 0) or darkens the picture from what the daylight calls for, EV.
+    pub exposure: f64,
+    /// How thick the haze is against what the weather gives: 0 none, 1 as it gives.
+    pub haze: f64,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self {
+            sky: Sky::Fair,
+            changing: true,
+            hour: 14.0,
+            month: 6,
+            latitude: None,
+            temperature: 0.0,
+            exposure: 0.0,
+            haze: 1.0,
+        }
+    }
+}
+
+impl Environment {
+    pub fn is_valid(&self) -> bool {
+        (0.0..24.0).contains(&self.hour)
+            && (1..=12).contains(&self.month)
+            && self.latitude.is_none_or(|l| (-89.0..=89.0).contains(&l))
+            && (-30.0..=30.0).contains(&self.temperature)
+            && (-5.0..=5.0).contains(&self.exposure)
+            && (0.0..=10.0).contains(&self.haze)
+    }
+
+    /// Day of the year in the middle of its month.
+    pub fn day_of_year(&self) -> u32 {
+        let m = self.month.clamp(1, 12) as usize;
+        [15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349][m - 1]
+    }
+}
+
+/// Reads the sky and light of the package in `dir`, if it gives them.
+pub fn environment(dir: &Path) -> Option<Environment> {
+    let src = std::fs::read_to_string(dir.join(MANIFEST)).ok()?;
+    ron::from_str::<Manifest>(&src).ok()?.environment
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     format: u32,
@@ -103,6 +165,8 @@ struct Manifest {
     surfaces: Vec<SurfaceProps>,
     #[serde(default)]
     layout: Layout,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<Environment>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +174,7 @@ pub struct TrackPackage {
     pub centreline: TrackDef,
     pub surfaces: Vec<SurfaceProps>,
     pub layout: Layout,
+    pub environment: Option<Environment>,
     pub ground: Ground,
     pub visual: Option<Visual>,
 }
@@ -150,6 +215,7 @@ impl TrackPackage {
             centreline: manifest.centreline,
             surfaces: manifest.surfaces,
             layout: manifest.layout,
+            environment: manifest.environment,
             ground,
             visual,
         })
@@ -167,6 +233,7 @@ impl TrackPackage {
             centreline: self.centreline.clone(),
             surfaces: self.surfaces.clone(),
             layout: self.layout.clone(),
+            environment: self.environment,
         };
         let ron = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
             .expect("manifest serialises");
@@ -310,6 +377,7 @@ mod tests {
                 grid: vec![open_racing_sim::GridSlot { s: 620.0, d: 1.5 }],
                 pit: None,
             },
+            environment: None,
             ground,
             visual: Some(v.build()),
         }

@@ -177,12 +177,12 @@ pub fn input(
     // A brush paints with the left button; the right button and the keys work as
     // ever, unless a stroke is being painted.
     if tool.active.is_brush() {
-        crate::brush::input(
-            editor, tool, &built, &buttons, &keys, over, anywhere, keys_free,
+        let took = crate::brush::input(
+            editor, tool, &built, view, &buttons, &keys, over, anywhere, keys_free,
         );
         tool.press = None;
         tool.boxing = None;
-        if tool.brush.stroke.is_some() || tool.brush.adjust.is_some() {
+        if took {
             return;
         }
     }

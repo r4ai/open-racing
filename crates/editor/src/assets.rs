@@ -199,6 +199,8 @@ pub struct Panel {
     renaming: Option<(PathBuf, String)>,
     /// Asset whose delete button was pressed once.
     deleting: Option<PathBuf>,
+    /// A model to paint as a scatter, asked for with its Scatter button.
+    pub scatter: Option<PathBuf>,
 }
 
 fn size(bytes: Option<u64>) -> String {
@@ -216,6 +218,7 @@ pub fn panel(
     props: &Props,
     tool: &mut Tool,
     state: &mut Panel,
+    palette: &mut crate::palette::Palette,
 ) {
     ui.heading("Assets");
     ui.horizontal(|ui| {
@@ -265,7 +268,18 @@ pub fn panel(
                         }
                     },
                     Kind::Model => {
-                        ui.add_sized([THUMB as f32, 20.0], egui::Label::new("🗋"));
+                        let m = open_racing_track_project::project::ScatterModel::new(
+                            a.path.clone(),
+                            1.0,
+                        );
+                        match palette.picture(ui.ctx(), &editor.dir, &m, None) {
+                            Some(t) => {
+                                ui.image((t.id(), egui::vec2(THUMB as f32, THUMB as f32)));
+                            }
+                            None => {
+                                ui.add_sized([THUMB as f32, THUMB as f32], egui::Label::new("🗋"));
+                            }
+                        }
                     }
                 }
                 ui.vertical(|ui| asset_row(ui, editor, library, props, tool, state, a));
@@ -345,6 +359,13 @@ fn asset_row(
                     .clicked()
                 {
                     tool.place = Some(a.path.clone());
+                }
+                if ui
+                    .small_button("Scatter")
+                    .on_hover_text("Paint copies of it over the ground: a wood of your own trees")
+                    .clicked()
+                {
+                    state.scatter = Some(a.path.clone());
                 }
             }
         }

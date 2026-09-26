@@ -145,6 +145,18 @@ fn load_track_and_model(
     ))
 }
 
+/// The sky and light a track package gives, if it is a package that gives them.
+pub fn track_environment(name_or_path: &str) -> Option<open_racing_track::Environment> {
+    let direct = Path::new(name_or_path);
+    let named = open_racing_track::tracks_dir().join(name_or_path);
+    let dir = if open_racing_track::is_package(direct) {
+        direct
+    } else {
+        named.as_path()
+    };
+    open_racing_track::environment(dir)
+}
+
 /// Loads a car by name (`assets/cars/<name>.ron` or the package `<content>/cars/<name>/`),
 /// or by path to either.
 pub fn load_car(name_or_path: &str) -> Result<CarModel, Error> {

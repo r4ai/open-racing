@@ -138,6 +138,8 @@ const ASSIST_ROWS: [AssistRow; 3] = [AssistRow::Clutch, AssistRow::Blip, AssistR
 
 #[derive(Clone, Copy, PartialEq)]
 enum WeatherRow {
+    /// Start in the sky and light the track gives.
+    Track,
     Sky,
     Changes,
     Time,
@@ -148,7 +150,8 @@ enum WeatherRow {
     NewClouds,
 }
 
-const WEATHER_ROWS: [WeatherRow; 8] = [
+const WEATHER_ROWS: [WeatherRow; 9] = [
+    WeatherRow::Track,
     WeatherRow::Sky,
     WeatherRow::Changes,
     WeatherRow::Time,
@@ -576,9 +579,18 @@ fn navigate_weather(
         (false, true) => 1,
         _ => 0,
     };
-    let mut s = config.0;
+    let mut s = config.settings;
     let index = |i: usize, n: usize| (i as isize + dir).clamp(0, n as isize - 1) as usize;
-    match WEATHER_ROWS[screen.row] {
+    let row = WEATHER_ROWS[screen.row];
+    match row {
+        WeatherRow::Track if dir != 0 || enter => {
+            config.track = !config.track;
+            let Some(e) = config.environment.filter(|_| config.track) else {
+                config.save();
+                return;
+            };
+            s = crate::weather::with_track(s, &e);
+        }
         WeatherRow::Sky if dir != 0 => {
             let i = Sky::ALL.iter().position(|&k| k == s.sky).unwrap_or(0);
             s.sky = Sky::ALL[index(i, Sky::ALL.len())];
@@ -594,7 +606,7 @@ fn navigate_weather(
                 .unwrap_or(0);
             s.time_scale = TIME_SCALES[index(i, TIME_SCALES.len())];
             // Only the pace changes; the weather carries on.
-            config.0 = s;
+            config.settings = s;
             config.save();
             sim.weather.settings.time_scale = s.time_scale;
             return;
@@ -613,7 +625,11 @@ fn navigate_weather(
         WeatherRow::NewClouds if enter => s.seed = s.seed.wrapping_add(0x9E37_79B9),
         _ => return,
     }
-    config.0 = s;
+    // Conditions chosen here are the driver's own from now on.
+    if row != WeatherRow::Track && row != WeatherRow::NewClouds {
+        config.track = false;
+    }
+    config.settings = s;
     config.save();
     sim.restart_weather(s);
     screen.message = "Weather restarted.".into();
@@ -1006,10 +1022,20 @@ pub fn compass(degrees: f64) -> &'static str {
 }
 
 fn render_weather(s: &mut String, screen: &Screen, config: &WeatherConfig, sim: &Simulation) {
-    let c = &config.0;
+    let c = &config.settings;
     for (i, row) in WEATHER_ROWS.iter().enumerate() {
         let cursor = if i == screen.row { ">" } else { " " };
         let (name, value, hint) = match row {
+            WeatherRow::Track => (
+                "Track's",
+                match (config.environment.is_some(), config.track) {
+                    (false, _) => "none",
+                    (true, true) => "on",
+                    (true, false) => "off",
+                }
+                .to_string(),
+                "(Enter; start in the sky and light the track was made with)",
+            ),
             WeatherRow::Sky => ("Weather", c.sky.name().to_string(), "(Left/Right)"),
             WeatherRow::Changes => (
                 "Changes",

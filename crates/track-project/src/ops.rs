@@ -15,6 +15,7 @@ use crate::project::{
     Pit, Project, Prop, Reference, Road, Shape, Side, Spline, StationCurve, Strip, StripStyle,
     Terrain, WallStyle,
 };
+use crate::scatter::CopyId;
 
 /// Which profile along a road.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +303,29 @@ pub enum Op {
     RenameScatter {
         name: String,
         to: String,
+    },
+    /// Plants copies of a scatter's models one by one, each standing where it is put.
+    PlantCopies {
+        scatter: String,
+        plants: Vec<crate::project::Plant>,
+    },
+    /// Takes copies out of a scatter: painted ones (by cell) stay out however it is
+    /// painted again, planted ones are removed.
+    RemoveCopies {
+        scatter: String,
+        copies: Vec<crate::scatter::CopyId>,
+    },
+    /// Moves, turns, resizes or changes the model of copies of a scatter: each becomes
+    /// a planted copy as given. A painted one is taken out of what was painted and
+    /// planted after the others.
+    SetCopies {
+        scatter: String,
+        copies: Vec<(crate::scatter::CopyId, crate::project::Plant)>,
+    },
+    /// Sets the sky and the light: the time of day and the season, the weather, the
+    /// exposure and the haze.
+    SetEnvironment {
+        environment: open_racing_track::Environment,
     },
     /// Sets or removes the reference image the editor shows to trace over.
     SetReference {
@@ -905,8 +929,54 @@ impl Op {
                 if p.scatter.iter().any(|s| s.name == to) {
                     return Err(Error::Invalid(format!("a scatter named \"{to}\" exists")));
                 }
-                scatter_mut(p, &name)?.name = to;
+                let s = scatter_mut(p, &name)?;
+                // Its copies stay where they are.
+                s.seed = s.seed();
+                s.name = to;
             }
+            Op::PlantCopies { scatter, plants } => scatter_mut(p, &scatter)?.placed.extend(plants),
+            Op::RemoveCopies { scatter, copies } => {
+                let s = scatter_mut(p, &scatter)?;
+                let mut placed = Vec::new();
+                for c in copies {
+                    match c {
+                        CopyId::Cell(cell) if !s.removed.contains(&cell) => s.removed.push(cell),
+                        CopyId::Cell(_) => {}
+                        CopyId::Placed(k) if k < s.placed.len() => placed.push(k),
+                        CopyId::Placed(k) => {
+                            return Err(Error::Invalid(format!(
+                                "scatter \"{scatter}\" has no planted copy {k}"
+                            )));
+                        }
+                    }
+                }
+                placed.sort_unstable();
+                placed.dedup();
+                for k in placed.into_iter().rev() {
+                    s.placed.remove(k);
+                }
+            }
+            Op::SetCopies { scatter, copies } => {
+                let s = scatter_mut(p, &scatter)?;
+                for (c, plant) in copies {
+                    match c {
+                        CopyId::Cell(cell) => {
+                            if !s.removed.contains(&cell) {
+                                s.removed.push(cell);
+                            }
+                            s.placed.push(plant);
+                        }
+                        CopyId::Placed(k) => {
+                            *s.placed.get_mut(k).ok_or_else(|| {
+                                Error::Invalid(format!(
+                                    "scatter \"{scatter}\" has no planted copy {k}"
+                                ))
+                            })? = plant;
+                        }
+                    }
+                }
+            }
+            Op::SetEnvironment { environment } => p.environment = environment,
             Op::SetReference { reference } => p.reference = reference,
             Op::SetGeo { geo } => p.geo = geo,
             Op::PutSurface { surface } => put(&mut p.surfaces, surface, |s| &s.name, None),
@@ -1098,6 +1168,10 @@ impl Op {
             Op::PutScatter { .. } => "PutScatter",
             Op::RemoveScatter { .. } => "RemoveScatter",
             Op::RenameScatter { .. } => "RenameScatter",
+            Op::PlantCopies { .. } => "PlantCopies",
+            Op::RemoveCopies { .. } => "RemoveCopies",
+            Op::SetCopies { .. } => "SetCopies",
+            Op::SetEnvironment { .. } => "SetEnvironment",
             Op::SetReference { .. } => "SetReference",
             Op::SetGeo { .. } => "SetGeo",
             Op::PutSurface { .. } => "PutSurface",

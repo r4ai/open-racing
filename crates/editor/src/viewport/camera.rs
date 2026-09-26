@@ -55,6 +55,7 @@ pub fn setup(mut commands: Commands, mut egui: ResMut<EguiGlobalSettings>) {
         Transform::default(),
     ));
     commands.spawn((
+        crate::sky::Sun,
         DirectionalLight {
             illuminance: 20_000.0,
             shadow_maps_enabled: true,

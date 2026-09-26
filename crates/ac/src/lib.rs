@@ -382,6 +382,7 @@ pub fn convert(dir: &Path, layout: Option<&str>, name: &str) -> Result<TrackPack
         centreline,
         surfaces: surface_props(&surfaces),
         layout,
+        environment: None,
         ground,
         visual: Some(visual.build()),
     })

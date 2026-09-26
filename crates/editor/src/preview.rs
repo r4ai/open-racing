@@ -76,6 +76,16 @@ pub struct Built {
     pub terrain: Option<Arc<TerrainBuild>>,
     /// Copies of each scatter's models standing now.
     pub scattered: Vec<usize>,
+    /// Each scatter's copies as they stand, to pick and edit one by one.
+    pub copies: Vec<Arc<Vec<open_racing_track_project::scatter::Copy>>>,
+    /// How wide (from its upright axis) and how tall each scatter's models are, m.
+    pub sizes: Vec<Vec<[f32; 2]>>,
+    /// The colours of each scatter's models' own materials (linear), by model.
+    pub colours: Vec<Vec<Vec<[f32; 4]>>>,
+    /// The scatters' names, in the order of `copies` and `sizes`.
+    pub names: Vec<String>,
+    /// The editor's revision it was built from.
+    pub revision: u64,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -92,13 +102,32 @@ struct Meshes {
     /// Walls models show: whose, the model, and its copies along them.
     walls: Vec<(Item, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
     terrain: Option<Arc<TerrainBuild>>,
-    /// Each scatter's models and their copies merged, and how many copies stand.
-    scatter: Vec<(usize, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
+    /// Each scatter's copies merged by model and level of detail, and its copies.
+    scatter: Vec<ScatterPart>,
     scattered: Vec<usize>,
+    copies: Vec<Arc<Vec<open_racing_track_project::scatter::Copy>>>,
+    sizes: Vec<Vec<[f32; 2]>>,
+    colours: Vec<Vec<Vec<[f32; 4]>>>,
+    names: Vec<String>,
+    revision: u64,
     /// Models that could not be read, and why.
     failed: Vec<String>,
     /// What the build could not make as asked (elevation data), and why.
     scene_failed: Vec<String>,
+}
+
+/// Copies of one of a scatter's models at one level of detail, merged by tile.
+struct ScatterPart {
+    /// Which scatter.
+    scatter: usize,
+    /// Names the model's materials for the renderer: its path near, its far model's
+    /// own far.
+    look: String,
+    model: Arc<Model>,
+    /// The project's materials used for some of the model's own: (its material, the
+    /// project's).
+    materials: Vec<(usize, usize)>,
+    meshes: Vec<open_racing_track::Mesh>,
 }
 
 #[derive(Resource, Default)]
@@ -112,7 +141,7 @@ pub struct Rebuild {
     handles: Vec<Handle<TrackMaterial>>,
     /// The materials of models walls and scatters show, made once per model and asset
     /// revision.
-    wall_looks: HashMap<PathBuf, Vec<Handle<TrackMaterial>>>,
+    wall_looks: HashMap<String, Vec<Handle<TrackMaterial>>>,
     /// The painted ground's material, made again when the mask or the layers change.
     ground: Option<GroundLook>,
 }
@@ -132,10 +161,11 @@ pub(crate) fn to_mesh(m: MeshData) -> Mesh {
         normals: m.normals,
         uvs: m.uvs,
         indices: m.indices,
+        lod: None,
     })
 }
 
-fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
+fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> Meshes {
     let scene = {
         let mut built = cache.1.lock().expect("build cache");
         built.dir = Some(dir.clone());
@@ -200,33 +230,76 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
         .collect();
     let surfaces: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
     let ground = Arc::new(scene.ground.build(&surfaces));
-    // The scatters' copies, on the ground as it is now.
+    // The scatters' copies, on the ground as it is now, near and far.
     let keepout = open_racing_track_project::scatter::Keepout::new(&scene.roads);
-    let (mut scatter, mut scattered) = (Vec::new(), Vec::new());
+    let (mut scatter, mut scattered, mut all_copies, mut sizes, mut colours) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (k, s) in project.scatter.iter().enumerate() {
-        let models: Result<Vec<Arc<Model>>, _> = s
-            .models
-            .iter()
-            .map(|m| cache.lock().expect("cache").model(&dir, &m.model))
-            .collect();
-        let models = match models {
+        let models = cache
+            .lock()
+            .expect("cache")
+            .scatter_models(&project, &dir, s);
+        let (near, far) = match models {
             Ok(m) => m,
             Err(e) => {
                 failed.push(e.to_string());
                 scattered.push(0);
+                all_copies.push(Arc::new(Vec::new()));
+                sizes.push(Vec::new());
+                colours.push(Vec::new());
                 continue;
             }
         };
         let copies = open_racing_track_project::scatter::copies(s, &keepout, &ground);
         scattered.push(copies.len());
-        let mut by_model: Vec<Vec<open_racing_track::Mesh>> = vec![Vec::new(); models.len()];
-        for (m, mesh) in open_racing_track_project::scatter::meshes(&models, &copies) {
-            by_model[m].push(mesh);
+        sizes.push(
+            near.iter()
+                .map(|m| {
+                    let [lo, hi] = m.bounds;
+                    [
+                        lo.truncate().abs().max(hi.truncate().abs()).max_element(),
+                        hi.z,
+                    ]
+                })
+                .collect(),
+        );
+        colours.push(
+            near.iter()
+                .map(|m| m.look.materials.iter().map(|x| x.base_color).collect())
+                .collect(),
+        );
+        use open_racing_track_project::scatter::Level;
+        let mut parts: HashMap<(usize, bool), Vec<open_racing_track::Mesh>> = HashMap::new();
+        for (m, level, mesh) in open_racing_track_project::scatter::meshes(s, &near, &far, &copies)
+        {
+            parts
+                .entry((m, level == Level::Far))
+                .or_default()
+                .push(mesh);
         }
-        for ((m, model), meshes) in s.models.iter().zip(models).zip(by_model) {
-            if !meshes.is_empty() {
-                scatter.push((k, m.model.clone(), model, meshes));
-            }
+        all_copies.push(Arc::new(copies));
+        let mut keys: Vec<_> = parts.keys().copied().collect();
+        keys.sort_unstable();
+        for key @ (m, is_far) in keys {
+            let def = &s.models[m];
+            let (look, model, materials) = if is_far {
+                let model = far[m].clone().expect("a far level has a far model");
+                (format!("far {:p}", Arc::as_ptr(&model)), model, vec![])
+            } else {
+                let slots = def
+                    .materials
+                    .iter()
+                    .filter_map(|x| Some((x.slot, project.material_index(&x.material)?)))
+                    .collect();
+                (def.model.display().to_string(), near[m].clone(), slots)
+            };
+            scatter.push(ScatterPart {
+                scatter: k,
+                look,
+                model,
+                materials,
+                meshes: parts.remove(&key).unwrap_or_default(),
+            });
         }
     }
     Meshes {
@@ -234,6 +307,11 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
         terrain: scene.terrain.clone(),
         scatter,
         scattered,
+        copies: all_copies,
+        sizes,
+        colours,
+        names: project.scatter.iter().map(|s| s.name.clone()).collect(),
+        revision,
         roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
         splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
         issues,
@@ -330,37 +408,71 @@ pub fn rebuild(
                 ));
             }
         }
-        // Models along walls, whose item they are, and scatters' copies.
-        let walls = done
-            .walls
-            .into_iter()
-            .map(|(item, path, model, copies)| (Some(item), None, path, model, copies));
-        let scatter = done
-            .scatter
-            .into_iter()
-            .map(|(k, path, model, copies)| (None, Some(k), path, model, copies));
-        for (item, scattered, path, model, copies) in walls.chain(scatter) {
-            let looks = state.wall_looks.entry(path).or_insert_with(|| {
-                render::add_materials(
-                    &model.look,
-                    render::formats(formats.as_deref()),
-                    16,
-                    &mut materials,
-                    &mut images,
-                )
-            });
+        // Models along walls, whose item they are.
+        for (item, path, model, copies) in done.walls {
+            let looks = state
+                .wall_looks
+                .entry(path.display().to_string())
+                .or_insert_with(|| {
+                    render::add_materials(
+                        &model.look,
+                        render::formats(formats.as_deref()),
+                        16,
+                        &mut materials,
+                        &mut images,
+                    )
+                });
             for m in copies {
                 let handle = looks
                     .get(m.material as usize)
                     .cloned()
                     .unwrap_or(fallback.clone());
-                let mut e = commands.spawn((
-                    PreviewMesh(item),
+                commands.spawn((
+                    PreviewMesh(Some(item)),
                     Mesh3d(meshes.add(render::to_mesh(m))),
                     MeshMaterial3d(handle),
                 ));
-                if let Some(k) = scattered {
-                    e.insert(PreviewScatter(k));
+            }
+        }
+        // The scatters' copies, each tile of each level faded in and out by its
+        // distance.
+        for part in done.scatter {
+            let looks = state
+                .wall_looks
+                .entry(part.look)
+                .or_insert_with(|| {
+                    render::add_materials(
+                        &part.model.look,
+                        render::formats(formats.as_deref()),
+                        16,
+                        &mut materials,
+                        &mut images,
+                    )
+                })
+                .clone();
+            for mut m in part.meshes {
+                let slot = m.material as usize;
+                let handle = part
+                    .materials
+                    .iter()
+                    .find(|(s, _)| *s == slot)
+                    .and_then(|(_, i)| state.handles.get(*i))
+                    .or(looks.get(slot))
+                    .cloned()
+                    .unwrap_or(fallback.clone());
+                let shadows = m.cast_shadows;
+                let lod = render::level_of_detail(&mut m);
+                let mut e = commands.spawn((
+                    PreviewMesh(None),
+                    PreviewScatter(part.scatter),
+                    Mesh3d(meshes.add(render::to_mesh(m))),
+                    MeshMaterial3d(handle),
+                ));
+                if let Some(lod) = lod {
+                    e.insert(lod);
+                }
+                if !shadows {
+                    e.insert(NotShadowCaster);
                 }
             }
         }
@@ -382,6 +494,11 @@ pub fn rebuild(
         built.corners = done.corners;
         built.terrain = done.terrain;
         built.scattered = done.scattered;
+        built.copies = done.copies;
+        built.sizes = done.sizes;
+        built.colours = done.colours;
+        built.names = done.names;
+        built.revision = done.revision;
         built.count += 1;
     }
 
@@ -389,8 +506,9 @@ pub fn rebuild(
         let (project, revision) = (editor.project.clone(), editor.revision);
         let (cache, dir) = (cache.clone(), editor.dir.clone());
         state.started = revision;
-        state.task =
-            Some(AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir) }));
+        state.task = Some(
+            AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir, revision) }),
+        );
     }
 }
 

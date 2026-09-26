@@ -834,6 +834,7 @@ mod tests {
             strength,
             points: points.iter().map(|&(x, y)| DVec2::new(x, y)).collect(),
             fill: false,
+            hardness: crate::project::HARDNESS,
         }
     }
 

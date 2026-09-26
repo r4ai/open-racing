@@ -135,6 +135,7 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
             .map(|&(x, y)| glam::DVec2::new(x, y))
             .collect(),
         fill: false,
+        hardness: open_racing_track_project::project::HARDNESS,
     };
     use open_racing_track_project::ops::StrokeTarget;
     use open_racing_track_project::project::Brush;
@@ -156,18 +157,15 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
     ops.push(Op::PutScatter {
         scatter: open_racing_track_project::project::Scatter {
             name: "woods".into(),
-            models: vec![open_racing_track_project::project::ScatterModel {
-                model: open_racing_track_project::shapes::path("pine"),
-                weight: 1.0,
+            strokes: vec![stroke(Brush::Paint, &[(-300.0, -100.0)])],
+            placed: vec![open_racing_track_project::project::Plant {
+                model: 0,
+                pos: glam::DVec2::new(-250.0, -60.0),
+                yaw: 0.5,
+                scale: 1.5,
             }],
             spacing: 8.0,
-            scale: [0.8, 1.2],
-            tilt: 0.0,
-            clearance: 3.0,
-            max_slope: 35.0,
-            collide: false,
-            strokes: vec![stroke(Brush::Paint, &[(-300.0, -100.0)])],
-            group: None,
+            ..crate::vegetation::builtin().remove(1).scatter
         },
     });
     let area = crate::presets::list(&e.project)

@@ -20,6 +20,8 @@ mod lay;
 mod menus;
 mod outliner;
 mod overlay;
+mod palette;
+mod plants;
 mod popups;
 mod presets;
 mod preview;
@@ -27,9 +29,11 @@ mod profile;
 mod properties;
 mod reference;
 mod sidebar;
+mod sky;
 mod state;
 mod theme;
 mod ui;
+mod vegetation;
 mod viewport;
 
 #[cfg(test)]
@@ -66,8 +70,8 @@ struct Args {
     /// Look at this corner of the focused road (or the main road), by its number.
     #[arg(long)]
     corner: Option<usize>,
-    /// Open this tab of the properties: track, markers, terrain, reference, library,
-    /// object, corners, strips, lines or barriers.
+    /// Open this tab of the properties: track, markers, terrain, scatter, world,
+    /// reference, library, object, corners, strips, lines, barriers or rows.
     #[arg(long)]
     tab: Option<String>,
     /// Show this graph in the Curves area below the view: elevation, left, right (the
@@ -247,6 +251,7 @@ fn main() {
             props: false,
             scatter: true,
             xray: false,
+            sky: true,
         };
     }
 
@@ -307,6 +312,7 @@ fn main() {
     .init_resource::<preview::Props>()
     .init_resource::<preview::GroundPaint>()
     .init_resource::<preview::SharedCache>()
+    .init_resource::<palette::Palette>()
     .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
     .init_resource::<reference::Shown>()
@@ -336,6 +342,7 @@ fn main() {
             viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
+            sky::light,
             auto_screenshot,
         )
             .chain(),

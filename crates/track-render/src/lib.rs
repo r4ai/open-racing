@@ -5,6 +5,7 @@
 //! Shared by the app and the track editor.
 
 use bevy::asset::{RenderAssetUsages, embedded_asset};
+use bevy::camera::visibility::VisibilityRange;
 use bevy::image::{
     CompressedImageFormatSupport, CompressedImageFormats, ImageAddressMode, ImageSampler,
     ImageSamplerDescriptor, ImageType,
@@ -173,17 +174,41 @@ pub fn spawn_visual(
     extra: impl Bundle + Clone,
 ) {
     let mats = add_materials(&visual, formats, anisotropy, materials, images);
-    for m in visual.meshes {
+    for mut m in visual.meshes {
         let (material, cast_shadows) = (mats[m.material as usize].clone(), m.cast_shadows);
+        let lod = level_of_detail(&mut m);
         let mut entity = commands.spawn((
             Mesh3d(meshes.add(to_mesh(m))),
             MeshMaterial3d(material),
             extra.clone(),
         ));
+        if let Some(lod) = lod {
+            entity.insert(lod);
+        }
         if !cast_shadows {
             entity.insert(NotShadowCaster);
         }
     }
+}
+
+/// For a mesh drawn within a range of distances: moves its positions to be about the
+/// centre the distances are measured from, and gives where to put it and the range.
+/// The levels of detail of the same things then share their place, so that they
+/// cross-fade.
+pub fn level_of_detail(m: &mut open_racing_track::Mesh) -> Option<(Transform, VisibilityRange)> {
+    let lod = m.lod?;
+    let [cx, cy, cz] = lod.center;
+    for p in &mut m.positions {
+        *p = [p[0] - cx, p[1] - cy, p[2] - cz];
+    }
+    Some((
+        Transform::from_translation(to_bevy(DVec3::new(cx as f64, cy as f64, cz as f64))),
+        VisibilityRange {
+            start_margin: lod.fade_in[0]..lod.fade_in[1],
+            end_margin: lod.fade_out[0]..lod.fade_out[1],
+            use_aabb: false,
+        },
+    ))
 }
 
 /// The compressed texture formats the GPU supports, BC when not known yet.
