@@ -318,7 +318,12 @@ pub fn model(name: &str) -> Option<Model> {
                 shirt.cone(Vec3::new(0.02, y, 0.82), 0.05, 0.065, 0.62, 5);
             }
             let mut skin = Part::new(SKIN, 0.6);
-            skin.blob(Vec3::new(0.0, 0.0, 1.6), Vec3::new(0.1, 0.09, 0.12), 0.05, 9);
+            skin.blob(
+                Vec3::new(0.0, 0.0, 1.6),
+                Vec3::new(0.1, 0.09, 0.12),
+                0.05,
+                9,
+            );
             vec![legs, shirt, skin]
         }
         _ => return None,

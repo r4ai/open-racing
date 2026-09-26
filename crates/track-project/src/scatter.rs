@@ -256,8 +256,7 @@ fn rows(s: &Scatter, seed: u64, edges: &Edges) -> Vec<Planned> {
                 }
                 for k in 0..depth {
                     let at = along + if k % 2 == 1 { 0.5 * spacing } else { 0.0 };
-                    let Some((p, toward)) =
-                        edges.beyond(r, at, left, first + k as f64 * spacing)
+                    let Some((p, toward)) = edges.beyond(r, at, left, first + k as f64 * spacing)
                     else {
                         continue;
                     };
@@ -371,7 +370,9 @@ impl Edges {
     /// along it, and the way from there to the road.
     fn beyond(&self, r: usize, s: f64, left: bool, d: f64) -> Option<(DVec2, DVec2)> {
         let road = self.roads.get(r)?;
-        let i = road.partition_point(|e| e.s <= s).clamp(1, road.len().max(2) - 1);
+        let i = road
+            .partition_point(|e| e.s <= s)
+            .clamp(1, road.len().max(2) - 1);
         let (a, b) = (road.get(i - 1)?, road.get(i)?);
         let t = ((s - a.s) / (b.s - a.s).max(1e-9)).clamp(0.0, 1.0);
         let pos = a.pos.lerp(b.pos, t);
@@ -456,7 +457,10 @@ pub fn copies(s: &Scatter, keepout: &Keepout, ground: &GroundMesh) -> Vec<Copy> 
             if off {
                 return None;
             }
-            let crowd = s.models.get(c.model).is_some_and(|m| m.kind() == Kind::Crowd);
+            let crowd = s
+                .models
+                .get(c.model)
+                .is_some_and(|m| m.kind() == Kind::Crowd);
             let yaw = match keepout.toward_road(c.pos) {
                 Some(to) if painted && crowd && s.layout != Layout::Rows => {
                     // Each a little its own way, from its random turn.
@@ -670,14 +674,15 @@ pub fn tint(kind: Kind, month: f64, variety: f64, at: DVec2) -> [u8; 4] {
             } else {
                 // Some turn only yellow, others on to red before they brown and fall.
                 let reach = 0.3 + 0.7 * h(6);
-                let t = if autumn > 1.0 {
-                    1.0
-                } else {
-                    autumn.min(reach)
-                } * (AUTUMN.len() - 1) as f64;
+                let t =
+                    if autumn > 1.0 { 1.0 } else { autumn.min(reach) } * (AUTUMN.len() - 1) as f64;
                 let (i, f) = ((t.floor() as usize).min(AUTUMN.len() - 2), t.fract());
                 let (a, b) = (AUTUMN[i], AUTUMN[i + 1]);
-                let f = if t >= (AUTUMN.len() - 1) as f64 { 1.0 } else { f };
+                let f = if t >= (AUTUMN.len() - 1) as f64 {
+                    1.0
+                } else {
+                    f
+                };
                 (
                     mix3(a.0, b.0, f),
                     a.1 + (b.1 - a.1) * f,
@@ -776,20 +781,33 @@ pub(crate) mod tests {
         // About one per cell over the middle of the brush, fewer to its edge.
         let area = std::f64::consts::PI * 40.0 * 40.0 / 36.0;
         assert!(n as f64 > 0.25 * area && (n as f64) < area, "{n} of {area}");
-        assert_eq!(planned(&full, &Edges::default()), planned(&full, &Edges::default()));
+        assert_eq!(
+            planned(&full, &Edges::default()),
+            planned(&full, &Edges::default())
+        );
         // A light stroke gives fewer; the same again, more.
         let light = woods(vec![stroke(Brush::Paint, 0.3, (0.0, 0.0), 40.0)]);
         let twice = woods(vec![stroke(Brush::Paint, 0.3, (0.0, 0.0), 40.0); 2]);
-        let (l, t) = (planned(&light, &Edges::default()).len(), planned(&twice, &Edges::default()).len());
+        let (l, t) = (
+            planned(&light, &Edges::default()).len(),
+            planned(&twice, &Edges::default()).len(),
+        );
         assert!(l < n && l < t && t < n, "{l} {t} {n}");
         // Wiped out in the middle: none left there.
         let mut wiped = full.clone();
         wiped
             .strokes
             .push(stroke(Brush::Erase, 1.0, (0.0, 0.0), 15.0));
-        assert!(planned(&wiped, &Edges::default()).iter().all(|c| c.pos.length() > 7.0));
+        assert!(
+            planned(&wiped, &Edges::default())
+                .iter()
+                .all(|c| c.pos.length() > 7.0)
+        );
         // Both models, the pines three times as often.
-        let pines = planned(&full, &Edges::default()).iter().filter(|c| c.model == 0).count();
+        let pines = planned(&full, &Edges::default())
+            .iter()
+            .filter(|c| c.model == 0)
+            .count();
         assert!(pines > 2 * (n - pines), "{pines} of {n}");
         // A hard brush acts fully out to its edge: more copies than a soft one.
         let mut hard = stroke(Brush::Paint, 1.0, (0.0, 0.0), 40.0);
@@ -875,7 +893,10 @@ pub(crate) mod tests {
         let pine = crate::shapes::model("pine").unwrap();
         let pines = of_model(&copies, 0);
         let solid = world_mesh(&pine.meshes[0], &pines);
-        assert_eq!(solid.indices.len(), pine.meshes[0].indices.len() * pines.len());
+        assert_eq!(
+            solid.indices.len(),
+            pine.meshes[0].indices.len() * pines.len()
+        );
     }
 
     #[test]
@@ -895,7 +916,11 @@ pub(crate) mod tests {
         assert_eq!(count(0.5, &|l| l == BARE), n);
         assert_eq!(count(6.5, &|l| l == BARE), 0);
         let red_or_yellow = |l: [u8; 4]| l != BARE && l[0] > l[1] / 2 + 40 && l[3] > 200;
-        assert!(count(9.8, &red_or_yellow) > n / 2, "{}", count(9.8, &red_or_yellow));
+        assert!(
+            count(9.8, &red_or_yellow) > n / 2,
+            "{}",
+            count(9.8, &red_or_yellow)
+        );
         assert!(count(11.8, &|l| l == BARE) > n * 9 / 10);
         let summer: std::collections::HashSet<_> =
             (0..n).map(|k| look(Kind::Deciduous, 6.5, k)).collect();
@@ -938,7 +963,10 @@ pub(crate) mod tests {
         let expected = side * side / (s.spacing * s.spacing);
         for n in [grid.len(), even.len()] {
             let n = n as f64;
-            assert!((0.8 * expected..1.2 * expected).contains(&n), "{n} of {expected}");
+            assert!(
+                (0.8 * expected..1.2 * expected).contains(&n),
+                "{n} of {expected}"
+            );
         }
         // None nearer than about half the spacing, where the grid has some far nearer.
         let nearest = |list: &[Planned]| {
@@ -952,7 +980,11 @@ pub(crate) mod tests {
             }
             least
         };
-        assert!(nearest(&even) >= EVEN_CELL * s.spacing * 0.999, "{}", nearest(&even));
+        assert!(
+            nearest(&even) >= EVEN_CELL * s.spacing * 0.999,
+            "{}",
+            nearest(&even)
+        );
         assert!(nearest(&grid) < 0.35 * s.spacing, "{}", nearest(&grid));
         // Painting more round them leaves those there where they are.
         let mut more = s.clone();
@@ -1016,7 +1048,12 @@ pub(crate) mod tests {
             planned(&plain, &Edges::default()),
             planned(&stamped, &Edges::default()),
         );
-        assert!(some.len() > 10 && some.len() < all.len() / 3, "{} of {}", some.len(), all.len());
+        assert!(
+            some.len() > 10 && some.len() < all.len() / 3,
+            "{} of {}",
+            some.len(),
+            all.len()
+        );
         assert!(some.iter().all(|c| stamp.at(c.pos) > 0.0));
     }
 

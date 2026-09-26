@@ -15,6 +15,9 @@ pub struct StepInfo {
     /// Grip the tyres have lost to tread temperature, pressure, wear and dirt, summed
     /// over the four tyres (0 = all at their best).
     pub grip_loss: f64,
+    /// Tread worn away during the step, summed over the four tyres (1 = one tyre's
+    /// whole tread).
+    pub wear: f64,
     /// Hardest hit into a wall or barrier during the step, m/s into the wall.
     pub barrier_impact: f64,
     /// cos of the angle between the car's heading and the track direction.
@@ -49,10 +52,14 @@ pub trait TerminationFn: Send + Sync {
     fn done(&self, info: &StepInfo) -> Option<Done>;
 }
 
+/// Wheels off the track from which the car is off course: its progress earns nothing,
+/// so cutting a corner gains no reward (as in GT Sophy).
+pub const OFF_COURSE_WHEELS: usize = 3;
+
 /// Progress along the track, with penalties for leaving it and for ending the episode.
 #[derive(Clone, Debug)]
 pub struct DefaultReward {
-    /// Reward per metre of progress.
+    /// Reward per metre of progress, while on course.
     pub progress_weight: f64,
     /// Penalty per step per wheel off the track.
     pub off_track_weight: f64,
@@ -64,6 +71,9 @@ pub struct DefaultReward {
     /// immediate price for overheating the tyres, whose cost in lap time comes too late
     /// for the discount horizon.
     pub grip_loss_weight: f64,
+    /// Penalty per unit of tread worn (see [`StepInfo::wear`]): the time the lost grip
+    /// costs over the rest of a stint, far beyond the discount horizon.
+    pub wear_weight: f64,
     /// Penalty on termination.
     pub termination_penalty: f64,
 }
@@ -76,6 +86,7 @@ impl Default for DefaultReward {
             edge_weight: 0.0,
             steer_change_weight: 0.0,
             grip_loss_weight: 0.0,
+            wear_weight: 0.0,
             termination_penalty: 10.0,
         }
     }
@@ -83,11 +94,17 @@ impl Default for DefaultReward {
 
 impl RewardFn for DefaultReward {
     fn reward(&self, info: &StepInfo, done: Option<Done>) -> f64 {
-        let mut r = self.progress_weight * info.progress
+        let progress = if info.wheels_off >= OFF_COURSE_WHEELS {
+            info.progress.min(0.0)
+        } else {
+            info.progress
+        };
+        let mut r = self.progress_weight * progress
             - self.off_track_weight * info.wheels_off as f64
             - self.edge_weight * (info.offset.abs() - 0.6).max(0.0).powi(2)
             - self.steer_change_weight * info.steer_change.abs()
-            - self.grip_loss_weight * info.grip_loss;
+            - self.grip_loss_weight * info.grip_loss
+            - self.wear_weight * info.wear;
         if done == Some(Done::Terminated) {
             r -= self.termination_penalty;
         }
@@ -135,5 +152,31 @@ impl TerminationFn for DefaultTermination {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_off_course_earns_nothing() {
+        let reward = DefaultReward {
+            off_track_weight: 0.0,
+            ..DefaultReward::default()
+        };
+        let at = |wheels_off, progress| {
+            reward.reward(
+                &StepInfo {
+                    progress,
+                    wheels_off,
+                    ..StepInfo::default()
+                },
+                None,
+            )
+        };
+        assert!(at(2, 2.0) > 0.0);
+        assert_eq!(at(OFF_COURSE_WHEELS, 2.0), 0.0);
+        assert!(at(4, -1.0) < 0.0);
     }
 }

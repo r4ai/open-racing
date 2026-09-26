@@ -127,7 +127,10 @@ pub fn weather(
 
 /// The height of a road's lowest point, m.
 fn lowest(road: &TrackDef) -> f64 {
-    road.points.iter().map(|p| p.pos.2).fold(f64::INFINITY, f64::min)
+    road.points
+        .iter()
+        .map(|p| p.pos.2)
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Plants sway in the weather's wind, 10 m above the ground.
@@ -183,7 +186,10 @@ mod tests {
             ..Default::default()
         };
         let s = settings(&e, 48.0, true);
-        assert_eq!((s.sky, s.hour, s.month, s.latitude), (Sky::Overcast, 18.25, 10, -35.0));
+        assert_eq!(
+            (s.sky, s.hour, s.month, s.latitude),
+            (Sky::Overcast, 18.25, 10, -35.0)
+        );
         assert!(!s.dynamic);
         // Not lit by it: a clear noon, still at its place.
         let s = settings(&e, 48.0, false);
