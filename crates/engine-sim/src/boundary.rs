@@ -44,6 +44,43 @@ impl Reservoir {
     }
 }
 
+/// Pressure at a pipe's end face where the gas arriving from inside (state `s`, outward
+/// velocity `v`) is slowed by `dv` = v − v_face: the exact relation along the outgoing
+/// wave (Toro, *Riemann Solvers*, §4.2), a shock when the gas is stopped (dv > 0) and an
+/// isentropic rarefaction when it is drawn out (dv < 0). The acoustic p + ρc·dv is its
+/// small-amplitude limit, which a valve shutting on gas leaving at hundreds of m/s would
+/// take below zero; the rarefaction instead tends to a vacuum, floored at `p_min`.
+#[inline]
+pub fn face_pressure(s: &State, dv: f64, p_min: f64) -> f64 {
+    let (p, rho, c, g) = (s.w.p, s.w.rho, s.c, s.gamma);
+    if dv <= 0.0 {
+        let base = 1.0 + 0.5 * (g - 1.0) * dv / c;
+        if base <= 0.0 {
+            return p_min;
+        }
+        (p * base.powf(2.0 * g / (g - 1.0))).max(p_min)
+    } else {
+        let a = 2.0 / ((g + 1.0) * rho);
+        let b = (g - 1.0) / (g + 1.0) * p;
+        let v2 = dv * dv;
+        p + (v2 + (v2 * v2 + 4.0 * a * v2 * (p + b)).sqrt()) / (2.0 * a)
+    }
+}
+
+/// Density at the end face behind the wave of `face_pressure`: isentropic through a
+/// rarefaction, Rankine–Hugoniot through a shock.
+#[inline]
+fn face_density(s: &State, pf: f64) -> f64 {
+    let (p, rho, g) = (s.w.p, s.w.rho, s.gamma);
+    let r = pf / p;
+    if r <= 1.0 {
+        rho * r.powf(1.0 / g)
+    } else {
+        let k = (g - 1.0) / (g + 1.0);
+        rho * (r + k) / (k * r + 1.0)
+    }
+}
+
 /// Flux out of a pipe end into a reservoir through the effective area `cda` (capped at
 /// the pipe's), given the pipe's end state `s`, the outward direction `sign` (±1 along the
 /// pipe's x) and the pipe's end area. Returns the outward flux: mass, outward momentum
@@ -59,19 +96,20 @@ pub fn pipe_to_reservoir(
     guess: &mut f64,
 ) -> Flux {
     let v = s.w.u * sign;
-    let z = s.w.rho * s.c;
     let cda = cda.min(area);
+    let p_min = 0.02 * s.w.p;
     if cda <= 0.0 {
-        let p = (s.w.p + z * v).max(0.0);
-        return [0.0, p * area, 0.0, 0.0];
+        return [0.0, face_pressure(s, v, p_min) * area, 0.0, 0.0];
+    }
+    if v + s.c < 0.0 {
+        return supersonic_inflow(s, area, cda, res);
     }
     let (rho, gamma, r) = (s.w.rho, s.gamma, gas.r(s.w.y));
     let cp = gamma * r / (gamma - 1.0);
-    let p_min = 0.02 * s.w.p;
     // Signed outward mass flow through the restriction for a face velocity.
     let flow = |vf: f64| -> (f64, f64, f64) {
-        let pf = (s.w.p + z * (v - vf)).max(p_min);
-        let rf = rho * (pf / s.w.p).powf(1.0 / gamma);
+        let pf = face_pressure(s, v - vf, p_min);
+        let rf = face_density(s, pf);
         let tf = pf / (rf * r);
         // Outflow speed, at most sonic: the face cannot hold more.
         let vo = vf.max(0.0).min((gamma * pf / rf).sqrt());
@@ -88,10 +126,15 @@ pub fn pipe_to_reservoir(
         let (q, _, rf) = flow(vf);
         rf * vf * area - q
     };
-    // g rises with vf. Its root lies between a strong compression and the face emptied
+    // g rises with vf (bar choking). Its root lies between a strong compression and the face emptied
     // to the floor pressure; a safeguarded secant from last step's root finds it in a few
     // evaluations.
-    let (mut a, mut b) = (v - 2.0 * s.c, v + (s.w.p - p_min) / z);
+    let vacuum = 2.0 * s.c / (gamma - 1.0)
+        * (1.0 - (p_min / s.w.p).powf((gamma - 1.0) / (2.0 * gamma)));
+    // Gas rushing at the restriction may have to be stopped by a strong shock, and gas
+    // can come in from the reservoir at up to its speed of sound: the bracket spans both.
+    let c_res = (res.gamma * res.r * res.t).sqrt();
+    let (mut a, mut b) = ((v - 2.0 * s.c).min(-2.0 * (s.c + c_res)), v + vacuum);
     let tol = 1e-6 * rho * s.c * area;
     let mut x0 = guess.clamp(a, b);
     let mut g0 = g(x0);
@@ -141,6 +184,48 @@ pub fn pipe_to_reservoir(
     }
 }
 
+/// Flux into a pipe whose gas at the end moves inward faster than sound: no wave from
+/// inside reaches the face, so the reservoir alone sets it. The restriction's jet
+/// discharges at the pipe's pressure, its stagnation enthalpy kept, but no lower than the
+/// supersonic exit pressure of an isentropic nozzle from the restriction's throat to the
+/// pipe's section: gas cannot be drawn out faster than the area ratio lets it expand.
+fn supersonic_inflow(s: &State, area: f64, cda: f64, res: &Reservoir) -> Flux {
+    let g = res.gamma;
+    let mach = supersonic_mach(area / cda, g);
+    let exit = res.p * (1.0 + 0.5 * (g - 1.0) * mach * mach).powf(-g / (g - 1.0));
+    let pf = s.w.p.max(exit);
+    let q = orifice_flow(cda, res.p, res.t, pf, res.gamma, res.r).0;
+    if q <= 0.0 {
+        return [0.0, pf * area, 0.0, 0.0];
+    }
+    // cp·(T0 − T) = ½·u², u = q·R·T/(pf·A).
+    let cp = res.gamma * res.r / (res.gamma - 1.0);
+    let k = (q * res.r / (pf * area)).powi(2);
+    let t = (-cp + (cp * cp + 2.0 * k * cp * res.t).sqrt()) / k;
+    let vf = -q * res.r * t / (pf * area);
+    [-q, pf * area - q * vf, -q * res.h, -q * res.y]
+}
+
+/// Mach number (≥ 1) at which an isentropic nozzle's section is `ratio` times its throat's.
+fn supersonic_mach(ratio: f64, g: f64) -> f64 {
+    let ratio = ratio.max(1.0);
+    let e = (g + 1.0) / (2.0 * (g - 1.0));
+    let f = |m: f64| (2.0 / (g + 1.0) * (1.0 + 0.5 * (g - 1.0) * m * m)).powf(e) / m;
+    let (mut lo, mut hi) = (1.0, 1.0);
+    while f(hi) < ratio && hi < 50.0 {
+        hi *= 2.0;
+    }
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid) < ratio {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 /// Flux out of a pipe end opening without restriction into a reservoir (a plenum, a
 /// collector, the air), in closed form. Outflow leaves at the reservoir's pressure, the
 /// face velocity following from the outgoing characteristic (choked at the local speed of
@@ -150,17 +235,29 @@ pub fn pipe_to_reservoir(
 pub fn pipe_open_to_reservoir(gas: &Gas, s: &State, sign: f64, area: f64, res: &Reservoir) -> Flux {
     let v = s.w.u * sign;
     let z = s.w.rho * s.c;
-    let vf_out = v + (s.w.p - res.p) / z;
+    let g = s.gamma;
+    // The velocity change that brings the arriving gas to the reservoir's pressure.
+    let dv = if res.p <= s.w.p {
+        2.0 * s.c / (g - 1.0) * ((res.p / s.w.p).powf((g - 1.0) / (2.0 * g)) - 1.0)
+    } else {
+        let a = 2.0 / ((g + 1.0) * s.w.rho);
+        let b = (g - 1.0) / (g + 1.0) * s.w.p;
+        (res.p - s.w.p) * (a / (res.p + b)).sqrt()
+    };
+    let vf_out = v - dv;
     if vf_out >= 0.0 {
         let mut pf = res.p;
-        let mut rf = s.w.rho * (pf / s.w.p).powf(1.0 / s.gamma);
-        let cf = (s.gamma * pf / rf).sqrt();
+        let mut rf = face_density(s, pf);
+        let cf = (g * pf / rf).sqrt();
         let mut vf = vf_out;
         if vf > cf {
             // Choked: the face stays sonic and its pressure rises above the reservoir's.
-            vf = cf;
-            pf = s.w.p + z * (v - vf);
-            rf = s.w.rho * (pf / s.w.p).powf(1.0 / s.gamma);
+            // Along the outgoing wave v + 2c/(γ−1) is kept, so the sonic face has
+            // c* = (γ−1)/(γ+1)·(v + 2c/(γ−1)).
+            let cs = (g - 1.0) / (g + 1.0) * (v + 2.0 * s.c / (g - 1.0));
+            vf = cs;
+            pf = s.w.p * (cs / s.c).powf(2.0 * g / (g - 1.0));
+            rf = face_density(s, pf);
         }
         let q = rf * vf * area;
         let tf = pf / (rf * gas.r(s.w.y));
@@ -170,7 +267,7 @@ pub fn pipe_open_to_reservoir(gas: &Gas, s: &State, sign: f64, area: f64, res: &
         let rho_r = res.density();
         let k = res.p - s.w.p - z * v;
         let b = z * (2.0 / rho_r).sqrt();
-        let root = 0.5 * (-b + (b * b + 4.0 * k).sqrt());
+        let root = 0.5 * (-b + (b * b + 4.0 * k).max(0.0).sqrt());
         let drop = root * root;
         let pf = res.p - drop;
         let vf = -(2.0 * drop / rho_r).sqrt();
@@ -244,8 +341,10 @@ mod tests {
         let res = Reservoir::new(&gas, 1e5, 300.0, 0.0);
         let f = pipe_to_reservoir(&gas, &s, 1.0, 1e-3, 0.0, &res, &mut 0.0);
         assert_eq!(f[0], 0.0);
+        // A weak shock: the acoustic ρc·u, a little more.
         let rise = f[1] / 1e-3 - 1e5;
-        assert!((rise - 1.2 * s.c * 5.0).abs() < 1e-6);
+        let acoustic = 1.2 * s.c * 5.0;
+        assert!(rise > acoustic && rise < 1.01 * acoustic, "{rise} {acoustic}");
     }
 
     #[test]

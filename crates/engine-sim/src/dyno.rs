@@ -310,6 +310,33 @@ mod tests {
         assert!(p.power > 280e3 && p.power < 420e3, "power {}", p.power);
     }
 
+    /// The V8's tuned primaries pull its exhaust ports hard at full load: the gas there
+    /// may go supersonic away from the valves and back at them, and must not be drawn
+    /// into a vacuum.
+    #[test]
+    fn strong_exhaust_tuning_keeps_the_ports_physical() {
+        let (e, i, x) = (samples::v8(), samples::v8_intake(), samples::v8_exhaust());
+        let b = Build::new(&e).system("intake", &i).system("exhaust", &x);
+        let (mut m, _) = b.build().unwrap();
+        let c = Controls {
+            pedal: 1.0,
+            load: Load::Speed(3400.0),
+            ..Default::default()
+        };
+        m.set_crank(0.0, 3400.0);
+        let mut coldest: f64 = 1e9;
+        while m.time < 0.6 {
+            m.step(&c);
+            for p in &m.pipes {
+                for s in &p.s {
+                    coldest = coldest.min(s.t);
+                }
+            }
+        }
+        assert!(m.fault.is_none(), "{:?}", m.fault);
+        assert!(coldest > 200.0, "coldest gas {coldest} K");
+    }
+
     /// Left alone with the pedal up, the engine settles at its idle speed.
     #[test]
     fn idles() {
