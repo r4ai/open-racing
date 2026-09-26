@@ -42,6 +42,8 @@ pub struct PpoConfig {
     pub seed: u64,
     pub out_dir: PathBuf,
     pub save_every: usize,
+    /// Also keep the policy every this many seconds in `out_dir/checkpoints/`.
+    pub checkpoint_every_seconds: Option<f64>,
     /// Warm-start from the weights and observation normaliser saved in this directory.
     pub init: Option<PathBuf>,
 }
@@ -67,6 +69,7 @@ impl Default for PpoConfig {
             seed: 0,
             out_dir: PathBuf::from("runs/ppo"),
             save_every: 10,
+            checkpoint_every_seconds: None,
             init: None,
         }
     }
@@ -216,6 +219,7 @@ pub fn train<B: AutodiffBackend>(
     let mut best_lap_overall: Option<f64> = None;
     let mut total_steps = 0usize;
     let training_started = Instant::now();
+    let mut last_checkpoint = 0.0;
 
     for iteration in 1..=cfg.iterations {
         let started = Instant::now();
@@ -429,6 +433,17 @@ pub fn train<B: AutodiffBackend>(
             .is_some_and(|seconds| training_started.elapsed().as_secs_f64() >= seconds);
         if iteration % cfg.save_every == 0 || iteration == cfg.iterations || reached_duration {
             save_policy(&cfg.out_dir, &agent.valid(), &meta).expect("save policy");
+        }
+        let elapsed = training_started.elapsed().as_secs_f64();
+        if let Some(every) = cfg.checkpoint_every_seconds
+            && elapsed - last_checkpoint >= every
+        {
+            last_checkpoint = elapsed;
+            let dir = cfg
+                .out_dir
+                .join("checkpoints")
+                .join(format!("{:03}min", (elapsed / 60.0).round() as u32));
+            save_policy(&dir, &agent.valid(), &meta).expect("save checkpoint");
         }
         if reached_duration {
             break;

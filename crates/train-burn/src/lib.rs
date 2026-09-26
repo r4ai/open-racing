@@ -167,6 +167,8 @@ pub struct PolicyMeta {
     pub control_hz: f64,
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
+    /// Growth of the gaps between lookahead points.
+    pub lookahead_growth: f64,
     pub privileged_obs: bool,
     /// Tread temperatures and pressures in the observation (absent in older policies).
     #[serde(default)]
@@ -174,6 +176,14 @@ pub struct PolicyMeta {
     /// Track widths at the lookahead points in the observation (absent in older policies).
     #[serde(default)]
     pub edge_obs: bool,
+    /// Tyre wear, carcass and brake temperatures and damage in the observation.
+    pub stint_obs: bool,
+    /// Position around the lap in the observation.
+    pub lap_position_obs: bool,
+    /// The steering action spans the steering usable at the car's speed.
+    pub speed_scaled_steering: bool,
+    /// The recovery aid gets the car going again after a spin.
+    pub recovery_assist: bool,
     /// Anti-lock brakes (absent in older policies).
     #[serde(default)]
     pub abs: bool,
@@ -198,9 +208,14 @@ impl PolicyMeta {
             control_hz: self.control_hz,
             lookahead_points: self.lookahead_points,
             lookahead_spacing: self.lookahead_spacing,
+            lookahead_growth: self.lookahead_growth,
             privileged_obs: self.privileged_obs,
             tyre_obs: self.tyre_obs,
             edge_obs: self.edge_obs,
+            stint_obs: self.stint_obs,
+            lap_position_obs: self.lap_position_obs,
+            speed_scaled_steering: self.speed_scaled_steering,
+            recovery_assist: self.recovery_assist,
             abs: self.abs,
             traction_control: self.traction_control,
             max_steer_rate: self.max_steer_rate,

@@ -367,6 +367,8 @@ pub struct Weather {
     volume: Option<CloudVolume>,
     generation: u64,
     road: Option<RoadTemperature>,
+    /// Road temperature without a modelled road ([`Self::steady`]), °C.
+    road_uniform: f64,
     scenery: Option<Arc<Occluders>>,
 }
 
@@ -406,8 +408,39 @@ impl Weather {
         volume: None,
         generation: 0,
         road: None,
+        road_uniform: AMBIENT_TEMPERATURE,
         scenery: None,
     };
+
+    /// No sky and no modelled road: air at `air` °C and sea-level `pressure` hPa, the
+    /// whole road at `road` °C, and a 10 m wind of `wind_speed` m/s blowing towards
+    /// `wind_heading` (rad from +X) with gusts drawn from `seed`. For training over a
+    /// range of conditions at little cost.
+    pub fn steady(
+        air: f64,
+        road: f64,
+        pressure: f64,
+        wind_speed: f64,
+        wind_heading: f64,
+        seed: u64,
+    ) -> Self {
+        let mut weather = Self {
+            settings: WeatherSettings {
+                seed,
+                ..Self::STANDARD.settings
+            },
+            air,
+            dew_point: air.min(Self::STANDARD.dew_point),
+            pressure,
+            wind_speed,
+            wind_heading,
+            wind_direction: DVec2::from_angle(wind_heading),
+            road_uniform: road,
+            ..Self::STANDARD
+        };
+        weather.update_air();
+        weather
+    }
 
     /// Weather over `track`, whose road `scenery` may shade, started from `settings`.
     pub fn new(
@@ -515,10 +548,14 @@ impl Weather {
 
     /// Advances the weather by one physics step of `dt` s.
     pub fn step(&mut self, dt: f64) {
-        if self.road.is_none() || !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 {
             return;
         }
+        // Without a modelled road only the gusts move on.
         self.clock += dt;
+        if self.road.is_none() {
+            return;
+        }
         let scale = self.settings.time_scale;
         if !scale.is_finite() || scale <= 0.0 {
             return;
@@ -820,25 +857,24 @@ impl Weather {
     /// The air at `position`, with the gusts of the moment.
     #[inline]
     pub fn air_at(&self, position: DVec3) -> Air {
-        if self.road.is_none() {
-            return Air {
-                temperature: self.air,
-                density: self.density,
-                wind: DVec3::ZERO,
-                engine: self.engine,
-                pressure: self.pressure,
-            };
-        }
-        let base = self.road.as_ref().map_or(0.0, RoadTemperature::base_height);
-        let gust = smooth_noise(self.clock / GUST_TIME, self.settings.seed);
-        let veer = smooth_noise(self.clock / GUST_TIME + 17.3, self.settings.seed ^ 1);
-        let speed = self.wind_speed * NEAR_GROUND_WIND * (1.0 + GUSTINESS * gust).max(0.0);
-        // Veered by a small angle: the direction plus that much of its perpendicular.
-        let dir = self.wind_direction + self.wind_direction.perp() * (GUST_VEER * veer);
+        let wind = if self.wind_speed > 0.0 {
+            let gust = smooth_noise(self.clock / GUST_TIME, self.settings.seed);
+            let veer = smooth_noise(self.clock / GUST_TIME + 17.3, self.settings.seed ^ 1);
+            let speed = self.wind_speed * NEAR_GROUND_WIND * (1.0 + GUSTINESS * gust).max(0.0);
+            // Veered by a small angle: the direction plus that much of its perpendicular.
+            let dir = self.wind_direction + self.wind_direction.perp() * (GUST_VEER * veer);
+            (dir * speed).extend(0.0)
+        } else {
+            DVec3::ZERO
+        };
+        let temperature = match &self.road {
+            Some(road) => self.air - LAPSE_RATE * (position.z - road.base_height()),
+            None => self.air,
+        };
         Air {
-            temperature: self.air - LAPSE_RATE * (position.z - base),
+            temperature,
             density: self.density,
-            wind: (dir * speed).extend(0.0),
+            wind,
             engine: self.engine,
             pressure: self.pressure,
         }
@@ -849,7 +885,7 @@ impl Weather {
     pub fn road_temperature(&self, s: f64, d: f64) -> f64 {
         match &self.road {
             Some(road) => road.at(s, d),
-            None => self.air,
+            None => self.road_uniform,
         }
     }
 
@@ -1072,6 +1108,28 @@ mod tests {
 
     fn track() -> Track {
         Track::from_ron(include_str!("../../../../assets/tracks/lakeside.ron")).unwrap()
+    }
+
+    #[test]
+    fn steady_weather_holds_its_air_and_road_and_gusts() {
+        let mut w = Weather::steady(35.0, 55.0, 1000.0, 6.0, 0.0, 3);
+        let at = DVec3::new(100.0, 50.0, 30.0);
+        assert_eq!(w.air_at(at).temperature, 35.0);
+        assert_eq!(w.road_temperature(10.0, 2.0), 55.0);
+        // Hot, low-pressure air is thinner and weakens the engine.
+        assert!(w.air_density() < Weather::STANDARD.air_density());
+        assert!(w.air_at(at).engine < 1.0);
+        let mut speeds = Vec::new();
+        for _ in 0..30_000 {
+            w.step(0.001);
+            speeds.push(w.air_at(at).wind.length());
+        }
+        let (lo, hi) = speeds
+            .iter()
+            .fold((f64::MAX, 0.0_f64), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo > 0.0 && hi - lo > 0.1, "gusts {lo}..{hi}");
+        assert_eq!(w.air_at(at).temperature, 35.0);
+        assert_eq!(Weather::STANDARD.air_at(at).wind, DVec3::ZERO);
     }
 
     fn weather(sky: Sky, hour: f64) -> Weather {
