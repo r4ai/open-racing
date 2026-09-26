@@ -249,6 +249,21 @@ impl Editor {
         true
     }
 
+    /// Applies operations as part of the last undo step: what follows from an edit
+    /// just made, such as the same change made to other selected items.
+    pub fn apply_along(&mut self, ops: Vec<Op>) -> bool {
+        if let Err(e) = ops::apply_all(&mut self.project, &ops) {
+            self.status = e.to_string();
+            return false;
+        }
+        self.revision += 1;
+        if !self.dragging {
+            self.save();
+        }
+        self.clamp_selection();
+        true
+    }
+
     /// Starts a drag: the edits until `end_drag` undo as one step and are saved at the
     /// end.
     pub fn begin_drag(&mut self) {
@@ -463,10 +478,10 @@ impl Editor {
 
     /// Hides or shows one item, as the outliner's eye.
     pub fn toggle_hidden(&mut self, item: Item) {
-        if let Some(n) = self.named(item) {
-            if !self.shown.hidden.remove(&n) {
-                self.hide(&[item]);
-            }
+        if let Some(n) = self.named(item)
+            && !self.shown.hidden.remove(&n)
+        {
+            self.hide(&[item]);
         }
     }
 

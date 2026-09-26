@@ -17,6 +17,16 @@ use crate::viewport::{
     self, Draw, DrawKind, Mode, Orbit, Tool, ToolKind, ViewDir, frame_all, frame_selection, look,
 };
 
+/// What Select Similar compares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Similar {
+    /// Roads, splines or props.
+    Kind,
+    /// The same strip or wall type, or the same model.
+    Type,
+    Material,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
     Undo,
@@ -74,6 +84,14 @@ pub enum Cmd {
     HandleMenu,
     ToggleClosed,
     Duplicate,
+    Copy,
+    /// Shift G.
+    SimilarMenu,
+    SelectSimilar(Similar),
+    /// Ctrl M.
+    MirrorMenu,
+    /// Across the X (east-west) axis through the selection's middle, or Y.
+    Mirror(bool),
     /// Y: cut the line at the active node.
     Split,
     /// Ctrl J: join the selected lines onto the active one.
@@ -147,6 +165,12 @@ impl Cmd {
             Handles(HandleMode::Free),
             ToggleClosed,
             Duplicate,
+            Copy,
+            SelectSimilar(Similar::Kind),
+            SelectSimilar(Similar::Type),
+            SelectSimilar(Similar::Material),
+            Mirror(true),
+            Mirror(false),
             Split,
             Join,
             Reverse,
@@ -212,6 +236,14 @@ impl Cmd {
             HandleMenu => "Set Handle Type…".into(),
             ToggleClosed => "Toggle Closed Loop".into(),
             Duplicate => "Duplicate".into(),
+            Copy => "Copy".into(),
+            SimilarMenu => "Select Similar…".into(),
+            SelectSimilar(Similar::Kind) => "Select Similar: Kind".into(),
+            SelectSimilar(Similar::Type) => "Select Similar: Type or Model".into(),
+            SelectSimilar(Similar::Material) => "Select Similar: Material".into(),
+            MirrorMenu => "Mirror…".into(),
+            Mirror(true) => "Mirror X (east for west)".into(),
+            Mirror(false) => "Mirror Y (north for south)".into(),
             Split => "Split at Node".into(),
             Join => "Join Lines".into(),
             Reverse => "Switch Direction".into(),
@@ -225,12 +257,12 @@ impl Cmd {
         use Cmd::*;
         let menu = match self {
             DrawRoad | DrawSpline(_) | PlaceProp => "Add",
-            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | ToggleEdit => {
-                "Select"
-            }
+            SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess | ToggleEdit
+            | SimilarMenu | SelectSimilar(_) => "Select",
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
-            | HandleMenu | ToggleClosed | Duplicate | Split | Join | Reverse | SetMain | Rename
-            | SmoothHeights | SmoothShape | Flatten | EvenGrade => "Edit",
+            | HandleMenu | ToggleClosed | Duplicate | Copy | MirrorMenu | Mirror(_) | Split
+            | Join | Reverse | SetMain | Rename | SmoothHeights | SmoothShape | Flatten
+            | EvenGrade => "Edit",
             View(_) | ToggleOrtho | Walk | Replay | FrameSelected | FrameAll | ViewPie
             | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap | ToggleProportional
             | LocalView | Hide | HideOthers | Reveal => "View",
@@ -280,6 +312,9 @@ impl Cmd {
             HandleMenu => "V",
             ToggleClosed => "Alt C",
             Duplicate => "Shift D",
+            Copy => "Ctrl C",
+            SimilarMenu => "Shift G",
+            MirrorMenu => "Ctrl M",
             Split => "Y",
             Join => "Ctrl J",
             _ => "",
@@ -307,7 +342,8 @@ impl Cmd {
             EvenGrade => line && sel.nodes.len() >= 2,
             Extrude | Handles(_) | HandleMenu => node,
             Width | Tilt => sel.road().is_some(),
-            Duplicate => sel.item.is_some(),
+            Duplicate | Copy | MirrorMenu | Mirror(_) => sel.item.is_some(),
+            SimilarMenu | SelectSimilar(_) => sel.item.is_some() && !c.tool.edit,
             Split => node,
             Join => line && !sel.others.is_empty(),
             Reverse => line,
@@ -446,6 +482,21 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         HandleMenu => c.shell.popup = Some(Popup::Handles { at }),
         ToggleClosed => edit::toggle_closed(c.editor),
         Duplicate => viewport::duplicate(c.editor, c.tool, c.built, at),
+        Copy => c.shell.copy = true,
+        SimilarMenu => {
+            c.shell.popup = Some(Popup::Choose {
+                at,
+                of: Popup::SIMILAR,
+            })
+        }
+        SelectSimilar(by) => edit::select_similar(c.editor, by),
+        MirrorMenu => {
+            c.shell.popup = Some(Popup::Choose {
+                at,
+                of: Popup::MIRROR,
+            })
+        }
+        Mirror(x) => viewport::mirror(c.editor, c.tool, c.built, x),
         Split => edit::split(c.editor),
         Join => edit::join(c.editor),
         Reverse => edit::reverse(c.editor),
@@ -504,6 +555,29 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
     run_if(Cmd::Redo, Key::Z, Modifiers::COMMAND | Modifiers::SHIFT, c);
     run_if(Cmd::Redo, Key::Y, Modifiers::COMMAND, c);
     run_if(Cmd::Quit, Key::Q, Modifiers::COMMAND, c);
+    // Ctrl C and Ctrl V: items as text, to paste here, in another project or to an
+    // agent (and its operations back).
+    let (copied, pasted) = ctx.input(|i| {
+        let copied = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+        let pasted = i.events.iter().find_map(|e| match e {
+            egui::Event::Paste(t) => Some(t.clone()),
+            _ => None,
+        });
+        (copied, pasted)
+    });
+    if copied && let Some((text, n)) = crate::clipboard::copy(c.editor) {
+        ctx.copy_text(text);
+        c.editor.status = format!("{n} copied: Ctrl V pastes them, here or in another project");
+    }
+    if let Some(text) = pasted {
+        match crate::clipboard::paste(c.editor, &text) {
+            Ok(n) => {
+                c.tool.edit = false;
+                c.editor.status = format!("{n} pasted");
+            }
+            Err(e) => c.editor.status = format!("not pasted: {e}"),
+        }
+    }
     run_if(Cmd::Search, Key::F3, none, c);
     run_if(Cmd::Rename, Key::F2, none, c);
     run_if(Cmd::ToggleMaximize, Key::Space, Modifiers::COMMAND, c);
@@ -523,6 +597,8 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
         run_if(Cmd::ToggleClosed, Key::C, Modifiers::ALT, c);
         run_if(Cmd::SelectInvert, Key::I, Modifiers::COMMAND, c);
         run_if(Cmd::Join, Key::J, Modifiers::COMMAND, c);
+        run_if(Cmd::SimilarMenu, Key::G, Modifiers::SHIFT, c);
+        run_if(Cmd::MirrorMenu, Key::M, Modifiers::COMMAND, c);
         run_if(Cmd::Split, Key::Y, none, c);
         run_if(Cmd::ViewPie, Key::Backtick, none, c);
     }

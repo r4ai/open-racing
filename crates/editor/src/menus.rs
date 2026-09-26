@@ -62,6 +62,16 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 ] {
                     entry(ui, c, cmd);
                 }
+                ui.separator();
+                ui.menu_button("Select Similar", |ui| {
+                    for by in [
+                        crate::commands::Similar::Kind,
+                        crate::commands::Similar::Type,
+                        crate::commands::Similar::Material,
+                    ] {
+                        entry(ui, c, Cmd::SelectSimilar(by));
+                    }
+                });
             });
             ui.menu_button("Add", |ui| add_menu(ui, c));
             match c.editor.selection.item {
@@ -188,7 +198,12 @@ fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
         entry(ui, c, cmd);
     }
     ui.separator();
-    for cmd in [Cmd::Split, Cmd::Reverse] {
+    for cmd in [
+        Cmd::Split,
+        Cmd::Reverse,
+        Cmd::Mirror(true),
+        Cmd::Mirror(false),
+    ] {
         entry(ui, c, cmd);
     }
     ui.separator();
@@ -204,10 +219,13 @@ fn object_menu(ui: &mut egui::Ui, c: &mut Ctx, item: Item) {
     ui.set_min_width(200.0);
     entry(ui, c, Cmd::Rename);
     entry(ui, c, Cmd::Duplicate);
+    entry(ui, c, Cmd::Copy);
     if !matches!(item, Item::Prop(_)) {
         entry(ui, c, Cmd::Join);
         entry(ui, c, Cmd::Reverse);
     }
+    entry(ui, c, Cmd::Mirror(true));
+    entry(ui, c, Cmd::Mirror(false));
     if matches!(item, Item::Road(_)) {
         entry(ui, c, Cmd::SetMain);
         ui.separator();

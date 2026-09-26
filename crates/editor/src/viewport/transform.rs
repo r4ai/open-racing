@@ -1232,3 +1232,66 @@ impl Gesture<'_> {
         }
     }
 }
+
+/// Ctrl M: the selected nodes (in edit mode), or the selected roads, splines and props,
+/// mirrored through their middle: east for west (`x`), or north for south.
+pub fn mirror(editor: &mut Editor, tool: &Tool, built: &Built, x: bool) {
+    let Some(pivot) = selection_pivot(editor, built) else {
+        return;
+    };
+    let scale = if x {
+        DVec3::new(-1.0, 1.0, 1.0)
+    } else {
+        DVec3::new(1.0, -1.0, 1.0)
+    };
+    let change = Change {
+        scale,
+        ..Change::identity(pivot)
+    };
+    let mut ops = Vec::new();
+    let mut line_ops = |item: Item, picked: &[usize]| {
+        if let Some((name, nodes, _)) = item_line(&editor.project, item) {
+            for &i in picked {
+                ops.push(Op::MoveNode {
+                    line: name.to_string(),
+                    index: i,
+                    pos: change.point(nodes[i].pos),
+                });
+                ops.extend(turned_handles(name, i, nodes[i], &change));
+            }
+        }
+    };
+    if tool.edit {
+        if let Some(item) = editor.selection.item {
+            line_ops(item, &editor.picked_nodes());
+        }
+    } else {
+        for item in editor.selection.items() {
+            let count = item_line(&editor.project, item).map_or(0, |(_, n, _)| n.len());
+            line_ops(item, &(0..count).collect::<Vec<_>>());
+        }
+        for item in editor.selection.items() {
+            if let Item::Prop(i) = item
+                && let Some(p) = editor.project.props.get(i)
+            {
+                let facing = DVec2::from_angle(p.yaw) * scale.truncate();
+                ops.push(Op::MoveProp {
+                    name: p.name.clone(),
+                    pos: Some(change.point(p.pos)),
+                    yaw: Some(facing.to_angle()),
+                    scale: None,
+                });
+            }
+        }
+    }
+    if !ops.is_empty() && editor.apply(ops, None) {
+        editor.status = format!(
+            "mirrored {}",
+            if x {
+                "east for west"
+            } else {
+                "north for south"
+            }
+        );
+    }
+}

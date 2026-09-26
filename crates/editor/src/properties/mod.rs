@@ -156,6 +156,15 @@ pub fn show(
                 ui.strong(title);
             }
         });
+        let more = crate::batch::followers(c.editor);
+        if more > 0 && c.shell.tab == PropTab::Object {
+            ui.colored_label(
+                crate::theme::SELECTED_OTHER_UI,
+                format!(
+                    "Changes here are made to the {more} other selected too (not names or places)"
+                ),
+            );
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])

@@ -1338,6 +1338,34 @@ mod tests {
     }
 
     #[test]
+    fn mirroring_flips_nodes_and_handles_through_the_middle() {
+        let (mut editor, built, _, _, dir) = top_down("mirror", DVec3::ZERO);
+        assert!(editor.apply(
+            vec![Op::SetNodeHandles {
+                line: "circuit".into(),
+                index: 1,
+                mode: HandleMode::Free,
+                incoming: DVec3::new(-20.0, 5.0, 0.0),
+                outgoing: DVec3::new(30.0, 0.0, 0.0),
+            }],
+            None
+        ));
+        let before = editor.project.roads[0].nodes.clone();
+        editor.selection.select(Item::Road(0));
+        let pivot = selection_pivot(&editor, &built).unwrap();
+        mirror(&mut editor, &Tool::default(), &built, true);
+        let after = &editor.project.roads[0].nodes;
+        for (a, b) in before.iter().zip(after) {
+            assert!((b.pos.x - (2.0 * pivot.x - a.pos.x)).abs() < 1e-9);
+            assert_eq!(b.pos.y, a.pos.y);
+        }
+        let (incoming, outgoing) = handles(after, true, 1);
+        assert_eq!(incoming, DVec3::new(20.0, 5.0, 0.0));
+        assert_eq!(outgoing, DVec3::new(-30.0, 0.0, 0.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn minus_turns_a_typed_value_s_sign_round() {
         let mut typed = String::new();
         for keys in ["1", "2", "-", ".", "5", "-", "-"] {

@@ -80,9 +80,25 @@ pub enum Popup {
     Handles { at: Vec2 },
     /// `: the view pie.
     Pie { at: Vec2 },
+    /// A few commands to choose from (Shift G, Ctrl M).
+    Choose {
+        at: Vec2,
+        of: (&'static str, &'static [Cmd]),
+    },
 }
 
 impl Popup {
+    pub const SIMILAR: (&'static str, &'static [Cmd]) = (
+        "Select Similar",
+        &[
+            Cmd::SelectSimilar(commands::Similar::Kind),
+            Cmd::SelectSimilar(commands::Similar::Type),
+            Cmd::SelectSimilar(commands::Similar::Material),
+        ],
+    );
+    pub const MIRROR: (&'static str, &'static [Cmd]) =
+        ("Mirror", &[Cmd::Mirror(true), Cmd::Mirror(false)]);
+
     pub fn search(at: Vec2) -> Self {
         Popup::Search {
             at,
@@ -98,6 +114,8 @@ pub struct Shell {
     pub sidebar: bool,
     /// Ctrl + Space: the 3D view alone.
     pub maximized: bool,
+    /// Copy the selection to the clipboard this frame.
+    pub copy: bool,
     pub bottom_open: bool,
     pub bottom: BottomTab,
     pub tab: PropTab,
@@ -117,6 +135,7 @@ impl Default for Shell {
             toolbar: true,
             sidebar: true,
             maximized: false,
+            copy: false,
             bottom_open: true,
             bottom: BottomTab::default(),
             tab: PropTab::default(),
@@ -226,6 +245,12 @@ pub fn ui(
     }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
+    // What the panels change about the active item, the other selected items of its
+    // kind take too.
+    let active = c.editor.selection.item;
+    let before = active
+        .filter(|_| crate::batch::followers(c.editor) > 0)
+        .and_then(|i| crate::batch::snapshot(c.editor, i));
 
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -289,6 +314,17 @@ pub fn ui(
         .show_collapsible(&mut root, &mut open, |ui| sidebar::show(ui, &mut c));
     c.shell.sidebar = open;
 
+    if let (Some(item), Some(before)) = (active, before)
+        && c.editor.selection.item == Some(item)
+        && !c.editor.dragging
+    {
+        let ops = crate::batch::spread_ops(c.editor, item, &before);
+        let n = ops.len();
+        if n > 0 && c.editor.apply_along(ops) {
+            c.editor.status = format!("and the same to {n} more selected");
+        }
+    }
+
     // What is left is the 3D view.
     let free = root.available_rect_before_wrap();
     // The panels' resize handles reach into the view: clicks there resize, not select.
@@ -302,6 +338,12 @@ pub fn ui(
     overlay::view(&ctx, free, &mut c, view);
     menus::overlay(&ctx, &mut c);
     popups::show(&ctx, &mut c);
+    if std::mem::take(&mut c.shell.copy)
+        && let Some((text, n)) = crate::clipboard::copy(c.editor)
+    {
+        ctx.copy_text(text);
+        c.editor.status = format!("{n} copied: Ctrl V pastes them, here or in another project");
+    }
     c.tool.blocked = c.shell.popup.is_some();
     if c.shell.quit {
         exit.write(AppExit::Success);
@@ -505,6 +547,9 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
             entry(ui, c, Cmd::Rename);
             ui.separator();
             entry(ui, c, Cmd::Duplicate);
+            entry(ui, c, Cmd::Copy);
+            ui.add_enabled(false, egui::Button::new("Paste").shortcut_text("Ctrl V"))
+                .on_disabled_hover_text("Ctrl V in the window pastes copied items or operations");
             entry(ui, c, Cmd::Delete);
         });
         ui.menu_button("View", |ui| {

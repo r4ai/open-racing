@@ -7165,6 +7165,7 @@ dependencies = [
  "rfd",
  "ron",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

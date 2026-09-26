@@ -20,6 +20,7 @@ pub fn show(ctx: &egui::Context, c: &mut Ctx) {
         Popup::Rename { at, item, text } => rename(ctx, c, at, item, text),
         Popup::Handles { at } => handles(ctx, at),
         Popup::Pie { at } => pie(ctx, c, at),
+        Popup::Choose { at, of } => choose(ctx, c, at, of),
     };
     c.shell.popup = keep;
     if let Some(cmd) = chosen {
@@ -143,6 +144,35 @@ fn rename(
         return (None, None);
     }
     (Some(Popup::Rename { at, item, text }), None)
+}
+
+/// A titled list of commands at the pointer.
+fn choose(
+    ctx: &egui::Context,
+    c: &Ctx,
+    at: Vec2,
+    of: (&'static str, &'static [Cmd]),
+) -> (Option<Popup>, Option<Cmd>) {
+    let mut chosen = None;
+    let (_, outside) = popup_area(ctx, "choose", pos(at) - egui::vec2(20.0, 12.0), |ui| {
+        ui.set_min_width(200.0);
+        ui.strong(of.0);
+        ui.separator();
+        for &cmd in of.1 {
+            let label = cmd.label(&c.editor.project);
+            let label = label.split(": ").last().unwrap_or(&label).to_string();
+            if ui
+                .add_enabled(cmd.enabled(c), egui::Button::new(label))
+                .clicked()
+            {
+                chosen = Some(cmd);
+            }
+        }
+    });
+    if chosen.is_some() || outside || escape(ctx) {
+        return (None, chosen);
+    }
+    (Some(Popup::Choose { at, of }), None)
 }
 
 fn handles(ctx: &egui::Context, at: Vec2) -> (Option<Popup>, Option<Cmd>) {

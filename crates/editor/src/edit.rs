@@ -400,6 +400,53 @@ pub fn reverse(editor: &mut Editor) {
     }
 }
 
+/// Selects every item like the active one: of its kind, its strip or wall type (or
+/// model), or its material. Hidden and locked items are left out.
+pub fn select_similar(editor: &mut Editor, by: crate::commands::Similar) {
+    use crate::commands::Similar;
+    use open_racing_track_project::project::Shape;
+    let Some(active) = editor.selection.item else {
+        return;
+    };
+    let p = &editor.project;
+    // What each item is, compared by `by`.
+    let key = |item: Item| -> Option<String> {
+        match (by, item) {
+            (Similar::Kind, i) => Some(item_kind(i).to_string()),
+            (Similar::Type, Item::Road(r)) => p.roads.get(r).map(|r| r.surface.clone()),
+            (Similar::Type, Item::Spline(s)) => p.splines.get(s).map(|s| {
+                s.style.clone().unwrap_or_else(|| match &s.shape {
+                    Shape::Band { .. } => "band".into(),
+                    Shape::Wall { .. } => "wall".into(),
+                })
+            }),
+            (Similar::Type | Similar::Material, Item::Prop(i)) => p
+                .props
+                .get(i)
+                .map(|x| x.model.to_string_lossy().into_owned()),
+            (Similar::Material, Item::Road(r)) => p.roads.get(r).map(|r| r.material.clone()),
+            (Similar::Material, Item::Spline(s)) => {
+                p.splines.get(s).map(|s| s.material().to_string())
+            }
+        }
+        .map(|k| format!("{}:{k}", item_kind(item)))
+    };
+    let want = key(active);
+    let found: Vec<Item> = editor
+        .all_items()
+        .into_iter()
+        .filter(|&i| i != active && editor.pickable(i) && key(i) == want)
+        .collect();
+    let sel = &mut editor.selection;
+    sel.nodes.clear();
+    for i in &found {
+        if !sel.has(*i) {
+            sel.others.push(*i);
+        }
+    }
+    editor.status = format!("{} more selected", found.len());
+}
+
 /// Makes the selected road the circuit.
 pub fn set_main(editor: &mut Editor) {
     if let Some(road) = editor.road_name() {
@@ -640,6 +687,35 @@ mod tests {
         reverse(&mut e);
         assert_eq!(e.selection.nodes, vec![3]);
         assert_eq!(e.project.roads[1].nodes[3].pos, DVec3::new(0.0, -50.0, 0.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn select_similar_finds_the_same_type() {
+        let (mut e, dir) = editor("similar");
+        for (name, y, style) in [
+            ("k1", 0.0, "kerb"),
+            ("k2", 10.0, "kerb"),
+            ("w", 20.0, "concrete wall"),
+        ] {
+            let spline = crate::presets::named(&e.project, style)
+                .unwrap()
+                .spline(
+                    &e.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(9.0, y, 0.0)],
+                )
+                .unwrap();
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                ..spline
+            };
+            assert!(e.apply(vec![Op::PutSpline { spline }], None));
+        }
+        e.selection.select(Item::Spline(0));
+        select_similar(&mut e, crate::commands::Similar::Type);
+        assert_eq!(e.selection.others, vec![Item::Spline(1)]);
+        select_similar(&mut e, crate::commands::Similar::Kind);
+        assert_eq!(e.selection.items().len(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
