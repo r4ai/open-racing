@@ -21,11 +21,12 @@ use open_racing_track_project::{Cache, Project, bake};
 use open_racing_track_render::{self as render, TrackMaterial, to_bevy};
 
 use crate::assets::Library;
-use crate::state::Editor;
+use crate::state::{Editor, Item};
 
-/// A mesh of the preview, despawned when it is rebuilt.
+/// A mesh of the preview, despawned when it is rebuilt: of a road or spline, or the
+/// terrain's.
 #[derive(Component)]
-pub struct PreviewMesh;
+pub struct PreviewMesh(Option<Item>);
 
 /// A prop of the preview: `Project::props[i]`, showing the model at this path.
 #[derive(Component)]
@@ -57,10 +58,10 @@ struct Meshes {
     ground: Option<Arc<GroundMesh>>,
     issues: Vec<Issue>,
     corners: Vec<Vec<Corner>>,
-    /// (material, mesh, casts shadows)
-    meshes: Vec<(usize, Mesh, bool)>,
-    /// Walls models show: the model, and its copies along them.
-    walls: Vec<(PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
+    /// (whose, material, mesh, casts shadows)
+    meshes: Vec<(Option<Item>, usize, Mesh, bool)>,
+    /// Walls models show: whose, the model, and its copies along them.
+    walls: Vec<(Item, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
     /// Models that could not be read, and why.
     failed: Vec<String>,
 }
@@ -92,12 +93,24 @@ fn to_mesh(m: MeshData) -> Mesh {
 fn build(project: Project, cache: Arc<Mutex<Cache>>, dir: PathBuf) -> Meshes {
     let scene = bake::build(&project);
     let (mut walls, mut failed) = (Vec::new(), Vec::new());
-    for line in scene.model_lines() {
+    let lines = scene
+        .roads
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.models.iter().map(move |l| (Item::Road(i), l)))
+        .chain(
+            scene
+                .splines
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| b.models.iter().map(move |l| (Item::Spline(i), l))),
+        );
+    for (item, line) in lines {
         let model = cache.lock().expect("cache").model(&dir, &line.run.model);
         match model {
             Ok(m) => {
                 let copies = open_racing_track_project::model::along(&m, line);
-                walls.push((line.run.model.clone(), m, copies));
+                walls.push((item, line.run.model.clone(), m, copies));
             }
             Err(e) => failed.push(e.to_string()),
         }
@@ -119,12 +132,30 @@ fn build(project: Project, cache: Arc<Mutex<Cache>>, dir: PathBuf) -> Meshes {
     let terrain = project
         .material_index(&project.terrain.material)
         .unwrap_or(0);
-    let mut meshes: Vec<_> = scene
-        .visual_parts()
-        .map(|p| (p.material, to_mesh(p.mesh.clone()), p.cast_shadows))
+    let parts = scene
+        .roads
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.visual.iter().map(move |p| (Item::Road(i), p)))
+        .chain(
+            scene
+                .splines
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| b.visual.iter().map(move |p| (Item::Spline(i), p))),
+        );
+    let mut meshes: Vec<_> = parts
+        .map(|(item, p)| {
+            let mesh = to_mesh(p.mesh.clone());
+            (Some(item), p.material, mesh, p.cast_shadows)
+        })
         .collect();
     if let Some(t) = scene.terrain {
-        meshes.extend(t.chunks.into_iter().map(|m| (terrain, to_mesh(m), false)));
+        meshes.extend(
+            t.chunks
+                .into_iter()
+                .map(|m| (None, terrain, to_mesh(m), false)),
+        );
     }
     let surfaces: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
     Meshes {
@@ -184,14 +215,14 @@ pub fn rebuild(
             commands.entity(e).despawn();
         }
         let fallback = state.handles.first().cloned().unwrap_or_default();
-        for (material, mesh, shadows) in done.meshes {
+        for (item, material, mesh, shadows) in done.meshes {
             let handle = state
                 .handles
                 .get(material)
                 .cloned()
                 .unwrap_or(fallback.clone());
             let mut e = commands.spawn((
-                PreviewMesh,
+                PreviewMesh(item),
                 Mesh3d(meshes.add(mesh)),
                 MeshMaterial3d(handle),
             ));
@@ -199,7 +230,7 @@ pub fn rebuild(
                 e.insert(NotShadowCaster);
             }
         }
-        for (path, model, copies) in done.walls {
+        for (item, path, model, copies) in done.walls {
             let looks = state.wall_looks.entry(path).or_insert_with(|| {
                 render::add_materials(
                     &model.look,
@@ -215,7 +246,7 @@ pub fn rebuild(
                     .cloned()
                     .unwrap_or(fallback.clone());
                 commands.spawn((
-                    PreviewMesh,
+                    PreviewMesh(Some(item)),
                     Mesh3d(meshes.add(render::to_mesh(m))),
                     MeshMaterial3d(handle),
                 ));
@@ -391,5 +422,31 @@ pub fn props(
                     }
                 }
             });
+    }
+}
+
+/// Hides the meshes and props of items hidden or outside local view; the terrain shows
+/// outside local view only.
+pub fn show_items(
+    editor: Res<Editor>,
+    mut meshes: Query<(&PreviewMesh, &mut Visibility), Without<PreviewProp>>,
+    mut props: Query<(&PreviewProp, &mut Visibility), Without<PreviewMesh>>,
+) {
+    let want = |shown: bool| {
+        if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    };
+    for (m, mut v) in &mut meshes {
+        let shown = match m.0 {
+            Some(item) => editor.visible(item),
+            None => editor.shown.local.is_none(),
+        };
+        v.set_if_neq(want(shown));
+    }
+    for (p, mut v) in &mut props {
+        v.set_if_neq(want(editor.visible(Item::Prop(p.0))));
     }
 }

@@ -320,6 +320,86 @@ pub fn toggle_closed(editor: &mut Editor) {
     editor.apply(vec![op], None);
 }
 
+/// Y: cuts the selected road or spline at its active node. An open line becomes two,
+/// the part from the node on a new line; a loop opens there.
+pub fn split(editor: &mut Editor) {
+    let (Some(item), Some(at)) = (editor.selection.item, editor.selection.node()) else {
+        return;
+    };
+    let Some((name, _, closed)) = editor.line() else {
+        return;
+    };
+    let name = name.to_string();
+    let to = crate::presets::unique_name(&editor.project, &format!("{name} 2"));
+    let op = Op::SplitLine {
+        line: name.clone(),
+        at,
+        to: to.clone(),
+    };
+    if editor.apply(vec![op], None) {
+        editor.selection.select(item);
+        editor.status = if closed {
+            format!("\"{name}\" opened at node {at}")
+        } else {
+            format!("\"{name}\" cut at node {at}; the rest is \"{to}\"")
+        };
+    }
+}
+
+/// Ctrl J: joins the other selected roads (or splines) onto the active one, end to end.
+pub fn join(editor: &mut Editor) {
+    let Some(item) = editor.selection.item else {
+        return;
+    };
+    let Some(name) = item_name(&editor.project, item).map(str::to_string) else {
+        return;
+    };
+    let ops: Vec<Op> = editor
+        .selection
+        .others
+        .iter()
+        .filter_map(|&o| item_name(&editor.project, o))
+        .map(|with| Op::JoinLines {
+            line: name.clone(),
+            with: with.to_string(),
+        })
+        .collect();
+    let n = ops.len();
+    if editor.apply(ops, None) {
+        // The joined lines are gone: find the active one again by its name.
+        let p = &editor.project;
+        let item = match item {
+            Item::Road(_) => p.road_index(&name).map(Item::Road),
+            Item::Spline(_) => p
+                .splines
+                .iter()
+                .position(|s| s.name == name)
+                .map(Item::Spline),
+            Item::Prop(_) => None,
+        };
+        editor.selection = Default::default();
+        if let Some(item) = item {
+            editor.selection.select(item);
+        }
+        editor.status = format!("joined {n} onto \"{name}\"");
+    }
+}
+
+/// Turns the selected road or spline round, to run the other way.
+pub fn reverse(editor: &mut Editor) {
+    let Some((name, nodes, closed)) = editor.line() else {
+        return;
+    };
+    let (line, n) = (name.to_string(), nodes.len());
+    if editor.apply(vec![Op::ReverseLine { line: line.clone() }], None) {
+        // The same nodes stay selected, under their new numbers.
+        let flip = |i: usize| if closed { (n - i) % n } else { n - 1 - i };
+        let sel = &mut editor.selection;
+        sel.nodes = sel.nodes.iter().map(|&i| flip(i)).collect();
+        editor.status = format!("\"{line}\" runs the other way now");
+    }
+}
+
 /// Makes the selected road the circuit.
 pub fn set_main(editor: &mut Editor) {
     if let Some(road) = editor.road_name() {
@@ -530,6 +610,36 @@ mod tests {
         crate::viewport::delete(&mut e);
         assert_eq!(e.project.splines.len(), 1);
         assert_eq!(e.selection.item, None, "not the spline that moved up");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn split_join_and_reverse_keep_the_road_selected() {
+        let (mut e, dir) = editor("split");
+        assert!(e.apply(
+            vec![Op::AddRoad {
+                name: "pit".into(),
+                closed: false,
+                nodes: (0..4).map(|i| DVec3::new(i as f64 * 40.0, -50.0, 0.0)).collect(),
+                like: None,
+            }],
+            None
+        ));
+        e.selection.select_node(Item::Road(1), 2);
+        split(&mut e);
+        assert_eq!(e.project.roads.len(), 3);
+        assert_eq!(e.project.roads[2].name, "pit 2");
+        assert_eq!(e.selection.item, Some(Item::Road(1)));
+        // Join the rest back, then turn it round keeping node 0 selected at its end.
+        e.selection.others = vec![Item::Road(2)];
+        join(&mut e);
+        assert_eq!(e.project.roads.len(), 2);
+        assert_eq!(e.project.roads[1].nodes.len(), 4);
+        assert_eq!(e.selection.item, Some(Item::Road(1)));
+        e.selection.nodes = vec![0];
+        reverse(&mut e);
+        assert_eq!(e.selection.nodes, vec![3]);
+        assert_eq!(e.project.roads[1].nodes[3].pos, DVec3::new(0.0, -50.0, 0.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

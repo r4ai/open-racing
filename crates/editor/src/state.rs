@@ -4,7 +4,7 @@
 //! the editor work on the same thing. Changes made to the file from outside are loaded
 //! as they happen.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -121,6 +121,25 @@ impl Selection {
     }
 }
 
+/// An item by its kind and name, which stay the same as the lists change.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Named {
+    Road(String),
+    Spline(String),
+    Prop(String),
+}
+
+/// What the view shows, as Blender's hiding (H), the outliner's locks and local view
+/// (numpad /). Not part of the track.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shown {
+    pub hidden: HashSet<Named>,
+    /// Shown but not picked in the view.
+    pub locked: HashSet<Named>,
+    /// Local view: only these are shown.
+    pub local: Option<HashSet<Named>>,
+}
+
 #[derive(Resource)]
 pub struct Editor {
     pub dir: PathBuf,
@@ -140,6 +159,7 @@ pub struct Editor {
     /// One line about what just happened.
     pub status: String,
     pub dragging: bool,
+    pub shown: Shown,
 }
 
 fn stamp(dir: &Path) -> Option<SystemTime> {
@@ -179,6 +199,7 @@ impl Editor {
             },
             status,
             dragging: false,
+            shown: Shown::default(),
         })
     }
 
@@ -376,6 +397,124 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// An item's kind and name.
+    pub fn named(&self, item: Item) -> Option<Named> {
+        let p = &self.project;
+        Some(match item {
+            Item::Road(r) => Named::Road(p.roads.get(r)?.name.clone()),
+            Item::Spline(s) => Named::Spline(p.splines.get(s)?.name.clone()),
+            Item::Prop(i) => Named::Prop(p.props.get(i)?.name.clone()),
+        })
+    }
+
+    /// Whether the view shows an item: not hidden, and in local view if there is one.
+    pub fn visible(&self, item: Item) -> bool {
+        let Some(n) = self.named(item) else {
+            return false;
+        };
+        !self.shown.hidden.contains(&n) && self.shown.local.as_ref().is_none_or(|l| l.contains(&n))
+    }
+
+    /// Whether a click or a box in the view can select an item.
+    pub fn pickable(&self, item: Item) -> bool {
+        self.visible(item)
+            && self
+                .named(item)
+                .is_some_and(|n| !self.shown.locked.contains(&n))
+    }
+
+    pub fn is_hidden(&self, item: Item) -> bool {
+        self.named(item)
+            .is_some_and(|n| self.shown.hidden.contains(&n))
+    }
+
+    pub fn is_locked(&self, item: Item) -> bool {
+        self.named(item)
+            .is_some_and(|n| self.shown.locked.contains(&n))
+    }
+
+    /// Every road, spline and prop.
+    pub fn all_items(&self) -> Vec<Item> {
+        let p = &self.project;
+        (0..p.roads.len())
+            .map(Item::Road)
+            .chain((0..p.splines.len()).map(Item::Spline))
+            .chain((0..p.props.len()).map(Item::Prop))
+            .collect()
+    }
+
+    /// Hides items, dropping them from the selection.
+    pub fn hide(&mut self, items: &[Item]) {
+        let names: Vec<Named> = items.iter().filter_map(|&i| self.named(i)).collect();
+        let n = names.len();
+        self.shown.hidden.extend(names);
+        let sel = &mut self.selection;
+        if sel.item.is_some_and(|i| items.contains(&i)) {
+            sel.item = None;
+            sel.nodes.clear();
+        }
+        sel.others.retain(|o| !items.contains(o));
+        if sel.item.is_none() {
+            sel.item = sel.others.pop();
+        }
+        self.status = format!("{n} hidden (Alt H shows them again)");
+    }
+
+    /// Hides or shows one item, as the outliner's eye.
+    pub fn toggle_hidden(&mut self, item: Item) {
+        if let Some(n) = self.named(item) {
+            if !self.shown.hidden.remove(&n) {
+                self.hide(&[item]);
+            }
+        }
+    }
+
+    pub fn toggle_locked(&mut self, item: Item) {
+        if let Some(n) = self.named(item)
+            && !self.shown.locked.remove(&n)
+        {
+            self.shown.locked.insert(n);
+        }
+    }
+
+    /// Shows everything hidden again, selecting it, as Blender's Alt H.
+    pub fn reveal(&mut self) {
+        let hidden = std::mem::take(&mut self.shown.hidden);
+        let items: Vec<Item> = self
+            .all_items()
+            .into_iter()
+            .filter(|&i| self.named(i).is_some_and(|n| hidden.contains(&n)))
+            .collect();
+        if !items.is_empty() {
+            let sel = &mut self.selection;
+            sel.nodes.clear();
+            for i in items.iter().copied() {
+                if sel.item.is_none() {
+                    sel.item = Some(i);
+                } else if !sel.has(i) {
+                    sel.others.push(i);
+                }
+            }
+        }
+        self.status = format!("{} shown again", items.len());
+    }
+
+    /// Local view: only the selected items, or back to everything.
+    pub fn toggle_local(&mut self) -> bool {
+        if self.shown.local.take().is_some() {
+            return false;
+        }
+        let items = self.selection.items();
+        if items.is_empty() {
+            self.status = "select what to look at on its own (numpad /)".into();
+            return false;
+        }
+        self.shown.local = Some(items.iter().filter_map(|&i| self.named(i)).collect());
+        true
+    }
+}
+
 /// Folder in a project's directory the backups are kept in.
 pub const BACKUPS: &str = ".backups";
 /// How often `project.ron` is backed up while it changes, and how many copies are kept.
@@ -509,6 +648,51 @@ mod tests {
                 outgoing: DVec3::X * 4.0
             }
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hiding_locking_and_local_view_follow_names() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-shown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        assert!(editor.apply(
+            vec![Op::AddRoad {
+                name: "pit".into(),
+                closed: false,
+                nodes: vec![DVec3::ZERO, DVec3::X * 50.0],
+                like: None,
+            }],
+            None
+        ));
+        editor.selection.select(Item::Road(1));
+        editor.hide(&[Item::Road(1)]);
+        assert!(!editor.visible(Item::Road(1)) && editor.visible(Item::Road(0)));
+        assert_eq!(editor.selection.item, None, "hidden, so not selected");
+        // Renaming another road does not change what is hidden.
+        assert!(editor.apply(
+            vec![Op::RenameRoad {
+                road: "circuit".into(),
+                to: "gp".into()
+            }],
+            None
+        ));
+        assert!(!editor.visible(Item::Road(1)));
+        editor.reveal();
+        assert!(editor.visible(Item::Road(1)));
+        assert_eq!(
+            editor.selection.item,
+            Some(Item::Road(1)),
+            "shown and selected"
+        );
+        editor.toggle_locked(Item::Road(0));
+        assert!(editor.visible(Item::Road(0)) && !editor.pickable(Item::Road(0)));
+        // Local view shows the selection alone.
+        assert!(editor.toggle_local());
+        assert!(editor.visible(Item::Road(1)) && !editor.visible(Item::Road(0)));
+        assert!(!editor.toggle_local());
+        assert!(editor.visible(Item::Road(0)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

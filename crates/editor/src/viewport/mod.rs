@@ -87,6 +87,8 @@ pub struct Orbit {
     pub walk: Option<f64>,
     /// Replaying the last test lap: how far into it, s. The view follows the car.
     pub replay: Option<f64>,
+    /// Where the view was before local view: focus, yaw, pitch and distance.
+    pub before_local: Option<(Vec3, f32, f32, f32)>,
 }
 
 impl Default for Orbit {
@@ -100,6 +102,7 @@ impl Default for Orbit {
             auto_ortho: false,
             walk: None,
             replay: None,
+            before_local: None,
         }
     }
 }
@@ -176,6 +179,9 @@ enum Target {
     Nodes {
         item: Item,
         start: Vec<(usize, Node)>,
+        /// With proportional editing, the line's other nodes and how far each is from
+        /// the nearest selected one, m.
+        around: Vec<(usize, Node, f64)>,
     },
     /// Several whole items, in object mode: every node of each line, and props.
     Many {
@@ -255,6 +261,14 @@ pub struct Modal {
     pub both: bool,
     /// What the grabbed node or end has caught on, to show it.
     pub snapped: std::sync::Mutex<Option<DVec3>>,
+}
+
+impl Modal {
+    /// Whether proportional editing applies: to nodes being moved, turned or scaled.
+    pub fn proportional(&self) -> bool {
+        matches!(self.target, Target::Nodes { .. })
+            && matches!(self.mode, Mode::Grab | Mode::Rotate | Mode::Scale)
+    }
 }
 
 /// What the draw tool is laying out.
@@ -424,6 +438,123 @@ impl Snapping {
     }
 }
 
+/// How a proportional edit's pull fades towards the edge of its reach, as Blender's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Falloff {
+    #[default]
+    Smooth,
+    Sphere,
+    Root,
+    Linear,
+    Sharp,
+    Constant,
+}
+
+impl Falloff {
+    pub const ALL: [Falloff; 6] = [
+        Falloff::Smooth,
+        Falloff::Sphere,
+        Falloff::Root,
+        Falloff::Linear,
+        Falloff::Sharp,
+        Falloff::Constant,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Falloff::Smooth => "Smooth",
+            Falloff::Sphere => "Sphere",
+            Falloff::Root => "Root",
+            Falloff::Linear => "Linear",
+            Falloff::Sharp => "Sharp",
+            Falloff::Constant => "Constant",
+        }
+    }
+
+    /// How much of the change a node `d` from the selection gets, with a reach of
+    /// `radius`: 1 at the selection, nothing at the edge and beyond.
+    pub fn weight(self, d: f64, radius: f64) -> f64 {
+        if radius <= 0.0 || d >= radius {
+            return 0.0;
+        }
+        let t = 1.0 - d / radius;
+        match self {
+            Falloff::Smooth => t * t * (3.0 - 2.0 * t),
+            Falloff::Sphere => (2.0 * t - t * t).max(0.0).sqrt(),
+            Falloff::Root => t.sqrt(),
+            Falloff::Linear => t,
+            Falloff::Sharp => t * t,
+            Falloff::Constant => 1.0,
+        }
+    }
+}
+
+/// Proportional editing (O): moving nodes pulls the others near them along, less the
+/// further away they are, so that a road's shape or its heights change smoothly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Proportional {
+    pub on: bool,
+    /// How far the pull reaches, m; the wheel changes it while transforming.
+    pub radius: f64,
+    pub falloff: Falloff,
+    /// Distances along the line rather than straight across: a road passing close by
+    /// on its way back is not pulled.
+    pub connected: bool,
+}
+
+impl Default for Proportional {
+    fn default() -> Self {
+        Self {
+            on: false,
+            radius: 60.0,
+            falloff: Falloff::Smooth,
+            connected: true,
+        }
+    }
+}
+
+/// How far each node of a line is from the nearest selected one: along the line
+/// through the nodes, or straight across. Selected nodes are 0 away.
+pub fn distances(nodes: &[Node], closed: bool, selected: &[usize], connected: bool) -> Vec<f64> {
+    let n = nodes.len();
+    if selected.is_empty() {
+        return vec![f64::INFINITY; n];
+    }
+    if !connected {
+        return nodes
+            .iter()
+            .map(|a| {
+                selected
+                    .iter()
+                    .map(|&i| a.pos.distance(nodes[i].pos))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect();
+    }
+    // Distance along the line to each node, and the whole loop's length.
+    let mut along = vec![0.0; n];
+    for i in 1..n {
+        along[i] = along[i - 1] + nodes[i - 1].pos.distance(nodes[i].pos);
+    }
+    let total = along[n - 1]
+        + if closed {
+            nodes[n - 1].pos.distance(nodes[0].pos)
+        } else {
+            0.0
+        };
+    (0..n)
+        .map(|j| {
+            selected
+                .iter()
+                .map(|&i| {
+                    let d = (along[j] - along[i]).abs();
+                    if closed { d.min(total - d) } else { d }
+                })
+                .fold(f64::INFINITY, f64::min)
+        })
+        .collect()
+}
+
 /// The state of the view's tools.
 #[derive(Resource, Default)]
 pub struct Tool {
@@ -448,6 +579,7 @@ pub struct Tool {
     /// Snap to the grid without holding Ctrl (Ctrl then frees).
     pub snap: bool,
     pub snapping: Snapping,
+    pub proportional: Proportional,
     /// What the view is doing, for the header.
     pub hint: String,
     /// A model to place with the next click.
@@ -500,6 +632,7 @@ impl Tool {
             overlays: self.overlays,
             snap: self.snap,
             snapping: self.snapping,
+            proportional: self.proportional,
             ..default()
         };
     }
@@ -644,6 +777,7 @@ mod tests {
             snap,
             free,
             snapping: Snapping::default(),
+            proportional: Proportional::default(),
         }
     }
 
@@ -1139,6 +1273,68 @@ mod tests {
             "{outgoing}"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn proportional_editing_pulls_the_nodes_near_along_the_line() {
+        let (mut editor, built, camera, t, dir) = top_down("proportional", DVec3::ZERO);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        let before = editor.project.roads[0].nodes.clone();
+        editor.selection.select_node(Item::Road(0), 1);
+        let mut tool = Tool::editing(true);
+        tool.proportional.on = true;
+        tool.proportional.falloff = Falloff::Linear;
+        // Node 1 is 250 m from 0 and ~171 m from 2; reach 300 m pulls both.
+        tool.proportional.radius = 300.0;
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            None,
+            Vec2::ZERO,
+            false,
+        );
+        tool.modal.as_mut().unwrap().axis = Axis::Y;
+        let m = tool.modal.as_ref().unwrap();
+        let mut g = pointer(view, Vec2::ZERO, Some(10.0), false, true);
+        g.proportional = tool.proportional;
+        let (ops, readout) = transform_ops(&editor, &built, m, &g);
+        assert!(readout.contains("proportional"), "{readout}");
+        assert!(editor.apply(ops, None));
+        let after = &editor.project.roads[0].nodes;
+        let dy = |i: usize| after[i].pos.y - before[i].pos.y;
+        assert!((dy(1) - 10.0).abs() < 1e-9);
+        let d0 = before[0].pos.distance(before[1].pos);
+        assert!(
+            (dy(0) - 10.0 * (1.0 - d0 / 300.0)).abs() < 1e-9,
+            "{}",
+            dy(0)
+        );
+        assert!(dy(2) > 0.0 && dy(2) < 10.0);
+        // Far along the loop: untouched.
+        assert_eq!(dy(5), 0.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn falloffs_run_from_all_to_nothing() {
+        for f in Falloff::ALL {
+            assert!((f.weight(0.0, 10.0) - 1.0).abs() < 1e-9, "{f:?}");
+            assert_eq!(f.weight(10.0, 10.0), 0.0);
+            let mid = f.weight(5.0, 10.0);
+            assert!((0.0..=1.0).contains(&mid));
+        }
+        let nodes: Vec<Node> = (0..5)
+            .map(|i| Node::at(i as f64 * 10.0, 0.0, 0.0))
+            .collect();
+        assert_eq!(
+            distances(&nodes, true, &[0], true),
+            vec![0.0, 10.0, 20.0, 30.0, 40.0]
+        );
     }
 
     #[test]

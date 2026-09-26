@@ -154,7 +154,7 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
                 continue;
             };
             let selected = sel.item == Some(item);
-            if !o.lines && !selected {
+            if (!o.lines && !selected) || !c.editor.visible(item) {
                 continue;
             }
             if let Some(at) = screen(shown_pos(c.editor, c.built, item, node.pos)) {
@@ -174,7 +174,10 @@ fn labels(ctx: &egui::Context, r: egui::Rect, c: &Ctx, view: View) {
             }
         }
         if o.props {
-            for prop in &p.props {
+            for (i, prop) in p.props.iter().enumerate() {
+                if !c.editor.visible(Item::Prop(i)) {
+                    continue;
+                }
                 let at = Placement::of(prop, c.built.ground.as_deref());
                 if let Some(s) = screen(at.pos) {
                     outlined(

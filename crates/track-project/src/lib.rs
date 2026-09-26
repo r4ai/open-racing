@@ -20,6 +20,7 @@ pub mod curve;
 pub mod dem;
 pub mod geo;
 pub mod inspect;
+pub mod lines;
 pub mod model;
 pub mod ops;
 pub mod overlap;

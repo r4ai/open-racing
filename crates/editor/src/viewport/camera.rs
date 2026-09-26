@@ -176,7 +176,9 @@ pub(super) fn camera_input(
             orbit_by(orbit, d.x * 0.005, d.y * 0.005);
         }
     }
-    if over.is_some() && scroll.delta.y != 0.0 {
+    // While transforming with proportional editing the wheel sets its reach.
+    let wheel_taken = tool.modal.is_some() && tool.proportional.on;
+    if over.is_some() && scroll.delta.y != 0.0 && !wheel_taken {
         orbit.distance =
             (orbit.distance * (1.0 - 0.1 * scroll.delta.y.signum())).clamp(2.0, 15_000.0);
     }
@@ -461,6 +463,18 @@ pub fn frame_selection(editor: &Editor, orbit: &mut Orbit) {
         return frame_all(editor, orbit);
     }
     frame(orbit, &points);
+}
+
+/// Numpad /: the selected items on their own, framed, or back to everything and the
+/// view as it was.
+pub fn toggle_local(editor: &mut Editor, orbit: &mut Orbit) {
+    if editor.toggle_local() {
+        orbit.before_local = Some((orbit.focus, orbit.yaw, orbit.pitch, orbit.distance));
+        frame_selection(editor, orbit);
+        editor.status = "local view: numpad / goes back".into();
+    } else if let Some((focus, yaw, pitch, distance)) = orbit.before_local.take() {
+        (orbit.focus, orbit.yaw, orbit.pitch, orbit.distance) = (focus, yaw, pitch, distance);
+    }
 }
 
 pub fn frame_all(editor: &Editor, orbit: &mut Orbit) {

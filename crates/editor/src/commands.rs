@@ -38,6 +38,14 @@ pub enum Cmd {
     ToggleSidebar,
     ToggleMaximize,
     ToggleSnap,
+    /// O: proportional editing.
+    ToggleProportional,
+    /// Numpad /: the selection on its own.
+    LocalView,
+    /// H, Shift H, Alt H.
+    Hide,
+    HideOthers,
+    Reveal,
     Shortcuts,
     ToggleEdit,
     SelectAll,
@@ -66,6 +74,11 @@ pub enum Cmd {
     HandleMenu,
     ToggleClosed,
     Duplicate,
+    /// Y: cut the line at the active node.
+    Split,
+    /// Ctrl J: join the selected lines onto the active one.
+    Join,
+    Reverse,
     SetMain,
     UseTool(ToolKind),
 }
@@ -103,6 +116,11 @@ impl Cmd {
             ToggleSidebar,
             ToggleMaximize,
             ToggleSnap,
+            ToggleProportional,
+            LocalView,
+            Hide,
+            HideOthers,
+            Reveal,
             Shortcuts,
             ToggleEdit,
             SelectAll,
@@ -129,6 +147,9 @@ impl Cmd {
             Handles(HandleMode::Free),
             ToggleClosed,
             Duplicate,
+            Split,
+            Join,
+            Reverse,
             SetMain,
         ];
         all.extend(ViewDir::ALL.map(View));
@@ -158,6 +179,11 @@ impl Cmd {
             ToggleSidebar => "Sidebar".into(),
             ToggleMaximize => "Maximize 3D View".into(),
             ToggleSnap => "Snapping".into(),
+            ToggleProportional => "Proportional Editing".into(),
+            LocalView => "Local View".into(),
+            Hide => "Hide Selected".into(),
+            HideOthers => "Hide Unselected".into(),
+            Reveal => "Reveal Hidden".into(),
             Shortcuts => "Keyboard Shortcuts".into(),
             ToggleEdit => "Edit Mode".into(),
             SelectAll => "Select All".into(),
@@ -186,6 +212,9 @@ impl Cmd {
             HandleMenu => "Set Handle Type…".into(),
             ToggleClosed => "Toggle Closed Loop".into(),
             Duplicate => "Duplicate".into(),
+            Split => "Split at Node".into(),
+            Join => "Join Lines".into(),
+            Reverse => "Switch Direction".into(),
             SetMain => "Make Main Road".into(),
             UseTool(t) => format!("Tool: {}", t.label()),
         }
@@ -200,10 +229,11 @@ impl Cmd {
                 "Select"
             }
             Grab | Rotate | Scale | Width | Tilt | Extrude | Subdivide | Delete | Handles(_)
-            | HandleMenu | ToggleClosed | Duplicate | SetMain | Rename | SmoothHeights
-            | SmoothShape | Flatten | EvenGrade => "Edit",
+            | HandleMenu | ToggleClosed | Duplicate | Split | Join | Reverse | SetMain | Rename
+            | SmoothHeights | SmoothShape | Flatten | EvenGrade => "Edit",
             View(_) | ToggleOrtho | Walk | Replay | FrameSelected | FrameAll | ViewPie
-            | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap => "View",
+            | ToggleToolbar | ToggleSidebar | ToggleMaximize | ToggleSnap | ToggleProportional
+            | LocalView | Hide | HideOthers | Reveal => "View",
             _ => "",
         };
         if menu.is_empty() {
@@ -230,6 +260,11 @@ impl Cmd {
             ToggleSidebar => "N",
             ToggleMaximize => "Ctrl Space",
             ToggleEdit => "Tab",
+            ToggleProportional => "O",
+            LocalView => "Numpad /",
+            Hide => "H",
+            HideOthers => "Shift H",
+            Reveal => "Alt H",
             SelectAll => "A",
             SelectNone => "Alt A",
             SelectInvert => "Ctrl I",
@@ -245,6 +280,8 @@ impl Cmd {
             HandleMenu => "V",
             ToggleClosed => "Alt C",
             Duplicate => "Shift D",
+            Split => "Y",
+            Join => "Ctrl J",
             _ => "",
         }
     }
@@ -260,7 +297,9 @@ impl Cmd {
             Redo => e.can_redo(),
             Bake | BakeDrive => !c.jobs.running(),
             Replay => !c.jobs.lap.is_empty(),
-            Rename | Grab | Rotate | Scale | Delete => sel.item.is_some(),
+            Rename | Grab | Rotate | Scale | Delete | Hide | HideOthers => sel.item.is_some(),
+            LocalView => sel.item.is_some() || e.shown.local.is_some(),
+            Reveal => !e.shown.hidden.is_empty(),
             FrameSelected => sel.item.is_some(),
             ToggleEdit => line || c.tool.edit,
             SelectAll | SelectNone | SelectInvert | SelectMore | SelectLess => line && c.tool.edit,
@@ -268,7 +307,10 @@ impl Cmd {
             EvenGrade => line && sel.nodes.len() >= 2,
             Extrude | Handles(_) | HandleMenu => node,
             Width | Tilt => sel.road().is_some(),
-            Duplicate => matches!(sel.item, Some(Item::Spline(_) | Item::Prop(_))),
+            Duplicate => sel.item.is_some(),
+            Split => node,
+            Join => line && !sel.others.is_empty(),
+            Reverse => line,
             SetMain => e.road_name().is_some_and(|r| r != e.project.main_road),
             _ => true,
         }
@@ -285,6 +327,8 @@ impl Cmd {
             ToggleSidebar => Some(c.shell.sidebar),
             ToggleMaximize => Some(c.shell.maximized),
             ToggleSnap => Some(c.tool.snap),
+            ToggleProportional => Some(c.tool.proportional.on),
+            LocalView => Some(c.editor.shown.local.is_some()),
             UseTool(t) => Some(c.tool.active == t),
             ToggleEdit => Some(c.tool.edit),
             _ => None,
@@ -350,6 +394,23 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         ToggleSidebar => c.shell.sidebar = !c.shell.sidebar,
         ToggleMaximize => c.shell.maximized = !c.shell.maximized,
         ToggleSnap => c.tool.snap = !c.tool.snap,
+        ToggleProportional => c.tool.proportional.on = !c.tool.proportional.on,
+        LocalView => viewport::toggle_local(c.editor, c.orbit),
+        Hide => {
+            let items = c.editor.selection.items();
+            c.editor.hide(&items);
+        }
+        HideOthers => {
+            let sel = c.editor.selection.items();
+            let others: Vec<Item> = c
+                .editor
+                .all_items()
+                .into_iter()
+                .filter(|i| !sel.contains(i))
+                .collect();
+            c.editor.hide(&others);
+        }
+        Reveal => c.editor.reveal(),
         Shortcuts => c.shell.shortcuts = !c.shell.shortcuts,
         ToggleEdit => viewport::toggle_edit(c.editor, c.tool),
         SelectAll => viewport::select_all(c.editor),
@@ -385,6 +446,9 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         HandleMenu => c.shell.popup = Some(Popup::Handles { at }),
         ToggleClosed => edit::toggle_closed(c.editor),
         Duplicate => viewport::duplicate(c.editor, c.tool, c.built, at),
+        Split => edit::split(c.editor),
+        Join => edit::join(c.editor),
+        Reverse => edit::reverse(c.editor),
         SetMain => edit::set_main(c.editor),
         UseTool(t) => c.tool.active = t,
     }
@@ -458,6 +522,8 @@ pub fn shortcuts(ctx: &egui::Context, c: &mut Ctx, over_view: bool) {
         run_if(Cmd::HandleMenu, Key::V, none, c);
         run_if(Cmd::ToggleClosed, Key::C, Modifiers::ALT, c);
         run_if(Cmd::SelectInvert, Key::I, Modifiers::COMMAND, c);
+        run_if(Cmd::Join, Key::J, Modifiers::COMMAND, c);
+        run_if(Cmd::Split, Key::Y, none, c);
         run_if(Cmd::ViewPie, Key::Backtick, none, c);
     }
 }

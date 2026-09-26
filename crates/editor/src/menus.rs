@@ -93,6 +93,14 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 }
                 ui.menu_button("⏷", |ui| {
                     ui.set_min_width(230.0);
+                    crate::sidebar::proportional_ui(ui, c);
+                })
+                .response
+                .on_hover_text("Proportional editing: reach and falloff");
+                ui.toggle_value(&mut c.tool.proportional.on, "◎")
+                    .on_hover_text("Proportional editing (O): nodes near those moved follow");
+                ui.menu_button("⏷", |ui| {
+                    ui.set_min_width(230.0);
                     crate::sidebar::snapping_ui(ui, c);
                 })
                 .response
@@ -115,6 +123,11 @@ fn view_menu(ui: &mut egui::Ui, c: &mut Ctx) {
     ui.separator();
     entry(ui, c, Cmd::FrameSelected);
     entry(ui, c, Cmd::FrameAll);
+    entry(ui, c, Cmd::LocalView);
+    ui.separator();
+    entry(ui, c, Cmd::Hide);
+    entry(ui, c, Cmd::HideOthers);
+    entry(ui, c, Cmd::Reveal);
     ui.separator();
     ui.menu_button("Viewpoint", |ui| {
         for v in ViewDir::ALL {
@@ -175,6 +188,10 @@ fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
         entry(ui, c, cmd);
     }
     ui.separator();
+    for cmd in [Cmd::Split, Cmd::Reverse] {
+        entry(ui, c, cmd);
+    }
+    ui.separator();
     ui.menu_button("Handle Type", |ui| {
         for m in [HandleMode::Auto, HandleMode::Aligned, HandleMode::Free] {
             commands::button_as(ui, c, Cmd::Handles(m), commands::handle_label(m));
@@ -187,6 +204,10 @@ fn object_menu(ui: &mut egui::Ui, c: &mut Ctx, item: Item) {
     ui.set_min_width(200.0);
     entry(ui, c, Cmd::Rename);
     entry(ui, c, Cmd::Duplicate);
+    if !matches!(item, Item::Prop(_)) {
+        entry(ui, c, Cmd::Join);
+        entry(ui, c, Cmd::Reverse);
+    }
     if matches!(item, Item::Road(_)) {
         entry(ui, c, Cmd::SetMain);
         ui.separator();

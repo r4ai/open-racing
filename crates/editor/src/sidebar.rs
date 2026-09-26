@@ -244,9 +244,49 @@ fn tool_tab(ui: &mut egui::Ui, c: &mut Ctx) {
     section(ui, "Snapping", "sidebar snap", true, |ui| {
         snapping_ui(ui, c);
     });
+    section(
+        ui,
+        "Proportional Editing",
+        "sidebar proportional",
+        true,
+        |ui| {
+            proportional_ui(ui, c);
+        },
+    );
     section(ui, "Draw", "sidebar draw", true, |ui| {
         ui.weak("Shift A in the view, or the toolbar, draws a road, kerb, wall or fence: click points, Enter finishes. Kerbs snap to road edges (Ctrl: free).");
     });
+}
+
+/// Proportional editing: on or off, its reach, falloff and how distance is measured.
+pub fn proportional_ui(ui: &mut egui::Ui, c: &mut Ctx) {
+    let p = &mut c.tool.proportional;
+    ui.checkbox(&mut p.on, "On (O)").on_hover_text(
+        "Moving, turning or scaling nodes pulls the nodes near them along, less the further they are",
+    );
+    row(ui, "Reach", |ui| {
+        let w = ui.available_width().max(40.0);
+        ui.add_sized(
+            [w, ui.spacing().interact_size.y],
+            egui::DragValue::new(&mut p.radius)
+                .speed(0.5)
+                .range(0.5..=20_000.0)
+                .suffix(" m"),
+        )
+    })
+    .on_hover_text("The wheel or Page Up/Down changes it while moving");
+    row(ui, "Falloff", |ui| {
+        egui::ComboBox::from_id_salt("falloff")
+            .selected_text(p.falloff.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for f in crate::viewport::Falloff::ALL {
+                    ui.selectable_value(&mut p.falloff, f, f.label());
+                }
+            });
+    });
+    ui.checkbox(&mut p.connected, "Along the line")
+        .on_hover_text("Measure distance along the road or spline, not straight across");
 }
 
 /// The steps transforms snap to, and what dragged nodes and stretch ends catch on.

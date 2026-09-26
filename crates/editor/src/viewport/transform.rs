@@ -141,17 +141,28 @@ pub fn start_modal(
                 return;
             };
             let picked = editor.picked_nodes();
-            let Some((_, nodes, _)) = editor.line() else {
+            let Some((_, nodes, closed)) = editor.line() else {
                 return;
+            };
+            let prop = tool.proportional;
+            let around = if prop.on && mode != Mode::Width && mode != Mode::Tilt {
+                let d = distances(nodes, closed, &picked, prop.connected);
+                (0..nodes.len())
+                    .filter(|i| !picked.contains(i))
+                    .map(|i| (i, nodes[i], d[i]))
+                    .collect()
+            } else {
+                vec![]
             };
             Target::Nodes {
                 item,
                 start: picked.into_iter().map(|i| (i, nodes[i])).collect(),
+                around,
             }
         }
     };
     let (mode, pivot) = match &target {
-        Target::Nodes { item, start } => {
+        Target::Nodes { item, start, .. } => {
             let c = start.iter().map(|(_, n)| n.pos).sum::<DVec3>() / start.len().max(1) as f64;
             let active = editor
                 .selection
@@ -245,12 +256,27 @@ pub(super) fn modal(
     view: View,
     buttons: &ButtonInput<MouseButton>,
     keys: &ButtonInput<KeyCode>,
+    wheel: f32,
     at: Vec2,
     shift: bool,
     ctrl: bool,
 ) {
     let snap = tool.snap != ctrl;
     let m = tool.modal.as_mut().expect("a transform is running");
+    // The wheel or Page Up and Down change a proportional edit's reach; O switches it.
+    let prop = &mut tool.proportional;
+    if let Target::Nodes { around, .. } = &m.target {
+        let grow = keys.just_pressed(KeyCode::PageUp) as i32
+            - keys.just_pressed(KeyCode::PageDown) as i32
+            + wheel.signum() as i32;
+        if prop.on && grow != 0 {
+            prop.radius = (prop.radius * 1.15f64.powi(grow)).clamp(0.5, 20_000.0);
+        }
+        if keys.just_pressed(KeyCode::KeyO) && !around.is_empty() {
+            prop.on = !prop.on;
+        }
+    }
+    let prop = *prop;
     // Axes: pressing one again frees it.
     for (k, a) in [
         (KeyCode::KeyX, Axis::X),
@@ -294,6 +320,7 @@ pub(super) fn modal(
         snap,
         free: ctrl,
         snapping: tool.snapping,
+        proportional: prop,
     };
     let (ops, readout) = transform_ops(editor, built, m, &pointer);
     let label = match m.mode {
@@ -311,6 +338,9 @@ pub(super) fn modal(
         Mode::Width => "X left only · Y right only",
         Mode::Tilt => "",
         _ if edge => "B both sides",
+        _ if matches!(m.target, Target::Nodes { .. }) => {
+            "X/Y/Z axis · O proportional · wheel reach"
+        }
         _ => "X/Y/Z axis",
     };
     tool.hint = format!(
@@ -360,6 +390,7 @@ pub(super) struct Gesture<'a> {
     /// Ctrl held: nothing catches.
     pub free: bool,
     pub snapping: Snapping,
+    pub proportional: Proportional,
 }
 
 impl Gesture<'_> {
@@ -437,7 +468,12 @@ pub(super) fn transform_ops(
 
 /// Selected nodes of a road or spline moved, turned or scaled; one grabbed alone catches on what is near.
 fn nodes_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>, String) {
-    let Target::Nodes { item, start } = &m.target else {
+    let Target::Nodes {
+        item,
+        start,
+        around,
+    } = &m.target
+    else {
         return (vec![], String::new());
     };
     let Gesture { typed, free, .. } = *p;
@@ -477,6 +513,36 @@ fn nodes_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
         });
         ops.extend(turned_handles(name, index, node, &change));
     }
+    // With proportional editing the nodes near the selection follow, less the further
+    // they are.
+    let prop = p.proportional;
+    let mut pulled = 0;
+    for &(index, node, d) in around.iter().filter(|_| prop.on) {
+        let w = prop.falloff.weight(d, prop.radius);
+        if w <= 0.0 {
+            continue;
+        }
+        pulled += 1;
+        let part = change.part(w);
+        let mut pos = part.point(node.pos);
+        if let Some(g) = ground {
+            pos = drape(Some(g), pos.with_z(node.pos.z.max(pos.z)));
+        }
+        ops.push(Op::MoveNode {
+            line: name.to_string(),
+            index,
+            pos,
+        });
+        ops.extend(turned_handles(name, index, node, &part));
+    }
+    let readout = if prop.on {
+        format!(
+            "{readout} · proportional {:.0} m ({pulled} more)",
+            prop.radius
+        )
+    } else {
+        readout
+    };
     let readout = match snapped {
         Some(what) => format!("{readout} → on {what}"),
         None => readout,
@@ -955,6 +1021,16 @@ impl Change {
 
     pub fn point(&self, p: DVec3) -> DVec3 {
         self.pivot + self.vector(p - self.pivot) + self.shift
+    }
+
+    /// The change done `w` of the way (0 nothing, 1 all of it).
+    pub fn part(&self, w: f64) -> Self {
+        Self {
+            pivot: self.pivot,
+            shift: self.shift * w,
+            angle: self.angle * w,
+            scale: DVec3::ONE + (self.scale - DVec3::ONE) * w,
+        }
     }
 }
 

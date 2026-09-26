@@ -70,6 +70,31 @@ pub enum Op {
     SetMainRoad {
         road: String,
     },
+    /// Adds a road as given, or replaces the one of the same name.
+    PutRoad {
+        road: Road,
+    },
+
+    /// Cuts a road or spline at node `at`: an open line becomes two, itself up to the
+    /// node and `to` from it on; a loop opens there (`to` is not used). What lies along
+    /// a road stays where it was.
+    SplitLine {
+        line: String,
+        at: usize,
+        #[serde(default)]
+        to: String,
+    },
+    /// Joins open line `with` onto the end of open line `line` (turning either round as
+    /// needed so that their nearest ends meet), and removes `with`.
+    JoinLines {
+        line: String,
+        with: String,
+    },
+    /// Turns a road or spline round, to run the other way: a road's left and right,
+    /// banking and corner entries and exits swap with it.
+    ReverseLine {
+        line: String,
+    },
 
     /// Adds a node to a road or spline (`line` names either) before node `before`, or
     /// at the end.
@@ -532,6 +557,10 @@ impl Op {
                 }
                 p.main_road = road;
             }
+            Op::PutRoad { road } => put(&mut p.roads, road, |r| &r.name, None),
+            Op::SplitLine { line, at, to } => crate::lines::split(p, &line, at, &to)?,
+            Op::JoinLines { line, with } => crate::lines::join(p, &line, &with)?,
+            Op::ReverseLine { line } => crate::lines::reverse(p, &line)?,
             Op::AddNode { line, pos, before } => {
                 let mut l = line_mut(p, &line)?;
                 let node = Node::new(pos);
@@ -881,6 +910,10 @@ impl Op {
             Op::RenameRoad { .. } => "RenameRoad",
             Op::SetRoad { .. } => "SetRoad",
             Op::SetMainRoad { .. } => "SetMainRoad",
+            Op::PutRoad { .. } => "PutRoad",
+            Op::SplitLine { .. } => "SplitLine",
+            Op::JoinLines { .. } => "JoinLines",
+            Op::ReverseLine { .. } => "ReverseLine",
             Op::AddNode { .. } => "AddNode",
             Op::MoveNode { .. } => "MoveNode",
             Op::SetNodeHandles { .. } => "SetNodeHandles",

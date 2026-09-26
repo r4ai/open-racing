@@ -82,6 +82,9 @@ pub(super) fn pick(
     }
     // Props, by where they stand.
     for (i, prop) in editor.project.props.iter().enumerate() {
+        if !editor.pickable(Item::Prop(i)) {
+            continue;
+        }
         let at = Placement::of(prop, built.ground.as_deref());
         if near(at.pos + DVec3::Z * LIFT, 1.5 * PICK_RADIUS).is_some() {
             return Some(Hit::Body(Item::Prop(i)));
@@ -268,7 +271,7 @@ pub(super) fn body_at(editor: &Editor, built: &Built, p: DVec3) -> Option<Item> 
         .zip(&built.splines)
         .enumerate()
     {
-        if smp.frames.is_empty() {
+        if smp.frames.is_empty() || !editor.pickable(Item::Spline(i)) {
             continue;
         }
         let half = match &sp.shape {
@@ -286,7 +289,7 @@ pub(super) fn body_at(editor: &Editor, built: &Built, p: DVec3) -> Option<Item> 
     }
     let mut best: Option<(usize, f64)> = None;
     for (i, smp) in built.roads.iter().enumerate() {
-        if smp.frames.is_empty() {
+        if smp.frames.is_empty() || !editor.pickable(Item::Road(i)) {
             continue;
         }
         let (d, f) = lateral(smp);

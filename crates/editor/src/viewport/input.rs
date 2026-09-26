@@ -97,7 +97,18 @@ pub fn input(
     // A transform in progress takes every input.
     if tool.modal.is_some() {
         let at = anywhere.unwrap_or_else(|| tool.modal.as_ref().expect("a transform").last_cursor);
-        modal(editor, tool, &built, view, &buttons, &keys, at, shift, ctrl);
+        modal(
+            editor,
+            tool,
+            &built,
+            view,
+            &buttons,
+            &keys,
+            scroll.delta.y,
+            at,
+            shift,
+            ctrl,
+        );
         return;
     }
 
@@ -259,6 +270,31 @@ pub fn input(
         if tool.edit {
             select_all(editor);
         }
+    } else if pressed(KeyCode::KeyH) && alt {
+        editor.reveal();
+    } else if pressed(KeyCode::KeyH) && shift {
+        let sel = editor.selection.items();
+        let others: Vec<Item> = editor
+            .all_items()
+            .into_iter()
+            .filter(|i| !sel.contains(i))
+            .collect();
+        editor.hide(&others);
+    } else if pressed(KeyCode::KeyH) && !ctrl {
+        let sel = editor.selection.items();
+        editor.hide(&sel);
+    } else if pressed(KeyCode::NumpadDivide) || pressed(KeyCode::Slash) {
+        toggle_local(editor, &mut orbit);
+    } else if pressed(KeyCode::KeyO) && !ctrl && !alt {
+        tool.proportional.on = !tool.proportional.on;
+        editor.status = format!(
+            "proportional editing {}",
+            if tool.proportional.on {
+                "on: the wheel sets its reach while moving"
+            } else {
+                "off"
+            }
+        );
     } else if pressed(KeyCode::KeyX) || pressed(KeyCode::Delete) {
         delete_selected(editor, tool);
     } else if pressed(KeyCode::NumpadAdd) && ctrl {
@@ -363,10 +399,14 @@ pub(super) fn box_select(
     // Every line with nodes in the box, and every prop standing in it; the line with
     // most nodes in it active, unless adding to what is selected.
     let mut found: Vec<(Item, usize)> = items(editor)
+        .filter(|&i| editor.pickable(i))
         .map(|i| (i, inside(i).len()))
         .filter(|&(_, n)| n > 0)
         .collect();
     for (i, prop) in editor.project.props.iter().enumerate() {
+        if !editor.pickable(Item::Prop(i)) {
+            continue;
+        }
         let at = Placement::of(prop, built.ground.as_deref()).pos;
         if view
             .screen(at + DVec3::Z * LIFT)
@@ -585,31 +625,56 @@ pub fn extrude(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
     }
 }
 
-/// Shift + D: a copy of the selected spline or prop, grabbed.
+/// Shift + D: copies of the selected roads, splines and props, grabbed together.
 pub fn duplicate(editor: &mut Editor, tool: &mut Tool, built: &Built, at: Vec2) {
-    let p = &editor.project;
-    let (op, item) = match editor.selection.item {
-        Some(Item::Spline(s)) if s < p.splines.len() => {
-            let mut copy = p.splines[s].clone();
-            copy.name = unique_name(p, &copy.name);
-            (
-                Op::PutSpline { spline: copy },
-                Item::Spline(p.splines.len()),
-            )
+    let items = editor.selection.items();
+    if items.is_empty() {
+        editor.status = "select a road, spline or prop to duplicate".into();
+        return;
+    }
+    // Each copy's name taken before the next is made, so that none clash.
+    let mut project = editor.project.clone();
+    let mut ops = Vec::new();
+    let mut copies = Vec::new();
+    for item in items {
+        let p = &project;
+        let op = match item {
+            Item::Road(r) if r < p.roads.len() => {
+                let mut copy = p.roads[r].clone();
+                copy.name = unique_name(p, &copy.name);
+                copies.push(Item::Road(p.roads.len()));
+                Op::PutRoad { road: copy }
+            }
+            Item::Spline(s) if s < p.splines.len() => {
+                let mut copy = p.splines[s].clone();
+                copy.name = unique_name(p, &copy.name);
+                copies.push(Item::Spline(p.splines.len()));
+                Op::PutSpline { spline: copy }
+            }
+            Item::Prop(i) if i < p.props.len() => {
+                let mut copy = p.props[i].clone();
+                copy.name = unique_prop_name(p, &copy.name);
+                copies.push(Item::Prop(p.props.len()));
+                Op::PutProp { prop: copy }
+            }
+            _ => continue,
+        };
+        if op.apply(&mut project).is_err() {
+            continue;
         }
-        Some(Item::Prop(i)) if i < p.props.len() => {
-            let mut copy = p.props[i].clone();
-            copy.name = unique_prop_name(p, &copy.name);
-            (Op::PutProp { prop: copy }, Item::Prop(p.props.len()))
-        }
-        _ => {
-            editor.status = "select a spline or prop to duplicate".into();
-            return;
-        }
-    };
+        ops.push(op);
+    }
     editor.begin_drag();
-    if editor.apply(vec![op], None) {
-        editor.selection.select(item);
+    if editor.apply(ops, None) {
+        editor.selection = Default::default();
+        for item in copies {
+            if editor.selection.item.is_none() {
+                editor.selection.select(item);
+            } else {
+                editor.selection.others.push(item);
+            }
+        }
+        tool.edit = false;
         start_modal(editor, tool, built, Mode::Grab, None, at, false);
     } else {
         editor.cancel_drag();

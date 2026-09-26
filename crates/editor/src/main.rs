@@ -245,6 +245,7 @@ fn main() {
             viewport::view_input,
             preview::rebuild,
             preview::props,
+            preview::show_items,
             jobs::poll,
             viewport::gizmos,
             viewport::place_camera,

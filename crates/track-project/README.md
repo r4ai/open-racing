@@ -162,6 +162,10 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RenameRoad` | `road`, `to` | renames a road and every reference to it |
 | `SetRoad` | `road`, `closed?`, `crown?`, `surface?`, `material?`, `resolution?` | sets the given properties |
 | `SetMainRoad` | `road` | makes that road the main road; the start line moves to its first node and the sectors split it evenly |
+| `PutRoad` | `road` | adds a road as given (every field of `project.ron`'s roads), or replaces the one with the same name |
+| `SplitLine` | `line`, `at`, `to?` | cuts a road or spline at node `at`: an open line becomes two, itself up to the node and `to` from it on; a loop opens there. What lies along a road stays where it was |
+| `JoinLines` | `line`, `with` | joins open line `with` onto the end of open line `line`, turning either round so that their nearest ends meet; strips, lines and barriers of the same name run on across the join |
+| `ReverseLine` | `line` | turns a road or spline round: a road's left and right, banking, and corner entries and exits swap with it |
 
 **Nodes**
 

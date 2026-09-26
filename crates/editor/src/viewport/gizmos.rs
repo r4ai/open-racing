@@ -24,7 +24,7 @@ pub fn gizmos(
             continue;
         };
         let selected = sel.item == Some(item);
-        if !overlays.lines && !sel.has(item) {
+        if (!overlays.lines && !sel.has(item)) || !editor.visible(item) {
             continue;
         }
         let hovered_body = hover == Some(Hit::Body(item)) || tool.outliner_hover == Some(item);
@@ -189,7 +189,7 @@ pub fn gizmos(
     for (i, prop) in p.props.iter().enumerate() {
         let at = Placement::of(prop, built.ground.as_deref());
         let item = Item::Prop(i);
-        if !overlays.props && sel.item != Some(item) {
+        if (!overlays.props && sel.item != Some(item)) || !editor.visible(item) {
             continue;
         }
         let color = if sel.item == Some(item) {
@@ -404,6 +404,21 @@ pub fn gizmos(
             Isometry3d::new(c, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
             1.4 * r,
             theme::SNAP.with_alpha(0.5),
+        );
+    }
+
+    // How far a proportional edit reaches.
+    if let Some(m) = &tool.modal
+        && tool.proportional.on
+        && m.proportional()
+    {
+        gizmos.circle(
+            Isometry3d::new(
+                lift(m.pivot),
+                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            ),
+            tool.proportional.radius as f32,
+            Color::srgba(1.0, 1.0, 1.0, 0.6),
         );
     }
 

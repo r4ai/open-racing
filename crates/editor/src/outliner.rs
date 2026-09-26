@@ -153,11 +153,40 @@ fn item_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item, icon:
         }
         return;
     }
+    // Blender's eye and lock: hidden from the view, or shown but not picked there.
+    let hidden = c.editor.is_hidden(item);
+    let eye = egui::Button::new(if hidden { "◌" } else { "👁" }).frame(false);
+    if ui
+        .add(eye)
+        .on_hover_text(if hidden {
+            "Show (Alt H shows all)"
+        } else {
+            "Hide (H)"
+        })
+        .clicked()
+    {
+        c.editor.toggle_hidden(item);
+    }
+    let locked = c.editor.is_locked(item);
+    let lock = egui::Button::new(if locked { "🔒" } else { "🔓" }).frame(false);
+    if ui
+        .add(lock)
+        .on_hover_text(if locked {
+            "Locked: not picked in the view. Click to unlock"
+        } else {
+            "Lock: not picked in the view (still selectable here)"
+        })
+        .clicked()
+    {
+        c.editor.toggle_locked(item);
+    }
     let selected = c.editor.selection.item == Some(item);
     let text = if selected {
         egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_UI)
     } else if c.editor.selection.has(item) {
         egui::RichText::new(format!("{icon} {name}")).color(crate::theme::SELECTED_OTHER_UI)
+    } else if hidden {
+        egui::RichText::new(format!("{icon} {name}")).weak()
     } else {
         egui::RichText::new(format!("{icon} {name}"))
     };
