@@ -684,7 +684,7 @@ fn shape_parts(
                 .and_then(|h| {
                     let as_plant = plant.materials.get(slot)?.varies;
                     let mut material = materials.get(h)?.clone();
-                    material.extension.set_varies(as_plant);
+                    render::set_varies(&mut material, as_plant);
                     Some(materials.add(material))
                 });
             let material = project

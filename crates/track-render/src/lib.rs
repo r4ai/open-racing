@@ -221,6 +221,19 @@ impl TrackExtension {
     }
 }
 
+/// How much of the light falling on a plant's leaves they let through to the other
+/// side: thin leaves glow with the sun behind them.
+const LEAF_TRANSMISSION: f32 = 0.4;
+
+/// Makes a material vary from copy to copy as `varies` says (see
+/// `TrackExtension::set_varies`): a plant's leaves, which take each copy's colour and
+/// move in the wind, let light through too.
+pub fn set_varies(material: &mut TrackMaterial, varies: Option<Varies>) {
+    material.extension.set_varies(varies);
+    let leaves = varies.is_some_and(|v| v.tinted && (v.sway > 0.0 || v.flutter > 0.0));
+    material.base.diffuse_transmission = if leaves { LEAF_TRANSMISSION } else { 0.0 };
+}
+
 impl From<&TrackExtension> for TrackParams {
     fn from(extension: &TrackExtension) -> Self {
         extension.params.clone()
@@ -626,7 +639,6 @@ pub fn add_materials(
                 ..default()
             };
             extension.params.reflection = m.reflection;
-            extension.set_varies(m.varies);
             if m.impostor {
                 extension.params.flags |= IMPOSTOR;
             }
@@ -664,7 +676,9 @@ pub fn add_materials(
                     extension.layer_a,
                 ] = std::array::from_fn(|i| layer(i).and_then(|l| images.get(l.texture, true)));
             }
-            materials.add(TrackMaterial { base, extension })
+            let mut material = TrackMaterial { base, extension };
+            set_varies(&mut material, m.varies);
+            materials.add(material)
         })
         .collect()
 }
