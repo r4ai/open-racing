@@ -347,33 +347,29 @@ fn name_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item) {
     }
 }
 
-/// A stretch of a node's length round node `n`, or along the whole road without one.
-/// On an open road it stops at the ends; on a closed one it may run across the start.
-fn stretch_round(node: Option<usize>, period: f64, closed: bool) -> Vec<Range> {
-    let Some(n) = node else {
-        return vec![];
-    };
-    let u = n as f64;
-    let range = if closed {
-        Range {
-            from: (u - 0.5).rem_euclid(period.max(1.0)),
-            to: (u + 0.5).rem_euclid(period.max(1.0)),
-        }
-    } else {
-        Range {
-            from: (u - 0.5).max(0.0),
-            to: (u + 0.5).min(period),
-        }
-    };
-    vec![range]
+/// The stretch the selected nodes span (a node's length round one alone), or the whole
+/// road without any. On an open road it stops at the ends; on a closed one it may run
+/// across the start.
+fn stretch_round(nodes: &[usize], period: f64, closed: bool) -> Vec<Range> {
+    let count = period.round() as usize + usize::from(!closed);
+    crate::lay::span(nodes, count, closed).unwrap_or_default()
 }
 
-/// Stretches of the road, in spline parameters, with a button to add one round the
-/// selected node.
+/// Where a part added now goes along the road, in words.
+fn where_laid(picked: &[usize]) -> String {
+    match picked {
+        [] => "Along the whole road".into(),
+        [n] => format!("Round node {n}"),
+        _ => format!("Over the {} selected nodes", picked.len()),
+    }
+}
+
+/// Stretches of the road, in spline parameters, with a button to add one over the
+/// selected nodes.
 fn ranges_ui(
     ui: &mut egui::Ui,
     ranges: &mut Vec<Range>,
-    node: Option<usize>,
+    picked: &[usize],
     period: f64,
     closed: bool,
 ) -> bool {
@@ -413,9 +409,10 @@ fn ranges_ui(
         ranges.remove(i);
         changed = true;
     }
-    let label = match node {
-        Some(n) => format!("+ Stretch round node {n}"),
-        None => "+ Stretch".into(),
+    let label = match picked {
+        [] => "+ Stretch".to_string(),
+        [n] => format!("+ Stretch round node {n}"),
+        _ => format!("+ Stretch over the {} selected nodes", picked.len()),
     };
     row(ui, "", |ui| {
         if ui
@@ -423,7 +420,8 @@ fn ranges_ui(
             .on_hover_text("Limit it to part of the road; drag the ends in the view")
             .clicked()
         {
-            ranges.extend(stretch_round(Some(node.unwrap_or(0)), period, closed));
+            let picked = if picked.is_empty() { &[0][..] } else { picked };
+            ranges.extend(stretch_round(picked, period, closed));
             changed = true;
         }
     });

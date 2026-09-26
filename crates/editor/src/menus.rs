@@ -190,6 +190,13 @@ fn node_menu(ui: &mut egui::Ui, c: &mut Ctx) {
     for cmd in [Cmd::Extrude, Cmd::Subdivide, Cmd::Delete] {
         entry(ui, c, cmd);
     }
+    if c.editor.selection.road().is_some() {
+        ui.menu_button("Lay Along Selected Nodes", |ui| {
+            if crate::lay::menu(ui, c) {
+                ui.close();
+            }
+        });
+    }
     ui.separator();
     for cmd in [
         Cmd::SmoothShape,
@@ -333,6 +340,11 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 }
             });
             used |= command(ui, c, Cmd::SelectAll);
+            if matches!(it, Item::Road(_)) {
+                ui.menu_button("Lay Along Selected Nodes", |ui| {
+                    used |= crate::lay::menu(ui, c);
+                });
+            }
             ui.separator();
             used |= commands::button_as(ui, c, Cmd::Delete, "Delete Nodes");
         }
@@ -462,7 +474,14 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
 /// true once one is used.
 fn add_items(ui: &mut egui::Ui, c: &mut Ctx) -> bool {
     ui.set_min_width(170.0);
-    let mut used = command(ui, c, Cmd::DrawRoad);
+    let mut used = false;
+    if crate::lay::can_lay(c) {
+        ui.menu_button("Along the Selected Nodes", |ui| {
+            used |= crate::lay::menu(ui, c);
+        });
+        ui.separator();
+    }
+    used |= command(ui, c, Cmd::DrawRoad);
     ui.separator();
     for i in 0..presets::list(&c.editor.project).len() {
         used |= command(ui, c, Cmd::DrawSpline(i));

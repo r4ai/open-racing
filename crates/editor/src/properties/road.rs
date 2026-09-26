@@ -153,6 +153,7 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     let (surfaces, materials) = names(&c.editor.project);
     let (strip_styles, _) = style_names(&c.editor.project);
     let node = c.editor.selection.node();
+    let picked = c.editor.selection.nodes.clone();
     let period = road.period();
     ui.weak("Bands beside the road, from its edge outwards: kerbs, run-off, gravel, verges.");
     for side in [Side::Left, Side::Right] {
@@ -262,7 +263,7 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                                 s.style = None;
                                 changed = true;
                             }
-                            changed |= ranges_ui(ui, &mut s.ranges, node, period, road.closed);
+                            changed |= ranges_ui(ui, &mut s.ranges, &picked, period, road.closed);
                             removed = row(ui, "", |ui| ui.button("Remove strip").clicked());
                         });
                 if open.is_some() {
@@ -312,16 +313,17 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                 for style in styles {
                     if ui
                         .small_button(format!("+ {}", style.name))
-                        .on_hover_text(match node {
-                            Some(n) => format!("Round node {n}; drag its ends in the view"),
-                            None => "Along the whole road".into(),
-                        })
+                        .on_hover_text(format!(
+                            "{}; drag its ends in the view",
+                            where_laid(&picked)
+                        ))
                         .clicked()
                     {
                         let sname = crate::presets::free_name(&style.name, |n| {
                             strips.iter().any(|s| s.name == n)
                         });
-                        let strip = style.strip(&sname, stretch_round(node, period, road.closed));
+                        let strip =
+                            style.strip(&sname, stretch_round(&picked, period, road.closed));
                         // Kerbs go against the road; the rest outermost.
                         let kerb =
                             c.editor
@@ -356,6 +358,7 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
     let name = road.name.clone();
     let (_, materials) = names(&c.editor.project);
     let node = c.editor.selection.node();
+    let picked = c.editor.selection.nodes.clone();
     let period = road.period();
     for (i, line) in road.lines.iter().enumerate() {
         let mut l = line.clone();
@@ -379,7 +382,7 @@ pub(super) fn lines_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                     changed |= drag(ui, "Dash m", on, 0.1, 0.1..=100.0);
                     changed |= drag(ui, "Gap m", off, 0.1, 0.1..=100.0);
                 }
-                changed |= ranges_ui(ui, &mut l.ranges, node, period, road.closed);
+                changed |= ranges_ui(ui, &mut l.ranges, &picked, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove line").clicked());
             });
         if open.is_some() {
@@ -527,7 +530,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     let name = road.name.clone();
     let (_, materials) = names(&c.editor.project);
     let (_, wall_styles) = style_names(&c.editor.project);
-    let node = c.editor.selection.node();
+    let picked = c.editor.selection.nodes.clone();
     let period = road.period();
     cornered(
         ui,
@@ -583,7 +586,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                     b.style = None;
                     changed = true;
                 }
-                changed |= ranges_ui(ui, &mut b.ranges, node, period, road.closed);
+                changed |= ranges_ui(ui, &mut b.ranges, &picked, period, road.closed);
                 removed = row(ui, "", |ui| ui.button("Remove barrier").clicked());
             });
         if open.is_some() {
@@ -615,10 +618,10 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
         for style in styles {
             if ui
                 .small_button(format!("+ {}", style.name))
-                .on_hover_text(match node {
-                    Some(n) => format!("Round node {n}, on the left; drag it in the view"),
-                    None => "Along the whole road, on the left".into(),
-                })
+                .on_hover_text(format!(
+                    "{}, on the left; drag it in the view",
+                    where_laid(&picked)
+                ))
                 .clicked()
             {
                 let n = crate::presets::free_name(&style.name, |n| {
@@ -628,7 +631,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                     &n,
                     Side::Left,
                     10.0,
-                    stretch_round(node, period, road.closed),
+                    stretch_round(&picked, period, road.closed),
                 );
                 c.editor.apply(
                     vec![Op::PutBarrier {
@@ -651,7 +654,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
         return;
     };
     let name = road.name.clone();
-    let node = c.editor.selection.node();
+    let picked = c.editor.selection.nodes.clone();
     let period = road.period();
     ui.weak("A model repeated beside the road, facing it (its +X along the road, +Y towards it): every so many metres along its stretches, or at given places.");
     for (i, row_) in road.rows.iter().enumerate() {
@@ -726,7 +729,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                         .changed()
             });
             if w.at.is_empty() {
-                changed |= ranges_ui(ui, &mut w.ranges, node, period, road.closed);
+                changed |= ranges_ui(ui, &mut w.ranges, &picked, period, road.closed);
             }
             removed = row(ui, "", |ui| ui.button("Remove row").clicked());
         });
@@ -761,13 +764,18 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Add a row of");
         for a in models {
-            let stem = a.path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let stem = a
+                .path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             if ui
                 .small_button(format!("+ {stem}"))
-                .on_hover_text(match node {
-                    Some(n) => format!("Round node {n}, on the left, every 20 m; drag its ends and distance in the view"),
-                    None => "Along the whole road, on the left, every 20 m".into(),
-                })
+                .on_hover_text(format!(
+                    "{}, on the left, every 20 m; drag its ends and distance in the view",
+                    where_laid(&picked)
+                ))
                 .clicked()
             {
                 let n = crate::presets::free_name(&stem, |n| road.rows.iter().any(|w| w.name == n));
@@ -777,7 +785,7 @@ pub(super) fn rows_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                     side: Side::Left,
                     offset: 8.0,
                     spacing: 20.0,
-                    ranges: stretch_round(node, period, road.closed),
+                    ranges: stretch_round(&picked, period, road.closed),
                     at: vec![],
                     yaw: 0.0,
                     scale: 1.0,

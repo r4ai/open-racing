@@ -14,6 +14,7 @@ mod corners;
 mod curve_graph;
 mod edit;
 mod jobs;
+mod lay;
 mod menus;
 mod outliner;
 mod overlay;

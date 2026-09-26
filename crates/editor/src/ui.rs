@@ -136,6 +136,8 @@ pub struct Shell {
     pub focus: Option<Focus>,
     /// The corner looked at last: its road and number.
     pub corner: Option<(usize, usize)>,
+    /// The side kerbs and walls are laid along the selected nodes on.
+    pub lay_side: crate::lay::LaySide,
     pub popup: Option<Popup>,
     /// The keyboard shortcuts window.
     pub shortcuts: bool,
@@ -155,6 +157,7 @@ impl Default for Shell {
             sidebar_tab: sidebar::Tab::default(),
             focus: None,
             corner: None,
+            lay_side: Default::default(),
             popup: None,
             shortcuts: false,
             quit: false,
