@@ -5,23 +5,27 @@
 //!
 //! The pictures keep the model's colours and textures with a little shading baked in
 //! (darker below, where leaves shade each other); the renderer lights the cards again.
+//! A plant's leaves and the rest of it are drawn on cards of their own, in the same
+//! places, so that its copies' leaves take their own colours and fall far away too.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use open_racing_track::texture::{self, Image, Mips};
-use open_racing_track::{AlphaMode, Material, Mesh, Texture, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, Varies, Texture, VisualBuilder};
 
 use crate::model::Model;
 
 /// How one of a model's materials looks: its colour (linear, with alpha), its
-/// texture (sRGB) and the alpha below which it is cut out.
+/// texture (sRGB), the alpha below which it is cut out, and whether it is a plant's
+/// leaves.
 #[derive(Clone, Debug)]
 pub struct Paint {
     pub colour: [f32; 4],
     pub texture: Option<Arc<Image>>,
     pub cutoff: Option<f32>,
+    pub leaves: bool,
 }
 
 /// How a model's own materials look.
@@ -49,6 +53,7 @@ pub fn paints(model: &Model) -> Vec<Paint> {
                     AlphaMode::Mask(c) => Some(c),
                     AlphaMode::Blend => Some(0.5),
                 },
+                leaves: m.varies.is_some_and(|p| p.tinted),
             }
         })
         .collect()
@@ -100,12 +105,14 @@ struct View {
     diffuse: f32,
 }
 
-/// Linear colour and coverage of each pixel.
+/// Linear colour and coverage of each pixel, and whether leaves cover it.
+#[derive(Clone)]
 struct Canvas {
     width: usize,
     height: usize,
     colour: Vec<[f32; 4]>,
     depth: Vec<f32>,
+    leaves: Vec<bool>,
 }
 
 impl Canvas {
@@ -115,7 +122,42 @@ impl Canvas {
             height,
             colour: vec![[0.0; 4]; width * height],
             depth: vec![f32::NEG_INFINITY; width * height],
+            leaves: vec![false; width * height],
         }
+    }
+
+    /// Only the pixels leaves cover (`leaves`), or only those they do not.
+    fn only(&self, leaves: bool) -> Canvas {
+        let mut out = self.clone();
+        for (c, l) in out.colour.iter_mut().zip(&self.leaves) {
+            if *l != leaves {
+                *c = [0.0; 4];
+            }
+        }
+        out
+    }
+
+    /// The picture halved, as two: of the rest of the plant and of its leaves. The
+    /// cards of both lie in the same places, so no texel may show in both (they would
+    /// fight over it) and together they show what the one picture would: where both
+    /// would show, only the leaves do, and a texel half covered by each goes to the one
+    /// covering more of it, or to the leaves. Their coverage is kept well clear of the
+    /// cut-off, which block compression blurs.
+    fn split(&self) -> [Canvas; 2] {
+        let [mut wood, mut leaves] = [false, true].map(|l| self.only(l).halved());
+        for (w, l) in wood.colour.iter_mut().zip(&mut leaves.colour) {
+            let (a, b) = (w[3], l[3]);
+            if b >= 0.5 {
+                w[3] = w[3].min(0.3);
+            } else if a < 0.5 && a + b >= 0.5 {
+                if b >= a {
+                    l[3] = 0.7;
+                } else {
+                    w[3] = 0.7;
+                }
+            }
+        }
+        [wood, leaves]
     }
 
     /// Draws the model onto a region of the canvas `x0` pixels in and `w` wide.
@@ -187,6 +229,7 @@ impl Canvas {
                         let shade = (1.0 - view.diffuse) * (0.75 + 0.25 * n.z)
                             + view.diffuse * n.dot(view.light).max(0.0);
                         self.depth[k] = d;
+                        self.leaves[k] = paint.leaves;
                         self.colour[k] = [rgba[0] * shade, rgba[1] * shade, rgba[2] * shade, 1.0];
                     }
                 }
@@ -303,7 +346,8 @@ fn extent(model: &Model) -> (Vec3, Vec3, f32) {
 
 /// The pictures of a model on `CARDS` crossed upright cards, as a model of its own
 /// that stands in for it: each card shows the model as seen square to it, on both of
-/// its faces.
+/// its faces. A plant's leaves and the rest of it are on cards of their own, in the
+/// same places, whose pictures cover none of the same pixels.
 pub fn cards(model: &Model, paints: &[Paint]) -> Model {
     let (lo, hi, radius) = extent(model);
     let height = (hi.z - lo.z).max(0.05);
@@ -351,36 +395,49 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
             indices.extend(quad.map(|k| base + k));
         }
     }
-    let mut picture = canvas.halved();
-    picture.bleed(16);
+    let used = |leaves: bool| canvas.leaves.iter().zip(&canvas.colour).any(|(l, c)| *l == leaves && c[3] > 0.0);
+    let layers: Vec<bool> = [false, true].into_iter().filter(|&l| used(l)).collect();
     let mut look = VisualBuilder::new();
-    let texture = look.add_texture(Texture {
-        data: texture::encode_with(picture.image(), Mips::AlphaTest(0.5)),
-    });
-    look.add_material(Material {
-        base_color: [1.0; 4],
-        base_color_texture: Some(texture),
-        roughness: 0.9,
-        reflectance: 0.3,
-        alpha_mode: AlphaMode::Mask(0.5),
-        ..Default::default()
-    });
-    let mesh = Mesh {
-        material: 0,
-        cast_shadows: true,
-        positions,
-        normals,
-        uvs,
-        indices,
-        lod: None,
+    let mut meshes = Vec::new();
+    let mut pictures = if layers.len() > 1 {
+        canvas.split().to_vec()
+    } else {
+        vec![canvas.halved()]
     };
+    for (i, leaves) in layers.iter().copied().enumerate() {
+        let picture = &mut pictures[i];
+        picture.bleed(16);
+        let texture = look.add_texture(Texture {
+            data: texture::encode_with(picture.image(), Mips::AlphaTest(0.5)),
+        });
+        look.add_material(Material {
+            base_color: [1.0; 4],
+            base_color_texture: Some(texture),
+            roughness: 0.9,
+            reflectance: 0.3,
+            alpha_mode: AlphaMode::Mask(0.5),
+            varies: leaves.then_some(Varies {
+                tinted: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        meshes.push(Mesh {
+            material: i as u32,
+            cast_shadows: true,
+            positions: positions.clone(),
+            normals: normals.clone(),
+            uvs: uvs.clone(),
+            indices: indices.clone(),
+        });
+    }
     Model {
-        triangles: mesh.indices.len() / 3,
+        triangles: meshes.iter().map(|m| m.indices.len() / 3).sum(),
         bounds: [
             Vec3::new(-radius, -radius, lo.z),
             Vec3::new(radius, radius, hi.z),
         ],
-        meshes: vec![mesh],
+        meshes,
         look: look.build(),
     }
 }
@@ -433,7 +490,9 @@ mod tests {
     #[test]
     fn a_tree_s_cards_show_it_from_three_sides() {
         let pine = crate::shapes::model("pine").unwrap();
-        let far = cards(&pine, &paints(&pine));
+        let mut paint = paints(&pine);
+        paint.iter_mut().for_each(|p| p.leaves = false);
+        let far = cards(&pine, &paint);
         assert_eq!(far.triangles, CARDS * 4);
         assert_eq!(far.look.textures.len(), 1);
         let image = texture::decode(&far.look.textures[0].data).unwrap();
@@ -450,6 +509,22 @@ mod tests {
         }
         // As tall and as wide as the tree.
         assert!((far.bounds[1].z - pine.bounds[1].z).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_plant_s_leaves_and_trunk_are_on_cards_of_their_own() {
+        let tree = crate::shapes::model("tree").unwrap();
+        let far = cards(&tree, &paints(&tree));
+        assert_eq!(far.meshes.len(), 2);
+        assert_eq!(far.meshes[0].positions, far.meshes[1].positions);
+        let [trunk, leaves] = [0, 1].map(|i| &far.look.materials[i]);
+        assert!(trunk.varies.is_none() && leaves.varies.is_some_and(|p| p.tinted));
+        // No texel is covered in both pictures.
+        let [a, b] = [0, 1].map(|i| texture::decode(&far.look.textures[i].data).unwrap());
+        let alpha = |im: &Image, k: usize| im.pixels[k * 4 + 3];
+        let n = a.width * a.height;
+        assert!((0..n).all(|k| alpha(&a, k) < 128 || alpha(&b, k) < 128));
+        assert!((0..n).any(|k| alpha(&a, k) > 200) && (0..n).any(|k| alpha(&b, k) > 200));
     }
 
     #[test]

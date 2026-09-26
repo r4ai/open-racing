@@ -7,7 +7,7 @@ use crate::debug_view::DebugSettings;
 use crate::driving::Simulation;
 use crate::input::AppRequests;
 use crate::scene::{CarNose, CarVisualRoot, DriverEye, quat_to_bevy, to_bevy};
-use crate::weather::{self, SkyLight};
+use open_racing_sky::{self as weather, SkyLight};
 
 #[derive(Component)]
 pub struct MainCamera;

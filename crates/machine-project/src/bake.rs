@@ -424,7 +424,6 @@ fn visual(lib: &Library, m: &Machine, asm: &Assembly, cg: DVec3) -> Result<CarVi
             normals: tris.normals,
             uvs: vec![[0.0, 0.0]; n],
             indices: tris.indices,
-            lod: None,
         });
         parts.push(match kind {
             1 => VisualPart::Wheel(index),
@@ -439,6 +438,7 @@ fn visual(lib: &Library, m: &Machine, asm: &Assembly, cg: DVec3) -> Result<CarVi
             textures: Vec::new(),
             materials,
             meshes,
+            ..Default::default()
         },
         mesh_parts: parts,
         steering_wheel: interior.map(|(pivot, axis, _)| SteeringWheel {

@@ -15,7 +15,7 @@ use crate::camera::{CameraMode, MainCamera, PrimaryView, body_view, driver_eye};
 use crate::driving::Simulation;
 use crate::input::AppRequests;
 use crate::scene::DriverEye;
-use crate::weather::{self, SkyLight};
+use open_racing_sky::{self as weather, SkyLight};
 
 /// Replaces the renderer in `default` with the OpenXR one.
 pub fn plugins(default: PluginGroupBuilder) -> PluginGroupBuilder {

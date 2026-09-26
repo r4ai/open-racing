@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use open_racing_track_project::assets;
 use open_racing_track_project::ops::Op;
 use open_racing_track_project::project::{
-    HARDNESS, MaterialDef, MaterialSlot, Scatter, ScatterModel, TextureSource,
+    HARDNESS, Layout, MaterialDef, MaterialSlot, Scatter, ScatterModel, TextureSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,15 +26,17 @@ pub enum Category {
     Bushes,
     Grass,
     Rocks,
+    People,
     Other,
 }
 
 impl Category {
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 6] = [
         Category::Trees,
         Category::Bushes,
         Category::Grass,
         Category::Rocks,
+        Category::People,
         Category::Other,
     ];
 
@@ -44,6 +46,7 @@ impl Category {
             Category::Bushes => "Bushes",
             Category::Grass => "Grass",
             Category::Rocks => "Rocks",
+            Category::People => "Spectators",
             Category::Other => "Other",
         }
     }
@@ -82,7 +85,7 @@ pub struct Kind {
 pub fn builtin() -> Vec<Kind> {
     use Category::*;
     #[allow(clippy::type_complexity)]
-    let kinds: [(&str, Category, &[(&str, f64)], f64, [f64; 2], f64, f64); 11] = [
+    let kinds: [(&str, Category, &[(&str, f64)], f64, [f64; 2], f64, f64); 15] = [
         (
             "mixed woods",
             Trees,
@@ -166,6 +169,42 @@ pub fn builtin() -> Vec<Kind> {
             0.4,
         ),
         (
+            "avenue",
+            Trees,
+            &[("tree", 1.0)],
+            12.0,
+            [0.9, 1.1],
+            10.0,
+            1.0,
+        ),
+        (
+            "even woods",
+            Trees,
+            &[("pine", 3.0), ("tree", 2.0)],
+            7.0,
+            [0.85, 1.2],
+            30.0,
+            1.0,
+        ),
+        (
+            "spectators in rows",
+            People,
+            &[("spectator", 1.0)],
+            0.9,
+            [0.92, 1.08],
+            6.0,
+            1.0,
+        ),
+        (
+            "crowd",
+            People,
+            &[("spectator", 1.0)],
+            1.2,
+            [0.92, 1.08],
+            8.0,
+            0.8,
+        ),
+        (
             "traffic cones",
             Other,
             &[("cone", 1.0)],
@@ -181,6 +220,7 @@ pub fn builtin() -> Vec<Kind> {
             |(name, category, models, spacing, scale, radius, strength)| {
                 let small = matches!(category, Grass);
                 let rocks = matches!(category, Rocks);
+                let people = matches!(category, People);
                 Kind {
                     name: name.into(),
                     category,
@@ -196,18 +236,36 @@ pub fn builtin() -> Vec<Kind> {
                         spacing,
                         scale,
                         tilt: if rocks { 0.6 } else { 0.1 },
-                        clearance: if category == Other { 0.5 } else { 3.0 },
+                        clearance: match category {
+                            Other => 0.5,
+                            People => 2.0,
+                            _ => 3.0,
+                        },
                         max_slope: 35.0,
                         collide: rocks && scale[1] > 2.0,
                         shadows: !small,
                         // Grass is lost to the eye long before a tree.
-                        detail: if small { 40.0 } else { 150.0 },
+                        detail: if small {
+                            40.0
+                        } else if people {
+                            80.0
+                        } else {
+                            150.0
+                        },
                         draw: if small {
                             200.0
+                        } else if people {
+                            800.0
                         } else if matches!(category, Bushes | Other) {
                             700.0
                         } else {
                             2500.0
+                        },
+                        variety: open_racing_track_project::project::VARIETY,
+                        layout: match name {
+                            "avenue" | "spectators in rows" => Layout::Rows,
+                            "even woods" | "crowd" => Layout::Even,
+                            _ => Layout::Grid,
                         },
                         strokes: vec![],
                         removed: vec![],

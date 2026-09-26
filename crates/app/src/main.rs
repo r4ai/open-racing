@@ -6,7 +6,6 @@ mod audio;
 mod bindings;
 mod camera;
 mod capture;
-mod clouds;
 mod debug_view;
 mod driving;
 mod effects;

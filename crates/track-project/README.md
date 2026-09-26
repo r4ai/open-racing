@@ -15,6 +15,7 @@ trackctl info my-track [--json]         # roads, nodes and their distances, radi
 trackctl apply my-track ops.ron         # or ops.json, or - for stdin; all or nothing
 trackctl preview my-track               # plan view: my-track/preview.png
 trackctl import my-track a.png b.glb    # copy into my-track/assets/, print the paths to use
+trackctl model my-track assets/models/oak.glb  # triangles, size, leaves; its picture and far cards as PNG
 trackctl assets my-track [--json]       # textures and models, what uses each, unused and missing ones
 trackctl check my-track --lap           # bake in memory, check, drive a test lap
 trackctl bake my-track                  # write content/tracks/<name>/ (then: open-racing-app --track <name>)
@@ -103,9 +104,10 @@ trackctl guide                          # this text
     scatter: [(name: "woods", models: [(model: "builtin:pine", weight: 3),
                                        (model: "assets/models/oak.glb", weight: 1,
                                         far: Some("assets/models/oak_far.glb"),   // optional
-                                        materials: [(slot: 1, material: "oak leaves")])],
+                                        materials: [(slot: 1, material: "oak leaves")],
+                                        kind: Some(Deciduous))],
                spacing: 7, scale: (0.8, 1.25), tilt: 0.1, clearance: 3, max_slope: 35,
-               collide: false, shadows: true, detail: 150, draw: 2500,
+               collide: false, shadows: true, detail: 150, draw: 2500, variety: 0.4,
                strokes: [(brush: Paint, radius: 60, strength: 1, hardness: 0.8,
                           points: [(-300, -150), (-250, -80)]),
                          (brush: Erase, radius: 15, strength: 1, points: [(-270, -110)])],
@@ -168,7 +170,7 @@ trackctl guide                          # this text
 - `drape: true` stands it on the road or terrain under `pos`, ignoring the height.
 - `collide: true` makes its triangles walls for the cars. Leave it off for things out of reach, as it costs physics time.
 - Models are Y-up as glTF has them. Their own materials and textures come along; the project's materials are not used.
-- Wherever a model's path is taken (props, rows, scatters, models along walls), a built-in model may be named instead, needing no file: `builtin:pine`, `builtin:tree` (broadleaf), `builtin:poplar`, `builtin:bush`, `builtin:rock`, `builtin:grass` (a tuft) and `builtin:cone` (a traffic cone). They are low in triangles, for thousands of copies.
+- Wherever a model's path is taken (props, rows, scatters, models along walls), a built-in model may be named instead, needing no file: `builtin:pine`, `builtin:tree` (broadleaf), `builtin:poplar`, `builtin:bush`, `builtin:rock`, `builtin:grass` (a tuft), `builtin:cone` (a traffic cone) and `builtin:spectator` (a person standing, facing +X, in clothes each copy of a scatter colours its own way). They are low in triangles, for thousands of copies.
 - The files a project refers to, and those it does not, are listed by `trackctl assets`.
 
 **Rows.** A row repeats a glTF model beside a road: trees, cones, distance boards, lamp
@@ -188,7 +190,7 @@ posts, spectators' stands, pit garages.
 
 - `heights` is elevation data the ground away from the roads follows (a GeoTIFF, an ESRI ASCII grid or x y z points, in metres, longitudes and latitudes, or WGS 84 UTM metres), with `heights_offset` added. Within about 30 m of the roads' outer edges it eases from their edges to the data.
 - `landforms` shape the ground away from the roads: `Raise(m)` raises a hill or bank (negative digs a hollow) and `Level(m)` levels a pad at that height, round `center` or, with `to`, along the line from `center` to `to`, at full effect out to `radius` and easing to nothing over `falloff` more.
-- `sculpt` is brush strokes shaping the ground after the landforms, in order, as the editor's Sculpt Terrain tool paints them. A stroke acts fully within `hardness` (0 to 1, 0.5 when left out) of its `radius` of its `points` and eases to nothing at `radius`: 0 eases out from its path, 1 has a hard edge. It acts once wherever it passes. With `fill: true` its points are a closed outline, as a lasso: it acts fully inside it and eases to nothing outside it over twice the soft part of its radius (`radius` at the usual hardness): a pad levelled, a patch of gravel, a wood. Its `brush` is `Raise` (by `strength` m; negative lowers), `Smooth` (evens bumps, `strength` 0 to 1), `Flatten(height)` (levels towards that height, `strength` 0 to 1) or `Noise` (roughens by up to `strength` m, the same every build). Near the roads' outer edges strokes and landforms ease out, so the ground still meets the roads. A small `cell` shows finer shapes.
+- `sculpt` is brush strokes shaping the ground after the landforms, in order, as the editor's Sculpt Terrain tool paints them. A stroke acts fully within `hardness` (0 to 1, 0.5 when left out) of its `radius` of its `points` and eases to nothing at `radius`: 0 eases out from its path, 1 has a hard edge. It acts once wherever it passes. With `fill: true` its points are a closed outline, as a lasso: it acts fully inside it and eases to nothing outside it over twice the soft part of its radius (`radius` at the usual hardness): a pad levelled, a patch of gravel, a wood. `stamp: Some((shape: Spots, size: 30))` makes it act through a shape of texture lying still on the ground, in patches: `Clouds` (ragged patches as wide as they are apart), `Spots` (round spots `size` apart, about half as wide) or `Streaks` (six times as long as they are wide, along `angle`, radians from the east); strokes over the same place build up the same shapes, and scatters' and painted layers' strokes take stamps too. Its `brush` is `Raise` (by `strength` m; negative lowers), `Smooth` (evens bumps, `strength` 0 to 1), `Flatten(height)` (levels towards that height, `strength` 0 to 1) or `Noise` (roughens by up to `strength` m, the same every build). Near the roads' outer edges strokes and landforms ease out, so the ground still meets the roads. A small `cell` shows finer shapes.
 - `layers` are up to three materials painted over the ground's own (dirt, gravel, sand), each with its `surface`: where a layer covers most of a cell, cars drive on it. `paint` is the strokes painting them in order (brush `Paint`, `strength` 0 to 1 of the way to all of it); `layer: None` paints the ground's own material back. `paint_texel` is the painted texels' size, m.
 
 **Scatters.** A scatter paints models over the ground: woods, bushes, rocks, long grass,
@@ -198,6 +200,11 @@ spectators.
   (`Paint` and `Erase`, `strength` 0 to 1, as a sculpting stroke reaches) say how much of
   it each place has, in order: a light stroke plants some, painting again more, and
   erasing takes them away. The same strokes give the same copies every build.
+- `layout`: `Grid` (left out: the jittered grid, natural and a little clumped),
+  `Even` (blue noise: `spacing` apart on the whole, none nearer than about half of
+  it) or `Rows` (rows `spacing` apart along the roads and across, from `clearance`
+  beyond their outer edges, every other row staggered, each facing its road: avenues,
+  orchards, spectators' rows; a row keeps to the road it is nearest).
 - Each copy is one of `models`, picked in proportion to its `weight`, turned at random
   and sized from `scale[0]` to `scale[1]` times its own; `tilt` leans it with the slope (0
   upright, 1 square to it).
@@ -212,14 +219,30 @@ spectators.
   but on a road or kerb. `seed` (drawn from the name when 0) is where the painted copies'
   places come from; a rename keeps it, so the copies stay where they are.
 - Levels of detail: copies show their models in full out to `detail` metres from the
-  camera, then a lighter far model out to `draw` metres (0: however far), crossfading
-  tile by tile. A model's far model is its `far` file, or else pictures of it drawn
-  from three sides onto crossed cards when the project is built, so a wood of
-  thousands of trees costs a few triangles a tree in the distance. With `draw` no more
-  than `detail` the models are shown in full and nothing beyond.
+  camera, then a lighter far model out to `draw` metres (0: however far), crossfading.
+  A model's far model is its `far` file, or else pictures of it drawn from three sides
+  onto crossed cards when the project is built, so a wood of thousands of trees costs a
+  few triangles a tree in the distance. With `draw` no more than `detail` the models
+  are shown in full and nothing beyond.
+- The package keeps each model once, with a list of where each copy stands (32 bytes a
+  copy), and the game draws the copies by instancing: a wood of tens of thousands of
+  trees adds little to the file and the memory. The far models' copies are merged by
+  32 m tiles when the track loads, as few triangles cost less than many entities.
 - A model's `materials: [(slot, material)]` use the project's materials in place of its
   own, by their place in the model (its first material is slot 0): a bark or leaf
   texture of your own, laid by the model's UVs.
+- Plants: a model's `kind` is `Evergreen` (sways in the wind, stays green),
+  `Deciduous` (sways; its leaves turn yellow, orange and red in autumn, fall in winter
+  and come out fresh in spring), `Grass` (bends far, dries in late summer, straw in
+  winter) or `Rigid` (rocks, cones: stands still). Left out, a built-in model's own
+  kind (`pine` evergreen, `tree`, `poplar` and `bush` broadleaf, `grass` grass, `rock`
+  and `cone` rigid, `spectator` a crowd), or else `Evergreen`. `Crowd` is spectators:
+  they stand still, facing the nearest road, each in clothes of its own colour (the
+  model's materials named or cut out as leaves take it). The game sways them in its weather's wind, in
+  gusts sweeping over the ground. A model's leaves are its materials cut out by alpha
+  or named as leaves (leaf, foliage, needle, grass, canopy, frond, twig); they take
+  each copy's colour, and none are drawn of a bare copy. `variety` (0 to 1, 0.4 when
+  left out) is how much the copies' leaf colours differ from each other.
 - `trackctl info` counts each scatter's copies, planted and taken out, and says where
   they stand.
 
@@ -233,6 +256,8 @@ game starts in them unless its weather settings say otherwise (Esc, "weather", "
   month and the sky give, K.
 - `exposure` brightens (above 0) or darkens the picture from what the daylight calls
   for, EV; `haze` thickens (above 1) or thins the haze the weather gives, 0 for none.
+- `season: Some(Autumn)` (`Spring`, `Summer`, `Autumn` or `Winter`) is the season
+  scattered plants show; left out, the month's (half a year on south of the equator).
 
 ## Operations
 

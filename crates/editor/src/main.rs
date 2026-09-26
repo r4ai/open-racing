@@ -87,6 +87,12 @@ struct Args {
     /// Start with this tool: select, move, rotate, scale, sculpt, paint or scatter.
     #[arg(long)]
     tool: Option<String>,
+    /// With the Scatter tool, work on the scatter of this name.
+    #[arg(long)]
+    scatter: Option<String>,
+    /// With the Scatter tool, start in this mode: paint, plant or select.
+    #[arg(long)]
+    scatter_mode: Option<String>,
     /// How far above the horizon the camera looks down from, degrees (90 from above).
     #[arg(long)]
     pitch: Option<f32>,
@@ -120,13 +126,16 @@ fn auto_screenshot(
     mut commands: Commands,
     shot: Option<ResMut<AutoScreenshot>>,
     built: Res<preview::Built>,
+    weather: Res<sky::ProjectWeather>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut shot) = shot else { return };
-    // Wait for the first build, then for its meshes and textures to reach the GPU.
-    if built.count == 0 {
+    // Wait for the first build and the sky, then for their meshes and textures to reach
+    // the GPU.
+    if built.count == 0 || !weather.ready() {
         return;
     }
+
     if shot.wait > 0 {
         shot.wait -= 1;
         return;
@@ -241,6 +250,32 @@ fn main() {
             }
         }
     }
+    if let Some(name) = &args.scatter {
+        if !editor.project.scatter.iter().any(|s| &s.name == name) {
+            eprintln!("no scatter \"{name}\"");
+            std::process::exit(1);
+        }
+        tool.active = viewport::ToolKind::Scatter;
+        tool.brush.scatter = Some(name.clone());
+    }
+    if let Some(mode) = &args.scatter_mode {
+        match plants::ScatterMode::ALL
+            .into_iter()
+            .find(|m| m.label().eq_ignore_ascii_case(mode))
+        {
+            Some(m) => {
+                tool.active = viewport::ToolKind::Scatter;
+                tool.brush.mode = m;
+                if tool.brush.scatter.is_none() {
+                    tool.brush.scatter = editor.project.scatter.first().map(|s| s.name.clone());
+                }
+            }
+            None => {
+                eprintln!("no scatter mode \"{mode}\": paint, plant or select");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.clean {
         tool.overlays = viewport::Overlays {
             lines: false,
@@ -305,8 +340,10 @@ fn main() {
     .add_plugins((
         EguiPlugin::default(),
         TrackModelPlugin,
+        open_racing_sky::SkyPlugin::<sky::ProjectWeather>::default(),
         viewport::GizmoGroups,
     ))
+    .init_resource::<sky::ProjectWeather>()
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
@@ -315,6 +352,7 @@ fn main() {
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()
     .init_resource::<preview::GroundPaint>()
+    .init_resource::<preview::Scattered>()
     .init_resource::<preview::SharedCache>()
     .init_resource::<palette::Palette>()
     .init_resource::<assets::Library>()
@@ -346,7 +384,9 @@ fn main() {
             viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
-            sky::light,
+            sky::weather,
+            sky::wind,
+            sky::look,
             auto_screenshot,
         )
             .chain(),

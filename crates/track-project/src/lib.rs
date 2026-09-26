@@ -33,6 +33,7 @@ pub mod rows;
 pub mod scatter;
 pub mod shapes;
 pub mod spline;
+pub mod stamp;
 pub mod terrain;
 pub mod validate;
 

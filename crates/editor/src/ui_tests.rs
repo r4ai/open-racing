@@ -136,6 +136,7 @@ fn furnished(name: &str) -> (Editor, std::path::PathBuf) {
             .collect(),
         fill: false,
         hardness: open_racing_track_project::project::HARDNESS,
+        stamp: None,
     };
     use open_racing_track_project::ops::StrokeTarget;
     use open_racing_track_project::project::Brush;

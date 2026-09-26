@@ -4,7 +4,7 @@
 //! the picture looks. The view is lit by them as they are set.
 
 use open_racing_sim::Sky;
-use open_racing_track::Environment;
+use open_racing_track::{Environment, Season};
 
 use super::*;
 
@@ -121,6 +121,24 @@ pub(super) fn world_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             }
         });
         ui.weak(sun_words(&e, latitude));
+        row(ui, "Plants", |ui| {
+            let name = |s: Option<Season>| match s {
+                None => "as the month",
+                Some(Season::Spring) => "spring",
+                Some(Season::Summer) => "summer",
+                Some(Season::Autumn) => "autumn",
+                Some(Season::Winter) => "winter",
+            };
+            egui::ComboBox::from_id_salt("world season")
+                .selected_text(name(e.season))
+                .show_ui(ui, |ui| {
+                    for s in std::iter::once(None).chain(Season::ALL.map(Some)) {
+                        changed |= ui.selectable_value(&mut e.season, s, name(s)).changed();
+                    }
+                })
+                .response
+                .on_hover_text("The season scattered plants show: fresh leaves, summer's, autumn's colours, or bare branches and straw. As the month, half a year on south of the equator.")
+        });
     });
     section(ui, "Weather", "world weather", true, |ui| {
         row(ui, "Sky", |ui| {

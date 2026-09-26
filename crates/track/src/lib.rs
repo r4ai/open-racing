@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 pub use ground::{Ground, Patch, PatchKind};
 pub use visual::{
-    AlphaMode, Detail, DetailLayer, DetailMask, DetailNormal, Lod, Material, Mesh, Texture, Visual,
-    VisualBuilder,
+    AlphaMode, BARE, Detail, DetailLayer, DetailMask, DetailNormal, FAR_AWAY, Instance, Instances,
+    Level, Material, Mesh, Varies, Shape, Texture, Visual, VisualBuilder,
 };
 
 /// Version of the package layout and of `track.ron`.
@@ -115,6 +115,30 @@ pub struct Environment {
     pub exposure: f64,
     /// How thick the haze is against what the weather gives: 0 none, 1 as it gives.
     pub haze: f64,
+    /// The season plants show (leaves turned, fallen or fresh), when not the month's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season: Option<Season>,
+}
+
+/// A season, as plants show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Season {
+    /// Fresh leaves.
+    Spring,
+    Summer,
+    /// Leaves turned yellow, orange and red.
+    Autumn,
+    /// Broadleaf trees bare, grass straw.
+    Winter,
+}
+
+impl Season {
+    pub const ALL: [Season; 4] = [
+        Season::Spring,
+        Season::Summer,
+        Season::Autumn,
+        Season::Winter,
+    ];
 }
 
 impl Default for Environment {
@@ -128,6 +152,7 @@ impl Default for Environment {
             temperature: 0.0,
             exposure: 0.0,
             haze: 1.0,
+            season: None,
         }
     }
 }
@@ -146,6 +171,24 @@ impl Environment {
     pub fn day_of_year(&self) -> u32 {
         let m = self.month.clamp(1, 12) as usize;
         [15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349][m - 1]
+    }
+
+    /// The time of year plants show, as months into a northern year (0 the start of
+    /// January, 12 its end): the middle of the month, half a year on south of the
+    /// equator (at `latitude` unless the environment gives its own), or the season's
+    /// when it gives one.
+    pub fn plant_month(&self, latitude: f64) -> f64 {
+        match self.season {
+            Some(Season::Spring) => 4.5,
+            Some(Season::Summer) => 7.0,
+            Some(Season::Autumn) => 10.1,
+            Some(Season::Winter) => 1.0,
+            None => {
+                let south = self.latitude.unwrap_or(latitude) < 0.0;
+                let m = self.month.clamp(1, 12) as f64 - 0.5;
+                if south { (m + 6.0) % 12.0 } else { m }
+            }
+        }
     }
 }
 
@@ -347,6 +390,7 @@ mod tests {
             alpha_mode: AlphaMode::Mask(0.4),
             double_sided: true,
             detail: Some(detail.clone()),
+            varies: None,
         });
         v.add_material(Material {
             detail: Some(Detail {

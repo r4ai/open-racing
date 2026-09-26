@@ -199,7 +199,7 @@ impl Sky {
     }
 
     /// Mean wind 10 m above ground, m/s.
-    fn wind(self) -> f64 {
+    pub fn wind(self) -> f64 {
         [2.0, 3.0, 4.0, 5.5, 6.5][self.index()]
     }
 }
