@@ -6,8 +6,9 @@ use glam::DVec3;
 use open_racing_sim::Surface;
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{
-    Align, Alpha, BuiltinTexture, Grid, MaterialDef, ModelRun, NamedSurface, PaintLine, Pit,
-    Profile, Range, Shape, Side, StripStyle, TextureSource, WallStyle,
+    Align, Alpha, BuiltinTexture, Grid, Landform, LandformKind, MaterialDef, ModelRun,
+    NamedSurface, PaintLine, Pit, Profile, Range, Shape, Side, StripStyle, TextureSource,
+    WallStyle,
 };
 use open_racing_track_project::{Key, Project};
 
@@ -171,7 +172,7 @@ pub fn show(
             .show(ui, |ui| match c.shell.tab {
                 PropTab::Track => track_tab(ui, c, state),
                 PropTab::Markers => markers_tab(ui, c.editor, state),
-                PropTab::Terrain => terrain_tab(ui, c.editor),
+                PropTab::Terrain => terrain_tab(ui, c),
                 PropTab::Reference => reference_tab(ui, c, library, reference),
                 PropTab::Library => library_tab(ui, c.editor, state, library),
                 PropTab::Object => match c.editor.selection.item {

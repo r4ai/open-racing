@@ -139,6 +139,11 @@ pub fn input(
     let hover = over.and_then(|at| {
         pick_gizmo(editor, &built, view, tool.active, at)
             .map(Hit::Gizmo)
+            .or_else(|| {
+                tool.landforms
+                    .then(|| pick_landform(editor, &built, view, at))
+                    .flatten()
+            })
             .or_else(|| pick(editor, &built, view, at, tool.pointer, tool.edit))
     });
     tool.hover = hover;
@@ -207,7 +212,8 @@ pub fn input(
                     | Hit::Marker(_)
                     | Hit::Range(_)
                     | Hit::Reach(_)
-                    | Hit::Edge(..)),
+                    | Hit::Edge(..)
+                    | Hit::Landform(..)),
                 ) => {
                     tool.press = None;
                     if let Hit::Node(item, n) = h
@@ -346,6 +352,7 @@ pub(super) fn click(
         Some(
             Hit::Handle(..)
             | Hit::Marker(_)
+            | Hit::Landform(..)
             | Hit::Range(_)
             | Hit::Reach(_)
             | Hit::Edge(..)

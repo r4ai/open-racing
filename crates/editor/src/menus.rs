@@ -407,6 +407,24 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 remove_stretch(c, end);
             }
         }
+        Some(Hit::Landform(i, _)) => {
+            let name = c
+                .editor
+                .project
+                .terrain
+                .landforms
+                .get(i)
+                .map_or(String::new(), |l| l.name.clone());
+            ui.label(egui::RichText::new(format!("Landform {name}")).strong());
+            if ui.button("Remove Landform").clicked() {
+                let mut terrain = c.editor.project.terrain.clone();
+                if i < terrain.landforms.len() {
+                    terrain.landforms.remove(i);
+                    c.editor.apply(vec![Op::SetTerrain { terrain }], None);
+                }
+                ui.close();
+            }
+        }
         Some(Hit::Gizmo(_) | Hit::Reach(_) | Hit::Edge(..)) | None => {}
     }
     if menu.hit.is_some() {

@@ -151,9 +151,10 @@ enum Command {
         #[arg(long, default_value_t = 20.0)]
         wall_offset: f64,
     },
-    /// Puts roads' and splines' nodes on the ground of elevation data: an ESRI ASCII
-    /// grid (.asc) or x y z points (.xyz, .csv, .txt), in metres or, once a GPS
-    /// centreline has placed the project, longitudes and latitudes.
+    /// Puts roads' and splines' nodes on the ground of elevation data: a GeoTIFF
+    /// (.tif), an ESRI ASCII grid (.asc) or x y z points (.xyz, .csv, .txt), in metres
+    /// or, once a GPS centreline has placed the project, longitudes and latitudes or
+    /// UTM metres. With --terrain the ground round the roads follows it too.
     Dem {
         project: String,
         file: PathBuf,
@@ -163,6 +164,10 @@ enum Command {
         /// Height above the ground, m.
         #[arg(long, default_value_t = 0.0)]
         offset: f64,
+        /// Also make the terrain follow it away from the roads: the file is copied into
+        /// the project's assets/terrain.
+        #[arg(long)]
+        terrain: bool,
     },
     /// Paints the start/finish line across the main road and a line at the front of
     /// each grid slot, in place of those painted before.
@@ -219,8 +224,13 @@ fn run(cli: Cli) -> Result<(), Error> {
             println!("created {}", dir.display());
         }
         Command::Info { project, json } => {
-            let p = Project::load(&resolve(&project))?;
-            let summary = inspect::summarize(&p, &bake::build(&p));
+            let dir = resolve(&project);
+            let p = Project::load(&dir)?;
+            let scene = bake::build_in(&p, &dir);
+            for e in &scene.failed {
+                eprintln!("warning: {e}");
+            }
+            let summary = inspect::summarize(&p, &scene);
             if json {
                 println!(
                     "{}",
@@ -256,7 +266,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 if dry_run { "checked" } else { "applied" },
                 list.len()
             );
-            let summary = inspect::summarize(&p, &bake::build(&p));
+            let summary = inspect::summarize(&p, &bake::build_in(&p, &dir));
             for w in &summary.warnings {
                 println!("warning: {w}");
             }
@@ -264,7 +274,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         Command::Preview { project, out, size } => {
             let dir = resolve(&project);
             let p = Project::load(&dir)?;
-            let picture = preview::render(&p, &bake::build(&p), size.clamp(64, 8192));
+            let picture = preview::render(&p, &bake::build_in(&p, &dir), size.clamp(64, 8192));
             let out = out.unwrap_or_else(|| dir.join("preview.png"));
             std::fs::write(&out, picture.to_png()).map_err(|e| Error::Io(out.clone(), e))?;
             println!(
@@ -424,16 +434,35 @@ fn run(cli: Cli) -> Result<(), Error> {
             file,
             lines,
             offset,
+            terrain,
         } => {
             let dir = resolve(&project);
             let mut p = Project::load(&dir)?;
-            let src = std::fs::read_to_string(&file).map_err(|e| Error::Io(file.clone(), e))?;
-            let name = file.file_name().unwrap_or_default().to_string_lossy();
-            let heights = dem::read(&name, &src, p.geo)?;
-            let (list, moved) = dem::node_ops(&p, &heights, &lines, offset);
+            let heights = dem::read_file(&file, p.geo)?;
+            let (mut list, moved) = dem::node_ops(&p, &heights, &lines, offset);
+            if terrain {
+                let name = file.file_name().unwrap_or_default();
+                let rel = PathBuf::from("assets").join("terrain").join(name);
+                let target = dir.join(&rel);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+                }
+                std::fs::copy(&file, &target).map_err(|e| Error::Io(target.clone(), e))?;
+                list.push(ops::Op::SetTerrain {
+                    terrain: open_racing_track_project::project::Terrain {
+                        heights: Some(rel),
+                        heights_offset: offset,
+                        ..p.terrain.clone()
+                    },
+                });
+            }
             ops::apply_all(&mut p, &list)?;
             p.save(&dir)?;
             println!("put {moved} nodes on the ground");
+            if terrain {
+                println!("the terrain follows it away from the roads");
+            }
         }
         Command::Paint { project } => {
             let dir = resolve(&project);

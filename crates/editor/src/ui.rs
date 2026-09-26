@@ -245,6 +245,7 @@ pub fn ui(
     }
     commands::shortcuts(&ctx, &mut c, over_view);
     c.tool.outliner_hover = None;
+    c.tool.landforms = c.shell.tab == PropTab::Terrain && !c.shell.maximized;
     // What the panels change about the active item, the other selected items of its
     // kind take too.
     let active = c.editor.selection.item;
@@ -412,16 +413,12 @@ fn import_centreline(c: &mut Ctx) {
 fn import_heights(c: &mut Ctx) {
     use open_racing_track_project::dem;
     let Some(file) = rfd::FileDialog::new()
-        .add_filter("elevation data", &["asc", "xyz", "csv", "txt"])
+        .add_filter("elevation data", &["tif", "tiff", "asc", "xyz", "csv", "txt"])
         .pick_file()
     else {
         return;
     };
-    let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let heights = match std::fs::read_to_string(&file)
-        .map_err(|e| e.to_string())
-        .and_then(|src| dem::read(&name, &src, c.editor.project.geo).map_err(|e| e.to_string()))
-    {
+    let heights = match dem::read_file(&file, c.editor.project.geo) {
         Ok(h) => h,
         Err(e) => {
             c.editor.status = format!("not read: {e}");
@@ -526,7 +523,7 @@ fn top_bar(ui: &mut egui::Ui, c: &mut Ctx, new_project: &mut String) {
             if ui
                 .button("Heights from Elevation Data…")
                 .on_hover_text(
-                    "Put the nodes of the selected road or spline (or of every one) on the ground of an elevation grid (.asc) or a list of x y z points (.xyz, .csv), in metres or longitudes and latitudes",
+                    "Put the nodes of the selected road or spline (or of every one) on the ground of elevation data: a GeoTIFF (.tif), an ESRI ASCII grid (.asc) or x y z points (.xyz, .csv), in metres, longitudes and latitudes or UTM. The Terrain tab makes the ground follow it too",
                 )
                 .clicked()
             {
@@ -674,6 +671,9 @@ fn mouse_hints(c: &Ctx) -> String {
             }
         ),
         Some(Hit::Marker(_)) => "Marker  ·  Drag: slide it along the road · Right: menu".into(),
+        Some(Hit::Landform(..)) => {
+            "Landform  ·  Drag: move its middle or end, or its edge for its radius".into()
+        }
         Some(Hit::Range(_)) => {
             "Stretch end  ·  Drag: move it (catches on nodes and corners; Ctrl: free) · Right: remove".into()
         }

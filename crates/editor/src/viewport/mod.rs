@@ -135,6 +135,19 @@ pub enum Hit {
     Body(Item),
     /// A part of the active tool's gizmo: an axis, or `Free` for its middle or ring.
     Gizmo(Axis),
+    /// A handle of a landform of the terrain.
+    Landform(usize, LandformHandle),
+}
+
+/// What of a landform is dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandformHandle {
+    /// Its middle, or its start when it is stretched along a line.
+    Center,
+    /// The far end of the line it is stretched along.
+    To,
+    /// The edge of its full effect: its radius.
+    Edge,
 }
 
 /// A part of a road limited to stretches of it.
@@ -201,6 +214,11 @@ enum Target {
     },
     Marker {
         marker: Marker,
+    },
+    Landform {
+        index: usize,
+        handle: LandformHandle,
+        start: open_racing_track_project::project::Landform,
     },
     Prop {
         index: usize,
@@ -567,6 +585,9 @@ pub struct Tool {
     pub outliner_hover: Option<Item>,
     /// A popup of the UI is open: the view takes no clicks or keys.
     pub blocked: bool,
+    /// The terrain's landforms are shown and their handles picked (the Terrain tab is
+    /// open).
+    pub landforms: bool,
     pub modal: Option<Modal>,
     pub draw: Option<Draw>,
     pub hover: Option<Hit>,

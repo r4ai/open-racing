@@ -70,6 +70,12 @@ struct Args {
     /// How far the camera stands from what it looks at, m.
     #[arg(long)]
     distance: Option<f32>,
+    /// How far above the horizon the camera looks down from, degrees (90 from above).
+    #[arg(long)]
+    pitch: Option<f32>,
+    /// Which way round the camera stands, degrees anticlockwise from the east.
+    #[arg(long)]
+    yaw: Option<f32>,
     /// Hide lines, names, stretches and markers drawn over the track.
     #[arg(long)]
     clean: bool,
@@ -176,6 +182,14 @@ fn main() {
     viewport::frame_selection(&editor, &mut orbit);
     if args.top {
         viewport::look(&mut orbit, viewport::ViewDir::Top);
+    }
+    if let Some(p) = args.pitch {
+        orbit.pitch = p.to_radians().clamp(-1.5695, 1.5695);
+    }
+    if let Some(y) = args.yaw {
+        // The orbit's yaw is round Bevy's up axis from its +X (the east), towards +Z (the
+        // south).
+        orbit.yaw = -y.to_radians();
     }
     let mut tool = viewport::Tool::editing(edit_mode);
     if args.clean {

@@ -20,6 +20,12 @@ const AT_EDGES: f64 = 0.03;
 const HELD: f64 = 4.0;
 /// Rounds of smoothing between the roads.
 const SMOOTHING: usize = 60;
+/// Beyond the held ground, how far the ground eases from the roads' edges to the
+/// elevation data's heights, m.
+const BLEND: f64 = 30.0;
+/// Over how far beyond the held ground landforms come in, m, so that the ground still
+/// meets the roads' edges.
+const LANDFORM_EASE: f64 = 10.0;
 /// Cells per side of a rendered chunk.
 const CHUNK: usize = 32;
 /// Edge of the buckets that frames are looked up in, m.
@@ -105,7 +111,13 @@ impl Lookup {
     }
 }
 
-pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
+/// The terrain round the built roads; away from them it follows `heights`, the
+/// project's elevation data read in, if it has any.
+pub fn build(
+    project: &Project,
+    roads: &[RoadBuild],
+    heights: Option<&crate::dem::Heights>,
+) -> Option<TerrainBuild> {
     let t = &project.terrain;
     if !t.enabled || roads.is_empty() || t.cell <= 0.0 {
         return None;
@@ -123,12 +135,15 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
     let ny = ((hi.y - lo.y) / t.cell).ceil() as usize + 1;
     let lookup = Lookup::new(roads, lo, hi);
 
-    // Heights, and whether smoothing may move them, a row at a time in parallel.
-    let rows: Vec<(Vec<f64>, Vec<bool>)> = (0..ny)
+    let offset = t.heights_offset;
+    // Heights, whether smoothing may move them, and how far beyond the roads' edges
+    // each is, a row at a time in parallel.
+    let rows: Vec<(Vec<f64>, Vec<bool>, Vec<f64>)> = (0..ny)
         .into_par_iter()
         .map(|j| {
             let mut z = vec![0.0; nx];
             let mut free = vec![false; nx];
+            let mut away = vec![0.0; nx];
             for i in 0..nx {
                 let p = lo + DVec2::new(i as f64, j as f64) * t.cell;
                 let Some((r, k)) = lookup.nearest(roads, p) else {
@@ -149,15 +164,22 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
                     } else {
                         (right - d, right_edge)
                     };
-                    free[i] = beyond > HELD;
-                    edge.z - AT_EDGES
+                    away[i] = beyond;
+                    // Far enough out, the ground is the real place's: held there.
+                    let real = heights
+                        .filter(|_| beyond > HELD + BLEND)
+                        .and_then(|h| h.at(p))
+                        .map(|h| h + offset);
+                    free[i] = beyond > HELD && real.is_none();
+                    real.unwrap_or(edge.z - AT_EDGES)
                 };
             }
-            (z, free)
+            (z, free, away)
         })
         .collect();
     let mut z: Vec<f64> = rows.iter().flat_map(|r| r.0.iter().copied()).collect();
     let free: Vec<bool> = rows.iter().flat_map(|r| r.1.iter().copied()).collect();
+    let away: Vec<f64> = rows.iter().flat_map(|r| r.2.iter().copied()).collect();
     let mut next = z.clone();
     for _ in 0..SMOOTHING {
         next.par_chunks_mut(nx)
@@ -172,6 +194,30 @@ pub fn build(project: &Project, roads: &[RoadBuild]) -> Option<TerrainBuild> {
                 }
             });
         std::mem::swap(&mut z, &mut next);
+    }
+
+    // Landforms shape the ground away from the roads, coming in gently beyond the
+    // held ground so that it still meets their edges.
+    if !t.landforms.is_empty() {
+        z.par_chunks_mut(nx).enumerate().for_each(|(j, row)| {
+            for (i, h) in row.iter_mut().enumerate() {
+                let ease = ((away[j * nx + i] - HELD) / LANDFORM_EASE).clamp(0.0, 1.0);
+                if ease <= 0.0 {
+                    continue;
+                }
+                let p = lo + DVec2::new(i as f64, j as f64) * t.cell;
+                for l in &t.landforms {
+                    let w = l.weight(p) * ease;
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    *h = match l.kind {
+                        crate::project::LandformKind::Raise(d) => *h + d * w,
+                        crate::project::LandformKind::Level(v) => *h + (v - *h) * w,
+                    };
+                }
+            }
+        });
     }
 
     clamp_under(&mut z, roads, lo, t.cell, (nx, ny));
@@ -268,12 +314,64 @@ fn clamp_under(z: &mut [f64], roads: &[RoadBuild], lo: DVec2, cell: f64, (nx, ny
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::{Landform, LandformKind};
+
+    /// The terrain's height nearest `p`.
+    fn height(t: &TerrainBuild, p: DVec2) -> f64 {
+        let v = t
+            .solid
+            .positions
+            .iter()
+            .min_by(|a, b| {
+                let d = |q: &[f32; 3]| DVec2::new(q[0] as f64, q[1] as f64).distance(p);
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap();
+        v[2] as f64
+    }
+
+    #[test]
+    fn away_from_the_roads_the_ground_follows_elevation_data_and_landforms() {
+        let mut project = Project::new("t");
+        // Flat elevation data 20 m up over the whole place.
+        let asc = "ncols 3\nnrows 3\nxllcorner -1000\nyllcorner -1000\ncellsize 1000\n20 20 20\n20 20 20\n20 20 20\n";
+        let heights = crate::dem::read("ground.asc", asc, None).unwrap();
+        project.terrain.heights_offset = -5.0;
+        project.terrain.landforms = vec![
+            Landform {
+                name: "pad".into(),
+                center: DVec2::new(200.0, -150.0),
+                to: None,
+                radius: 20.0,
+                falloff: 10.0,
+                kind: LandformKind::Level(2.0),
+            },
+            Landform {
+                name: "bank".into(),
+                center: DVec2::new(0.0, 400.0),
+                to: Some(DVec2::new(200.0, 400.0)),
+                radius: 10.0,
+                falloff: 20.0,
+                kind: LandformKind::Raise(6.0),
+            },
+        ];
+        let road = crate::road::build(&project, 0);
+        let t = build(&project, std::slice::from_ref(&road), Some(&heights)).unwrap();
+        // Far out: the data's 20 m, less the offset.
+        assert!((height(&t, DVec2::new(-300.0, -150.0)) - 15.0).abs() < 0.01);
+        // The pad, level at 2 m; along the bank, 6 m up.
+        assert!((height(&t, DVec2::new(200.0, -150.0)) - 2.0).abs() < 0.01);
+        assert!((height(&t, DVec2::new(100.0, 400.0)) - 21.0).abs() < 0.01);
+        // The road still lies on the ground under it.
+        let f = &road.sampled.frames[10];
+        assert!(height(&t, f.pos.truncate()) < f.pos.z);
+    }
 
     #[test]
     fn ground_lies_under_the_road() {
         let project = Project::new("t");
         let road = crate::road::build(&project, 0);
-        let terrain = build(&project, std::slice::from_ref(&road)).unwrap();
+        let terrain = build(&project, std::slice::from_ref(&road), None).unwrap();
         let f = &road.sampled.frames[10];
         // The grid vertex nearest the road's centre is below it.
         let v = terrain

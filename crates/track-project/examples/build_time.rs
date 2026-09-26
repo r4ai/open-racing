@@ -21,7 +21,7 @@ fn main() {
         overlap::resolve(&mut roads);
         time("  overlaps", t);
         let t = Instant::now();
-        let _ = terrain::build(&p, &roads);
+        let _ = terrain::build(&p, &roads, None);
         time("  terrain", t);
         let t = Instant::now();
         let scene = bake::build(&p);

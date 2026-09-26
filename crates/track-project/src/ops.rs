@@ -250,6 +250,13 @@ pub enum Op {
     SetTerrain {
         terrain: Terrain,
     },
+    /// Adds a landform to the terrain, or replaces the one of the same name.
+    PutLandform {
+        landform: crate::project::Landform,
+    },
+    RemoveLandform {
+        name: String,
+    },
     /// Sets or removes the reference image the editor shows to trace over.
     SetReference {
         reference: Option<Reference>,
@@ -772,6 +779,12 @@ impl Op {
             }
             Op::SetPit { pit } => p.markers.pit = pit,
             Op::SetTerrain { terrain } => p.terrain = terrain,
+            Op::PutLandform { landform } => {
+                put(&mut p.terrain.landforms, landform, |l| &l.name, None)
+            }
+            Op::RemoveLandform { name } => {
+                remove(&mut p.terrain.landforms, "landform", &name, |l| &l.name)?
+            }
             Op::SetReference { reference } => p.reference = reference,
             Op::SetGeo { geo } => p.geo = geo,
             Op::PutSurface { surface } => put(&mut p.surfaces, surface, |s| &s.name, None),
@@ -941,6 +954,8 @@ impl Op {
             Op::SetMarkers { .. } => "SetMarkers",
             Op::SetPit { .. } => "SetPit",
             Op::SetTerrain { .. } => "SetTerrain",
+            Op::PutLandform { .. } => "PutLandform",
+            Op::RemoveLandform { .. } => "RemoveLandform",
             Op::SetReference { .. } => "SetReference",
             Op::SetGeo { .. } => "SetGeo",
             Op::PutSurface { .. } => "PutSurface",

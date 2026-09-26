@@ -387,6 +387,51 @@ pub fn gizmos(
         );
     }
 
+    // The terrain's landforms: their full effect and, faint, how far it eases out.
+    if tool.landforms {
+        let flat = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        for (i, l) in p.terrain.landforms.iter().enumerate() {
+            let color = theme::LANDFORM;
+            let c = landform_handle(l, &built, LandformHandle::Center);
+            let ends: Vec<DVec3> = std::iter::once(c)
+                .chain(l.to.map(|_| landform_handle(l, &built, LandformHandle::To)))
+                .collect();
+            for &e in &ends {
+                gizmos.circle(Isometry3d::new(lift(e), flat), l.radius as f32, color);
+                gizmos.circle(
+                    Isometry3d::new(lift(e), flat),
+                    (l.radius + l.falloff) as f32,
+                    color.with_alpha(0.35),
+                );
+            }
+            if let [a, b] = ends[..] {
+                let across = (b - a).truncate().perp().normalize_or(DVec2::X).extend(0.0);
+                for side in [-1.0, 1.0] {
+                    let o = across * side * l.radius;
+                    gizmos.line(lift(a + o), lift(b + o), color);
+                    let o = across * side * (l.radius + l.falloff);
+                    gizmos.line(lift(a + o), lift(b + o), color.with_alpha(0.35));
+                }
+            }
+            for h in [
+                LandformHandle::Center,
+                LandformHandle::To,
+                LandformHandle::Edge,
+            ] {
+                if h == LandformHandle::To && l.to.is_none() {
+                    continue;
+                }
+                let at = landform_handle(l, &built, h);
+                let hovered = hover == Some(Hit::Landform(i, h));
+                gizmos.sphere(
+                    Isometry3d::from_translation(lift(at)),
+                    node_size(eye, at),
+                    if hovered { theme::HOVER } else { color },
+                );
+            }
+        }
+    }
+
     // What a grabbed node or stretch end has caught on.
     if let Some(at) = tool
         .modal

@@ -68,6 +68,8 @@ struct Meshes {
     walls: Vec<(Item, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
     /// Models that could not be read, and why.
     failed: Vec<String>,
+    /// What the build could not make as asked (elevation data), and why.
+    scene_failed: Vec<String>,
 }
 
 #[derive(Resource, Default)]
@@ -95,7 +97,11 @@ fn to_mesh(m: MeshData) -> Mesh {
 }
 
 fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
-    let scene = bake::build_with(&project, &mut cache.1.lock().expect("build cache"));
+    let scene = {
+        let mut built = cache.1.lock().expect("build cache");
+        built.dir = Some(dir.clone());
+        bake::build_with(&project, &mut built)
+    };
     let cache = cache.0;
     let (mut walls, mut failed) = (Vec::new(), Vec::new());
     let lines = scene
@@ -121,6 +127,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
         }
     }
     let issues = inspect::issues(&project, &scene);
+    let scene_failed = scene.failed.clone();
     let corners = project
         .roads
         .iter()
@@ -172,6 +179,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
         meshes,
         walls,
         failed,
+        scene_failed,
     }
 }
 
@@ -258,6 +266,11 @@ pub fn rebuild(
             }
         }
         let mut issues = done.issues;
+        issues.extend(done.scene_failed.into_iter().map(|text| Issue {
+            text,
+            road: None,
+            s: None,
+        }));
         issues.extend(done.failed.into_iter().map(|text| Issue {
             text,
             road: None,

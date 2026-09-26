@@ -448,9 +448,9 @@ fn geo_place(ui: &mut egui::Ui, c: &mut Ctx, r: &open_racing_track_project::proj
     }
 }
 
-pub(super) fn terrain_tab(ui: &mut egui::Ui, editor: &mut Editor) {
-    let (surfaces, materials) = names(&editor.project);
-    let mut t = editor.project.terrain.clone();
+pub(super) fn terrain_tab(ui: &mut egui::Ui, c: &mut Ctx) {
+    let (surfaces, materials) = names(&c.editor.project);
+    let mut t = c.editor.project.terrain.clone();
     let mut changed = false;
     section(ui, "Terrain", "terrain", true, |ui| {
         ui.weak("Ground round the roads, just under them and meeting their outer edges.");
@@ -463,10 +463,179 @@ pub(super) fn terrain_tab(ui: &mut egui::Ui, editor: &mut Editor) {
             &mut t.material,
             &materials,
         );
-        changed |= drag(ui, "Margin m", &mut t.margin, 1.0, 0.0..=2000.0);
+        changed |= drag(ui, "Margin m", &mut t.margin, 1.0, 0.0..=5000.0);
         changed |= drag(ui, "Cell m", &mut t.cell, 0.5, 2.0..=50.0);
     });
+    section(ui, "Elevation data", "terrain heights", true, |ui| {
+        ui.weak("Away from the roads the ground follows the real place's heights: a GeoTIFF, an ESRI ASCII grid or x y z points, in metres, longitudes and latitudes or UTM.");
+        row(ui, "File", |ui| match &t.heights {
+            Some(f) => ui.label(f.display().to_string()),
+            None => ui.weak("none: level with the roads' edges"),
+        });
+        row(ui, "", |ui| {
+            if ui.button("Choose…").clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .add_filter(
+                        "elevation data",
+                        &["tif", "tiff", "asc", "xyz", "csv", "txt"],
+                    )
+                    .pick_file()
+            {
+                match import_heights(&c.editor.dir, &file) {
+                    Ok(rel) => {
+                        t.heights = Some(rel);
+                        changed = true;
+                    }
+                    Err(e) => c.editor.status = format!("not imported: {e}"),
+                }
+            }
+            if t.heights.is_some() && ui.button("Remove").clicked() {
+                t.heights = None;
+                changed = true;
+            }
+        });
+        if t.heights.is_some() {
+            changed |= row(ui, "Offset", |ui| {
+                number(ui, &mut t.heights_offset, 0.05, " m")
+            });
+            ui.weak("Added to the data's heights, to bring them to the roads'.");
+            if ui
+                .button("Put every node on it")
+                .on_hover_text("Roads' and splines' nodes at the data's height (with the offset), so the roads lie on the ground")
+                .clicked()
+            {
+                nodes_onto_heights(c);
+            }
+        }
+    });
+    section(ui, "Landforms", "terrain landforms", true, |ui| {
+        ui.weak("Hills and banks raised, hollows dug and pads levelled, away from the roads. Drag their middles and edges in the view while this tab is open.");
+        let mut remove = None;
+        for (i, l) in t.landforms.iter_mut().enumerate() {
+            egui::CollapsingHeader::new(format!(
+                "{}  ·  {}",
+                l.name,
+                match l.kind {
+                    LandformKind::Raise(h) if h < 0.0 => format!("dug {:.1} m", -h),
+                    LandformKind::Raise(h) => format!("raised {h:.1} m"),
+                    LandformKind::Level(h) => format!("level at {h:.1} m"),
+                }
+            ))
+            .id_salt(("landform", i))
+            .show(ui, |ui| {
+                changed |= row(ui, "Name", |ui| {
+                    ui.text_edit_singleline(&mut l.name).lost_focus()
+                });
+                let (mut level, mut h) = match l.kind {
+                    LandformKind::Raise(h) => (false, h),
+                    LandformKind::Level(h) => (true, h),
+                };
+                let before = (level, h);
+                row(ui, "Kind", |ui| {
+                    ui.selectable_value(&mut level, false, "Raise");
+                    ui.selectable_value(&mut level, true, "Level at");
+                });
+                row(ui, if level { "Height" } else { "By" }, |ui| {
+                    number(ui, &mut h, 0.05, " m")
+                });
+                if (level, h) != before {
+                    l.kind = if level {
+                        LandformKind::Level(h)
+                    } else {
+                        LandformKind::Raise(h)
+                    };
+                    changed = true;
+                }
+                let mut at = l.center.extend(0.0);
+                if row(ui, "Middle X", |ui| number(ui, &mut at.x, 0.5, " m"))
+                    | row(ui, "Y", |ui| number(ui, &mut at.y, 0.5, " m"))
+                {
+                    let d = at.truncate() - l.center;
+                    l.center += d;
+                    l.to = l.to.map(|t| t + d);
+                    changed = true;
+                }
+                let mut along = l.to.is_some();
+                if check(ui, &mut along, "Along a line (a bank)") {
+                    l.to = along.then(|| l.center + glam::DVec2::new(100.0, 0.0));
+                    changed = true;
+                }
+                if let Some(to) = &mut l.to {
+                    changed |= row(ui, "To X", |ui| number(ui, &mut to.x, 0.5, " m"));
+                    changed |= row(ui, "Y", |ui| number(ui, &mut to.y, 0.5, " m"));
+                }
+                changed |= drag(ui, "Radius m", &mut l.radius, 0.2, 0.0..=5000.0);
+                changed |= drag(ui, "Falloff m", &mut l.falloff, 0.2, 0.0..=5000.0);
+                if ui.button("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            t.landforms.remove(i);
+            changed = true;
+        }
+        if ui
+            .button("+ Landform")
+            .on_hover_text("A hill where the view looks")
+            .clicked()
+        {
+            let at = open_racing_track_render::from_bevy(c.orbit.focus).truncate();
+            let mut n = 1;
+            while t
+                .landforms
+                .iter()
+                .any(|l| l.name == format!("landform {n}"))
+            {
+                n += 1;
+            }
+            t.landforms.push(Landform {
+                name: format!("landform {n}"),
+                center: at,
+                to: None,
+                radius: 30.0,
+                falloff: 40.0,
+                kind: LandformKind::Raise(5.0),
+            });
+            changed = true;
+        }
+    });
     if changed {
-        editor.apply(vec![Op::SetTerrain { terrain: t }], Some("terrain"));
+        c.editor
+            .apply(vec![Op::SetTerrain { terrain: t }], Some("terrain"));
+    }
+}
+
+/// Copies elevation data into the project's `assets/terrain`, giving its path there.
+fn import_heights(
+    dir: &std::path::Path,
+    file: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let name = file.file_name().ok_or("no file name")?;
+    let rel = std::path::Path::new("assets").join("terrain").join(name);
+    let target = dir.join(&rel);
+    if target != file {
+        std::fs::create_dir_all(target.parent().expect("a folder")).map_err(|e| e.to_string())?;
+        std::fs::copy(file, &target).map_err(|e| e.to_string())?;
+    }
+    Ok(rel)
+}
+
+/// Every road's and spline's nodes on the terrain's elevation data.
+fn nodes_onto_heights(c: &mut Ctx) {
+    use open_racing_track_project::dem;
+    let t = &c.editor.project.terrain;
+    let Some(file) = &t.heights else { return };
+    let offset = t.heights_offset;
+    match dem::read_file(&c.editor.dir.join(file), c.editor.project.geo) {
+        Ok(h) => {
+            let (ops, moved) = dem::node_ops(&c.editor.project, &h, &[], offset);
+            if moved == 0 {
+                c.editor.status = "the elevation data does not cover the nodes".into();
+            } else if c.editor.apply(ops, None) {
+                c.editor.status = format!("{moved} nodes put on the ground");
+            }
+        }
+        Err(e) => c.editor.status = e.to_string(),
     }
 }

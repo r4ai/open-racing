@@ -82,7 +82,12 @@ trackctl guide                          # this text
         pit: Some((road: "pit", speed_limit: 22.2, boxes: [0.5, 0.6],
                    box_side: Right, box_offset: 4)),
     ),
-    terrain: (enabled: true, surface: "grass", material: "grass", margin: 200, cell: 8),
+    terrain: (enabled: true, surface: "grass", material: "grass", margin: 200, cell: 8,
+              heights: Some("assets/terrain/dem.tif"), heights_offset: 0.3,   // optional
+              landforms: [(name: "bank", center: (-560, -600), to: Some((-300, -520)),
+                           radius: 15, falloff: 30, kind: Raise(8)),
+                          (name: "paddock", center: (-750, -500), radius: 60,
+                           falloff: 40, kind: Level(-22))]),
     surfaces: [(name: "asphalt", props: (kind: Asphalt, grip: 1.0, drag: 0.0)), ...],
     materials: [(name: "asphalt", color: (1, 1, 1), texture: Builtin(Asphalt),
                  tile: (4, 4), roughness: 0.8, reflectance: 0.5), ...,
@@ -137,6 +142,9 @@ trackctl guide                          # this text
 **Pit lane.** The pit lane is a separate, open road. It starts where it leaves the track and ends where it rejoins.
 
 **Terrain.** The terrain fills in around the roads. It lies just under them and meets their outer edges.
+
+- `heights` is elevation data the ground away from the roads follows (a GeoTIFF, an ESRI ASCII grid or x y z points, in metres, longitudes and latitudes, or WGS 84 UTM metres), with `heights_offset` added. Within about 30 m of the roads' outer edges it eases from their edges to the data.
+- `landforms` shape the ground away from the roads: `Raise(m)` raises a hill or bank (negative digs a hollow) and `Level(m)` levels a pad at that height, round `center` or, with `to`, along the line from `center` to `to`, at full effect out to `radius` and easing to nothing over `falloff` more.
 
 ## Operations
 
@@ -230,6 +238,7 @@ and grass, and concrete walls, guard rails, tyre walls and catch fences.
 | `SetMarkers` | `start?`, `sectors?`, `grid?` | sets the race markers |
 | `SetPit` | `pit: Some((...))` or `None` | sets or removes the pit lane |
 | `SetTerrain` | `terrain` | sets the terrain |
+| `PutLandform` / `RemoveLandform` | `landform` / `name` | adds or replaces, or removes, a hill, bank, hollow or level pad of the terrain |
 | `SetReference` | `reference: Some((image, center, width, rotation?, height?, opacity?, visible?))` or `None` | sets or removes the image the editor shows to trace a real circuit over; not part of the track |
 | `SetGeo` | `geo: Some((lon, lat))` or `None` | sets where the project's (0, 0) lies on the Earth |
 
@@ -262,10 +271,12 @@ image or track map (PNG, JPEG, DDS) under the view to trace over, placed by a di
 measured on it or by the longitudes and latitudes of its edges (the Reference image tab;
 `SetReference`).
 
-`trackctl dem <project> <file> [--lines a,b] [--offset m]` puts roads' and splines'
-nodes on the ground of elevation data: an ESRI ASCII grid (`.asc`) or `x y z` points
-(`.xyz`, `.csv`), in metres or longitudes and latitudes. The editor does the same from
-File › Heights from Elevation Data.
+`trackctl dem <project> <file> [--lines a,b] [--offset m] [--terrain]` puts roads' and
+splines' nodes on the ground of elevation data: a GeoTIFF (`.tif`), an ESRI ASCII grid
+(`.asc`) or `x y z` points (`.xyz`, `.csv`), in metres, longitudes and latitudes, or
+UTM metres. With `--terrain` the file is copied into the project and the terrain away
+from the roads follows it too. The editor does the same from File › Heights from
+Elevation Data and the Terrain tab, where landforms are added and dragged in the view.
 
 `trackctl kerbs <project> [--corners 1,4] [--style kerb] [--width m] [--no-entry]
 [--no-apex] [--no-exit] [--outside gravel] [--outside-width m] [--wall "tyre wall"]

@@ -81,6 +81,16 @@ pub fn start_modal(
             }
         }
         Some(Hit::Marker(marker)) => Target::Marker { marker },
+        Some(Hit::Landform(index, handle)) => {
+            let Some(l) = editor.project.terrain.landforms.get(index) else {
+                return;
+            };
+            Target::Landform {
+                index,
+                handle,
+                start: l.clone(),
+            }
+        }
         Some(Hit::Range(end)) => Target::Range { end },
         Some(Hit::Reach(end)) => Target::Reach { end },
         Some(Hit::Edge(r, node, side)) => {
@@ -182,6 +192,9 @@ pub fn start_modal(
         }
         Target::Handle { node, start, .. } => (Mode::Grab, *node + *start),
         Target::Marker { .. } => (Mode::Grab, tool.pointer.unwrap_or_default()),
+        Target::Landform { handle, start, .. } => {
+            (Mode::Grab, landform_handle(start, built, *handle))
+        }
         Target::Range { end } => {
             let Some(road) = editor.project.roads.get(end.road) else {
                 return;
@@ -463,6 +476,7 @@ pub(super) fn transform_ops(
         Target::Shape { .. } => shape_ops(m, p),
         Target::Prop { .. } => prop_ops(editor, m, p),
         Target::Marker { .. } => marker_ops(editor, built, m, p),
+        Target::Landform { .. } => landform_ops(editor, m, p),
     }
 }
 
@@ -1294,4 +1308,55 @@ pub fn mirror(editor: &mut Editor, tool: &Tool, built: &Built, x: bool) {
             }
         );
     }
+}
+
+/// A landform's middle or end moved, or its edge dragged out or in.
+fn landform_ops(editor: &Editor, m: &Modal, p: &Gesture) -> (Vec<Op>, String) {
+    let Target::Landform {
+        index,
+        handle,
+        start,
+    } = &m.target
+    else {
+        return (vec![], String::new());
+    };
+    let mut l = start.clone();
+    let readout = match handle {
+        LandformHandle::Center | LandformHandle::To => {
+            let d = p.slide(m).truncate();
+            if *handle == LandformHandle::Center {
+                // Stretched along a line, the whole line moves.
+                l.center += d;
+                l.to = l.to.map(|t| t + d);
+            } else {
+                l.to = l.to.map(|t| t + d);
+            }
+            format!("{}: Δ ({:.1}, {:.1}) m", l.name, d.x, d.y)
+        }
+        LandformHandle::Edge => {
+            let Some(at) = p.view.on_plane(p.cursor, m.pivot.z) else {
+                return (vec![], String::new());
+            };
+            let r = match l.to {
+                Some(to) => {
+                    let ab = to - l.center;
+                    let t = ((at.truncate() - l.center).dot(ab) / ab.length_squared().max(1e-9))
+                        .clamp(0.0, 1.0);
+                    at.truncate().distance(l.center + ab * t)
+                }
+                None => at.truncate().distance(l.center),
+            };
+            l.radius = match p.typed {
+                Some(v) => v.max(0.0),
+                None if p.snap => p.snapping.fine(r),
+                None => r,
+            };
+            format!("{}: radius {:.1} m", l.name, l.radius)
+        }
+    };
+    let mut terrain = editor.project.terrain.clone();
+    if let Some(slot) = terrain.landforms.get_mut(*index) {
+        *slot = l;
+    }
+    (vec![Op::SetTerrain { terrain }], readout)
 }

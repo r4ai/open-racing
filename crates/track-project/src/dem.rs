@@ -1,8 +1,11 @@
-//! Heights of the ground from elevation data, for giving a real circuit's roads the
-//! rise and fall the place has: an ESRI ASCII grid (.asc, as most elevation services
-//! export) or a list of points (.xyz, .csv or .txt: x y z per line). Coordinates are
-//! the project's metres, or longitudes and latitudes when the project knows where it
-//! lies on the Earth.
+//! Heights of the ground from elevation data, for giving a real circuit's roads and the
+//! land round them the rise and fall the place has: a GeoTIFF (.tif, as most elevation
+//! services give), an ESRI ASCII grid (.asc) or a list of points (.xyz, .csv or .txt:
+//! x y z per line). Coordinates are the project's metres, longitudes and latitudes, or
+//! UTM metres (GeoTIFFs), the last two once the project knows where it lies on the
+//! Earth.
+
+use std::path::Path;
 
 use glam::{DVec2, DVec3};
 
@@ -11,17 +14,28 @@ use crate::geo::{Geo, looks_geographic};
 use crate::ops::Op;
 use crate::project::Project;
 
+/// What a grid's coordinates are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Crs {
+    /// The project's own metres.
+    Project,
+    /// Longitudes and latitudes (x, y), about the project's place on the Earth.
+    Degrees(Geo),
+    /// Metres east and north in a UTM zone.
+    Utm { zone: u8, south: bool, geo: Geo },
+}
+
 /// Heights to look up at points of the project.
 pub enum Heights {
-    /// A regular grid: its south-west corner's middle, cell size, columns, rows (north
-    /// to south, as the file has them) and whether its coordinates are degrees.
+    /// A regular grid: its south-west cell's middle, its cells' size across and up,
+    /// columns, rows (north to south, as files have them) and what its coordinates are.
     Grid {
         origin: DVec2,
-        cell: f64,
+        cell: DVec2,
         cols: usize,
         rows: usize,
         values: Vec<Option<f64>>,
-        geo: Option<Geo>,
+        crs: Crs,
     },
     /// Scattered points in the project's metres, in buckets.
     Points {
@@ -33,8 +47,24 @@ pub enum Heights {
     },
 }
 
-/// Reads elevation data; `name` (the file's name) tells the format by its extension.
-/// Degrees need `geo`, the project's place on the Earth.
+/// Reads an elevation data file of any of the formats.
+pub fn read_file(path: &Path, geo: Option<Geo>) -> Result<Heights, Error> {
+    let name = path
+        .file_name()
+        .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let ext = name
+        .rsplit_once('.')
+        .map_or(String::new(), |(_, e)| e.to_ascii_lowercase());
+    if ext == "tif" || ext == "tiff" {
+        let bytes = std::fs::read(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        return geotiff(&bytes, geo).map_err(|e| Error::Invalid(format!("{name}: {e}")));
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+    read(&name, &src, geo)
+}
+
+/// Reads elevation data given as text; `name` (the file's name) tells the format by its
+/// extension. Degrees need `geo`, the project's place on the Earth.
 pub fn read(name: &str, src: &str, geo: Option<Geo>) -> Result<Heights, Error> {
     let ext = name
         .rsplit_once('.')
@@ -132,12 +162,162 @@ fn grid(src: &str, geo: Option<Geo>) -> Result<Heights, String> {
     }
     Ok(Heights::Grid {
         origin,
+        cell: DVec2::splat(cell),
+        cols,
+        rows,
+        values,
+        crs: match geo {
+            Some(g) if degrees => Crs::Degrees(g),
+            _ => Crs::Project,
+        },
+    })
+}
+
+/// GeoTIFF keys this reads: the model type, the raster type, and the projected
+/// coordinate system's EPSG code.
+const MODEL_TYPE: u16 = 1024;
+const RASTER_TYPE: u16 = 1025;
+const PROJECTED: u16 = 3072;
+
+/// A GeoTIFF's first band as a grid of heights: in degrees (any geographic system), UTM
+/// (WGS 84 zones, EPSG 32601–32660 and 32701–32760) or, without keys, the project's
+/// metres.
+fn geotiff(bytes: &[u8], geo: Option<Geo>) -> Result<Heights, String> {
+    use tiff::decoder::{Decoder, DecodingResult};
+    use tiff::tags::Tag;
+    let err = |e: tiff::TiffError| e.to_string();
+    let mut d = Decoder::new(std::io::Cursor::new(bytes)).map_err(err)?;
+    let (cols, rows) = d.dimensions().map_err(err)?;
+    let (cols, rows) = (cols as usize, rows as usize);
+    let scale = d
+        .get_tag_f64_vec(Tag::ModelPixelScaleTag)
+        .map_err(|_| "no pixel scale: not a GeoTIFF".to_string())?;
+    let tie = d
+        .get_tag_f64_vec(Tag::ModelTiepointTag)
+        .map_err(|_| "no tie point: not a GeoTIFF".to_string())?;
+    if scale.len() < 2 || tie.len() < 6 || cols < 2 || rows < 2 {
+        return Err("a GeoTIFF needs its pixel scale, a tie point and 2 × 2 pixels".into());
+    }
+    let keys: Vec<u16> = d
+        .get_tag_u16_vec(Tag::GeoKeyDirectoryTag)
+        .unwrap_or_default();
+    let key = |id: u16| {
+        keys.get(4..)?
+            .chunks_exact(4)
+            .find(|k| k[0] == id && k[1] == 0)
+            .map(|k| k[3])
+    };
+    let nodata: Option<f64> = d
+        .get_tag_ascii_string(Tag::GdalNodata)
+        .ok()
+        .and_then(|s| s.trim().trim_end_matches('\0').parse().ok());
+    let values: Vec<f64> = match d.read_image().map_err(err)? {
+        DecodingResult::U8(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::U16(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::U32(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::U64(v) => v.into_iter().map(|x| x as f64).collect(),
+        DecodingResult::F16(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::F32(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::F64(v) => v,
+        DecodingResult::I8(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::I16(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::I32(v) => v.into_iter().map(f64::from).collect(),
+        DecodingResult::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+    };
+    // More than one band: the first.
+    let bands = values.len() / (cols * rows).max(1);
+    if bands == 0 {
+        return Err("fewer pixels than the image's size".into());
+    }
+    let values: Vec<Option<f64>> = values
+        .into_iter()
+        .step_by(bands)
+        .map(|v| Some(v).filter(|v| v.is_finite() && nodata.is_none_or(|n| *v != n)))
+        .collect();
+    let cell = DVec2::new(scale[0], scale[1]);
+    // The tie point puts pixel (i, j) at (x, y): the pixel's corner, or with
+    // PixelIsPoint its middle.
+    let corner = key(RASTER_TYPE) != Some(2);
+    let (i, j) = (tie[0], tie[1]);
+    let at = DVec2::new(tie[3], tie[4]);
+    let top_left = at - DVec2::new(i * cell.x, -j * cell.y)
+        + if corner {
+            DVec2::new(0.5 * cell.x, -0.5 * cell.y)
+        } else {
+            DVec2::ZERO
+        };
+    let origin = DVec2::new(top_left.x, top_left.y - (rows - 1) as f64 * cell.y);
+    let crs = match key(MODEL_TYPE) {
+        Some(2) => Crs::Degrees(geo.ok_or(
+            "longitudes and latitudes, but the project does not know where it lies on the Earth yet: import a GPS centreline first",
+        )?),
+        Some(1) => {
+            let code = key(PROJECTED).unwrap_or(0);
+            let (zone, south) = match code {
+                32601..=32660 => (code - 32600, false),
+                32701..=32760 => (code - 32700, true),
+                _ => {
+                    return Err(format!(
+                        "EPSG:{code} is not read: export the data in WGS 84 (longitudes and latitudes) or a WGS 84 UTM zone"
+                    ));
+                }
+            };
+            let geo = geo.ok_or(
+                "UTM metres, but the project does not know where it lies on the Earth yet: import a GPS centreline first",
+            )?;
+            Crs::Utm {
+                zone: zone as u8,
+                south,
+                geo,
+            }
+        }
+        _ if cell.x < 0.1 && looks_geographic([origin]) => Crs::Degrees(geo.ok_or(
+            "longitudes and latitudes, but the project does not know where it lies on the Earth yet",
+        )?),
+        _ => Crs::Project,
+    };
+    Ok(Heights::Grid {
+        origin,
         cell,
         cols,
         rows,
         values,
-        geo: geo.filter(|_| degrees),
+        crs,
     })
+}
+
+/// WGS 84's semi-major axis, m, and flattening.
+const WGS84_A: f64 = 6_378_137.0;
+const WGS84_F: f64 = 1.0 / 298.257_223_563;
+
+/// A longitude and latitude as metres east and north in UTM zone `zone` (Krüger's
+/// series, to well within a millimetre in the zone).
+pub fn utm(lon: f64, lat: f64, zone: u8, south: bool) -> DVec2 {
+    let (a, f) = (WGS84_A, WGS84_F);
+    let n = f / (2.0 - f);
+    let big_a = a / (1.0 + n) * (1.0 + n * n / 4.0 + n.powi(4) / 64.0);
+    let alpha = [
+        n / 2.0 - 2.0 * n * n / 3.0 + 5.0 * n.powi(3) / 16.0,
+        13.0 * n * n / 48.0 - 3.0 * n.powi(3) / 5.0,
+        61.0 * n.powi(3) / 240.0,
+    ];
+    let lon0 = (zone as f64 * 6.0 - 183.0).to_radians();
+    let (phi, lam) = (lat.to_radians(), lon.to_radians() - lon0);
+    let e = (f * (2.0 - f)).sqrt();
+    let t = (phi.sin().atanh() - e * (e * phi.sin()).atanh()).sinh();
+    let xi = t.atan2(lam.cos());
+    let eta = (lam.sin() / (1.0 + t * t).sqrt()).atanh();
+    let (mut x, mut y) = (eta, xi);
+    for (j, al) in alpha.iter().enumerate() {
+        let k = 2.0 * (j + 1) as f64;
+        x += al * (k * xi).cos() * (k * eta).sinh();
+        y += al * (k * xi).sin() * (k * eta).cosh();
+    }
+    let k0 = 0.9996;
+    DVec2::new(
+        500_000.0 + k0 * big_a * x,
+        k0 * big_a * y + if south { 10_000_000.0 } else { 0.0 },
+    )
 }
 
 /// Points put in buckets for looking up those near a place.
@@ -178,14 +358,18 @@ impl Heights {
                 cols,
                 rows,
                 values,
-                geo,
+                crs,
             } => {
-                let q = match geo {
-                    Some(g) => {
+                let q = match *crs {
+                    Crs::Project => p,
+                    Crs::Degrees(g) => {
                         let (lon, lat) = g.to_geo(p);
                         DVec2::new(lon, lat)
                     }
-                    None => p,
+                    Crs::Utm { zone, south, geo } => {
+                        let (lon, lat) = geo.to_geo(p);
+                        utm(lon, lat, zone, south)
+                    }
                 };
                 // Column from the west, row from the south.
                 let f = (q - *origin) / *cell;
@@ -274,6 +458,66 @@ pub fn node_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utm_puts_the_central_meridian_at_500_km() {
+        let p = utm(135.0, 0.0, 53, false);
+        assert!((p - DVec2::new(500_000.0, 0.0)).length() < 1e-6, "{p}");
+        // 45° north on zone 31's meridian: the meridian's length there, scaled.
+        let p = utm(3.0, 45.0, 31, false);
+        assert!((p.x - 500_000.0).abs() < 1e-6);
+        assert!((p.y - 0.9996 * 4_984_944.378).abs() < 0.5, "{p}");
+        // South of the equator, from 10 000 km.
+        assert!(utm(135.0, -1.0, 53, true).y < 10_000_000.0);
+    }
+
+    /// A little GeoTIFF: 3 × 3 heights rising 1 m per pixel east, in UTM zone 53
+    /// metres, 10 m pixels, its top-left corner at `corner`.
+    fn tif(corner: DVec2) -> Vec<u8> {
+        use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
+        use tiff::tags::Tag;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        let mut img = enc.new_image::<Gray32Float>(3, 3).unwrap();
+        let e = img.encoder();
+        e.write_tag(Tag::ModelPixelScaleTag, &[10.0f64, 10.0, 0.0][..])
+            .unwrap();
+        e.write_tag(
+            Tag::ModelTiepointTag,
+            &[0.0f64, 0.0, 0.0, corner.x, corner.y, 0.0][..],
+        )
+        .unwrap();
+        // Version 1.1.0, 2 keys: projected, UTM 53 N.
+        e.write_tag(
+            Tag::GeoKeyDirectoryTag,
+            &[1u16, 1, 0, 2, MODEL_TYPE, 0, 1, 1, PROJECTED, 0, 1, 32653][..],
+        )
+        .unwrap();
+        img.write_data(&[0.0f32, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0])
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_geotiff_in_utm_gives_heights_round_the_project() {
+        let geo = Geo {
+            lon: 136.54,
+            lat: 34.84,
+        };
+        let here = utm(geo.lon, geo.lat, 53, false);
+        // The first pixel's middle 5 m west and north of the project's origin.
+        let bytes = tif(here + DVec2::new(-10.0, 10.0));
+        assert!(geotiff(&bytes, None).is_err(), "UTM needs the origin");
+        let h = geotiff(&bytes, Some(geo)).unwrap();
+        // The origin is a quarter of the way across the first two columns.
+        let v = h.at(DVec2::ZERO).unwrap();
+        assert!((v - 0.5).abs() < 0.01, "{v}");
+        // 15 m east and south of the first pixel: UTM's grid north is turned 0.9° from
+        // true north here (1.5° from the zone's middle), a quarter of a metre across.
+        let v = h.at(DVec2::new(10.0, -10.0)).unwrap();
+        assert!((v - 1.5).abs() < 0.03, "{v}");
+        assert!(h.at(DVec2::new(100.0, 0.0)).is_none());
+    }
 
     #[test]
     fn grids_and_points_give_heights_in_metres_or_degrees() {

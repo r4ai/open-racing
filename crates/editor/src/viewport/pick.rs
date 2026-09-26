@@ -307,3 +307,41 @@ pub(super) fn distance_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
     p.distance(a + ab * t)
 }
+
+/// Where a landform's handle is: on the ground under it.
+pub fn landform_handle(
+    l: &open_racing_track_project::project::Landform,
+    built: &Built,
+    handle: LandformHandle,
+) -> DVec3 {
+    let across = match l.to {
+        Some(to) => (to - l.center).perp().normalize_or(DVec2::X),
+        None => DVec2::X,
+    };
+    let p = match handle {
+        LandformHandle::Center => l.center,
+        LandformHandle::To => l.to.unwrap_or(l.center),
+        LandformHandle::Edge => l.center + across * l.radius,
+    };
+    drape(built.ground.as_deref(), p.extend(1e4))
+}
+
+/// The landform handle under the pointer.
+pub(super) fn pick_landform(editor: &Editor, built: &Built, view: View, at: Vec2) -> Option<Hit> {
+    let mut best = None;
+    for (i, l) in editor.project.terrain.landforms.iter().enumerate() {
+        let handles = [
+            LandformHandle::Center,
+            LandformHandle::To,
+            LandformHandle::Edge,
+        ];
+        for h in handles {
+            if h == LandformHandle::To && l.to.is_none() {
+                continue;
+            }
+            let p = landform_handle(l, built, h) + DVec3::Z * LIFT;
+            consider_pick(&mut best, Hit::Landform(i, h), view.screen(p), at);
+        }
+    }
+    best.map(|(hit, _)| hit)
+}

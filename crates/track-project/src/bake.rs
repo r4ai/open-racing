@@ -33,6 +33,9 @@ pub struct Scene {
     pub splines: Vec<SplineBuild>,
     /// Every physics mesh: roads, terrain and splines.
     pub ground: Ground,
+    /// What could not be built as the project asks, and why: elevation data that
+    /// cannot be read.
+    pub failed: Vec<String>,
 }
 
 impl Scene {
@@ -65,21 +68,70 @@ fn add_solids<'a>(ground: &mut Ground, parts: impl IntoIterator<Item = &'a Solid
 /// were.
 #[derive(Default)]
 pub struct BuildCache {
+    /// The project's directory, where its elevation data is read from.
+    pub dir: Option<PathBuf>,
+    /// The elevation data read in, with the file's time and the place on the Earth it
+    /// was read about.
+    heights: Option<(
+        PathBuf,
+        Option<SystemTime>,
+        Option<crate::geo::Geo>,
+        Arc<crate::dem::Heights>,
+    )>,
     /// The surfaces and materials the roads were built with.
     lists: Option<(Vec<crate::project::NamedSurface>, Vec<MaterialDef>)>,
     /// Each road as it was, and its build before overlaps were resolved.
     roads: Vec<(crate::project::Road, RoadBuild)>,
-    /// The terrain's settings and the roads it was built round, and the terrain.
-    terrain: Option<(
-        crate::project::Terrain,
-        Vec<crate::project::Road>,
-        Option<TerrainBuild>,
-    )>,
+    /// The terrain's settings, the roads and elevation data it was built round, and
+    /// the terrain.
+    terrain: Option<TerrainKey>,
 }
 
-/// Builds the roads, then the terrain under them, then the splines over both.
+type TerrainKey = (
+    crate::project::Terrain,
+    Vec<crate::project::Road>,
+    Option<Arc<crate::dem::Heights>>,
+    Option<TerrainBuild>,
+);
+
+/// Builds the roads, then the terrain under them, then the splines over both. Without
+/// the project's directory the terrain does not follow its elevation data.
 pub fn build(project: &Project) -> Scene {
     build_with(project, &mut BuildCache::default())
+}
+
+/// `build` of the project in `dir`, the terrain following its elevation data.
+pub fn build_in(project: &Project, dir: &Path) -> Scene {
+    build_with(project, &mut BuildCache::at(dir))
+}
+
+impl BuildCache {
+    /// A cache for building the project in `dir`.
+    pub fn at(dir: &Path) -> Self {
+        Self {
+            dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
+    /// The project's elevation data, read again only when its file changes.
+    fn heights(&mut self, project: &Project) -> Result<Option<Arc<crate::dem::Heights>>, Error> {
+        let (Some(file), Some(dir)) = (&project.terrain.heights, &self.dir) else {
+            return Ok(None);
+        };
+        let path = dir.join(file);
+        let time = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let Some((p, t, g, h)) = &self.heights
+            && *p == path
+            && *t == time
+            && *g == project.geo
+        {
+            return Ok(Some(h.clone()));
+        }
+        let h = Arc::new(crate::dem::read_file(&path, project.geo)?);
+        self.heights = Some((path, time, project.geo, h.clone()));
+        Ok(Some(h))
+    }
 }
 
 /// `build`, keeping what is the same as last time from `cache`.
@@ -87,11 +139,15 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
     use rayon::prelude::*;
     let lists = (project.surfaces.clone(), project.materials.clone());
     if cache.lists.as_ref() != Some(&lists) {
-        *cache = BuildCache {
-            lists: Some(lists),
-            ..Default::default()
-        };
+        cache.lists = Some(lists);
+        cache.roads.clear();
+        cache.terrain = None;
     }
+    let mut failed = Vec::new();
+    let heights = cache.heights(project).unwrap_or_else(|e| {
+        failed.push(format!("terrain: {e}"));
+        None
+    });
     let old = std::mem::take(&mut cache.roads);
     let fresh: Vec<RoadBuild> = (0..project.roads.len())
         .into_par_iter()
@@ -111,13 +167,23 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
         .collect();
     let mut roads = fresh;
     crate::overlap::resolve(&mut roads);
+    let same_heights = |h: &Option<Arc<crate::dem::Heights>>| match (h, &heights) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
     let terrain = match &cache.terrain {
-        Some((t, r, built)) if *t == project.terrain && *r == project.roads => built.clone(),
+        Some((t, r, h, built))
+            if *t == project.terrain && *r == project.roads && same_heights(h) =>
+        {
+            built.clone()
+        }
         _ => {
-            let built = terrain::build(project, &roads);
+            let built = terrain::build(project, &roads, heights.as_deref());
             cache.terrain = Some((
                 project.terrain.clone(),
                 project.roads.clone(),
+                heights.clone(),
                 built.clone(),
             ));
             built
@@ -150,6 +216,7 @@ pub fn build_with(project: &Project, cache: &mut BuildCache) -> Scene {
         terrain,
         splines,
         ground,
+        failed,
     }
 }
 
@@ -360,7 +427,10 @@ pub fn add_model_walls(
 /// `dir`.
 pub fn bake(project: &Project, dir: &Path, cache: &mut Cache) -> Result<TrackPackage, Error> {
     project.validate()?;
-    let mut scene = build(project);
+    let mut scene = build_in(project, dir);
+    if let Some(e) = scene.failed.first() {
+        return Err(Error::Invalid(e.clone()));
+    }
 
     let mut visual = VisualBuilder::new();
     add_materials(project, dir, cache, &mut visual)?;

@@ -1114,7 +1114,8 @@ pub struct Pit {
     pub box_offset: f64,
 }
 
-/// Ground around the roads, shaped to meet their outer edges.
+/// Ground around the roads, shaped to meet their outer edges: level with them, or
+/// following elevation data of the real place away from them, and shaped by landforms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Terrain {
     pub enabled: bool,
@@ -1124,6 +1125,64 @@ pub struct Terrain {
     pub margin: f64,
     /// Size of its grid cells, m.
     pub cell: f64,
+    /// Elevation data the ground away from the roads follows: a GeoTIFF, an ESRI ASCII
+    /// grid or x y z points, relative to the project's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heights: Option<PathBuf>,
+    /// Added to the elevation data's heights, m, to bring them to the roads'.
+    #[serde(default)]
+    pub heights_offset: f64,
+    /// Hills, banks and hollows raised or dug, and level pads, away from the roads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landforms: Vec<Landform>,
+}
+
+/// A shape given to the ground away from the roads: round about `center`, or, with
+/// `to`, stretched along the line from `center` to `to` (a spectators' bank along a
+/// straight).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Landform {
+    pub name: String,
+    pub center: DVec2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DVec2>,
+    /// Out to here it takes its full effect, m.
+    pub radius: f64,
+    /// Beyond `radius` it eases to nothing over this, m.
+    pub falloff: f64,
+    pub kind: LandformKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LandformKind {
+    /// Raises the ground this far, m; negative digs it.
+    Raise(f64),
+    /// Levels the ground at this height, m: a pad for a building or a car park.
+    Level(f64),
+}
+
+impl Landform {
+    /// How much of its effect it has at `p`: 1 within its radius, easing to 0 across
+    /// its falloff.
+    pub fn weight(&self, p: DVec2) -> f64 {
+        let d = match self.to {
+            Some(to) => {
+                let ab = to - self.center;
+                let t =
+                    ((p - self.center).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                p.distance(self.center + ab * t)
+            }
+            None => p.distance(self.center),
+        };
+        if d <= self.radius {
+            return 1.0;
+        }
+        if self.falloff <= 0.0 || d >= self.radius + self.falloff {
+            return 0.0;
+        }
+        let t = 1.0 - (d - self.radius) / self.falloff;
+        t * t * (3.0 - 2.0 * t)
+    }
 }
 
 impl Project {
@@ -1220,6 +1279,9 @@ impl Project {
                 material: m("grass"),
                 margin: 200.0,
                 cell: 8.0,
+                heights: None,
+                heights_offset: 0.0,
+                landforms: vec![],
             },
             surfaces,
             materials,
@@ -1487,6 +1549,25 @@ impl Project {
             || self.material_index(&self.terrain.material).is_none()
         {
             return invalid("terrain: undefined surface or material".into());
+        }
+        for (i, l) in self.terrain.landforms.iter().enumerate() {
+            let finite = match l.kind {
+                LandformKind::Raise(h) | LandformKind::Level(h) => h.is_finite(),
+            };
+            if !(l.center.is_finite()
+                && l.to.is_none_or(|t| t.is_finite())
+                && l.radius >= 0.0
+                && l.falloff >= 0.0
+                && finite)
+            {
+                return invalid(format!(
+                    "landform \"{}\": its place, radius and falloff must be numbers, not negative",
+                    l.name
+                ));
+            }
+            if self.terrain.landforms[..i].iter().any(|o| o.name == l.name) {
+                return invalid(format!("two landforms are named \"{}\"", l.name));
+            }
         }
         Ok(())
     }
