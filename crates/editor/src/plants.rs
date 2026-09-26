@@ -657,6 +657,7 @@ mod tests {
             detail: 150.0,
             draw: 2000.0,
             variety: open_racing_track_project::project::VARIETY,
+            layout: open_racing_track_project::project::Layout::Grid,
             strokes: vec![],
             removed: vec![],
             placed: vec![],
@@ -700,6 +701,7 @@ mod tests {
             points: vec![DVec2::new(100.0, 60.0)],
             fill: false,
             hardness: 0.5,
+            stamp: None,
         });
         assert!(editor.apply(vec![Op::PutScatter { scatter: s }], None));
         let built = build(&editor);

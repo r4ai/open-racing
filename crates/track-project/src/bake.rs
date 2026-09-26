@@ -640,10 +640,10 @@ fn scatter_look(
     looks: &mut HashMap<String, Vec<u32>>,
     visual: &mut VisualBuilder,
 ) -> Vec<u32> {
-    let foliage = m.foliage();
-    let own = crate::scatter::plant_look(model, foliage);
+    let kind = m.kind();
+    let own = crate::scatter::varied_look(model, kind);
     let mut materials = looks
-        .entry(format!("{}|{foliage:?}", m.model.display()))
+        .entry(format!("{}|{kind:?}", m.model.display()))
         .or_insert_with(|| add_look(&own, visual))
         .clone();
     for slot in &m.materials {
@@ -653,10 +653,10 @@ fn scatter_look(
         ) else {
             continue;
         };
-        *to = match own.materials[slot.slot].plant {
+        *to = match own.materials[slot.slot].varies {
             None => i as u32,
-            plant => visual.add_material(Material {
-                plant,
+            varies => visual.add_material(Material {
+                varies,
                 ..visual.material(i as u32).clone()
             }),
         };
@@ -705,9 +705,9 @@ pub fn add_scatter(
             if list.is_empty() {
                 continue;
             }
-            let foliage = m.foliage();
+            let kind = m.kind();
             let key = format!(
-                "{}|{foliage:?}|{:?}|{}",
+                "{}|{kind:?}|{:?}|{}",
                 m.model.display(),
                 m.materials,
                 s.shadows
@@ -721,9 +721,9 @@ pub fn add_scatter(
             first.shape = near_shape;
             let mut levels = vec![first];
             if let Some(f) = &far[i] {
-                let key = format!("far {:p}|{foliage:?}|{}", Arc::as_ptr(f), s.shadows);
+                let key = format!("far {:p}|{kind:?}|{}", Arc::as_ptr(f), s.shadows);
                 second.shape = *shapes.entry(key).or_insert_with(|| {
-                    let materials = add_look(&crate::scatter::plant_look(f, foliage), visual);
+                    let materials = add_look(&crate::scatter::varied_look(f, kind), visual);
                     visual.add_shape(shape(f, &materials, s.shadows))
                 });
                 levels.push(second);

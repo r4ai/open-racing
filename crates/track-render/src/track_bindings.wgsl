@@ -26,8 +26,8 @@ const NORMAL_MAP: u32 = 4u;
 const SURFACE: u32 = 8u;
 const BASE_ALPHA_MASK: u32 = 16u;
 const DETAIL_NORMAL_MAP: u32 = 32u;
-// A plant's leaves: they take each copy's leaf colour and fall when it is bare.
-const LEAVES: u32 = 64u;
+// Takes each copy's colour (leaves, clothes), and is left out of a copy without.
+const TINTED: u32 = 64u;
 // Moves in the wind: `sway` and `flutter` apply, and the wind texture is present.
 const WIND: u32 = 128u;
 

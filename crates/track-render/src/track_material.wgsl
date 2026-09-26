@@ -13,9 +13,9 @@
 }
 #import open_racing::track_bindings::{
     params, sample, DETAIL, WORLD_UV, NORMAL_MAP, SURFACE, BASE_ALPHA_MASK, DETAIL_NORMAL_MAP,
-    LEAVES, MASK, LAYER_R, LAYER_G, LAYER_B, LAYER_A, NORMAL, SURFACE_TEXTURE, DETAIL_NORMAL,
+    TINTED, MASK, LAYER_R, LAYER_G, LAYER_B, LAYER_A, NORMAL, SURFACE_TEXTURE, DETAIL_NORMAL,
 }
-#import open_racing::track_plant::{leaf_colour, look}
+#import open_racing::track_plant::{look, tinted}
 
 // The package's tangent frame: B along increasing V on the surface, T = B × N. The
 // gradient of V follows from the screen-space derivatives of position and UV
@@ -102,14 +102,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         }
         pbr_input.material.base_color = vec4(base.rgb * d * p.multiplier, base.a);
     }
-    if (p.flags & LEAVES) != 0u {
+    if (p.flags & TINTED) != 0u {
         let c = pbr_input.material.base_color;
 #ifdef VERTEX_UVS_B
         let copy = look(in.instance_index, in.uv_b, true);
 #else
         let copy = look(in.instance_index, vec2(0.0), false);
 #endif
-        pbr_input.material.base_color = vec4(leaf_colour(c.rgb, copy), c.a);
+        pbr_input.material.base_color = vec4(tinted(c.rgb, copy), c.a);
     }
 #endif
 

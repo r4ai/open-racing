@@ -1366,6 +1366,9 @@ pub struct Stroke {
     /// 1 has a hard edge at `radius`.
     #[serde(default = "half", skip_serializing_if = "is_half")]
     pub hardness: f64,
+    /// A shape of texture it acts through, in patches (see `stamp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<crate::stamp::Stamp>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -1421,8 +1424,18 @@ impl Stroke {
     }
 
     /// How much it acts at `p`: fully within its hardness of its radius from its
-    /// path, easing smoothly to nothing at `radius` from it.
+    /// path, easing smoothly to nothing at `radius` from it, and as much as its stamp
+    /// lets it there.
     pub fn weight(&self, p: DVec2) -> f64 {
+        let w = self.reach(p);
+        match &self.stamp {
+            Some(s) if w > 0.0 => w * s.at(p),
+            _ => w,
+        }
+    }
+
+    /// How much it acts at `p` by its path, radius and hardness.
+    fn reach(&self, p: DVec2) -> f64 {
         let smooth = |t: f64| t * t * (3.0 - 2.0 * t);
         let soft = (1.0 - self.hardness.clamp(0.0, 1.0)) * self.radius;
         if self.fill && self.points.len() > 2 {
@@ -1456,6 +1469,7 @@ impl Stroke {
             Brush::Smooth | Brush::Paint | Brush::Erase => (0.0..=1.0).contains(&self.strength),
         };
         strength
+            && self.stamp.is_none_or(|s| s.is_valid())
             && (0.0..=1.0).contains(&self.hardness)
             && self.radius > 0.0
             && self.radius.is_finite()
@@ -1539,6 +1553,9 @@ pub struct Scatter {
     /// How much the copies' leaf colours differ from each other, 0 (none) to 1.
     #[serde(default = "variety", skip_serializing_if = "is_variety")]
     pub variety: f64,
+    /// How its places are laid out where it is painted.
+    #[serde(default, skip_serializing_if = "Layout::is_grid")]
+    pub layout: Layout,
     /// Where they were painted and wiped out (`Paint` and `Erase`), in order.
     #[serde(default)]
     pub strokes: Vec<Stroke>,
@@ -1627,12 +1644,44 @@ pub struct ScatterModel {
     /// What kind of plant it is, if any: how it moves in the wind and changes with the
     /// seasons. Left out, a built-in model's own kind, or else `Evergreen`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub foliage: Option<Foliage>,
+    pub kind: Option<Kind>,
 }
 
-/// What kind of plant a scatter's model is.
+/// How a scatter's places are laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Layout {
+    /// A grid `spacing` apart, each place jittered in its cell: natural, a little
+    /// clumped.
+    #[default]
+    Grid,
+    /// Evenly, as blue noise: `spacing` apart on the whole, none nearer than about half
+    /// of it.
+    Even,
+    /// In rows along the roads, `spacing` apart along them and across, from `clearance`
+    /// beyond their outer edges, every other row staggered, facing the road: avenues,
+    /// orchards, rows of spectators.
+    Rows,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 3] = [Layout::Grid, Layout::Even, Layout::Rows];
+
+    pub fn is_grid(&self) -> bool {
+        *self == Layout::Grid
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Layout::Grid => "Natural",
+            Layout::Even => "Even",
+            Layout::Rows => "Rows along roads",
+        }
+    }
+}
+
+/// What kind of thing a scatter's model is: a kind of plant, a crowd or neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Foliage {
+pub enum Kind {
     /// Not a plant: rocks, cones, stands. It stands still in the wind.
     Rigid,
     /// A conifer or other evergreen: it sways, and stays green.
@@ -1643,6 +1692,8 @@ pub enum Foliage {
     /// Long grass: it bends far in the wind, dries in late summer and is straw in
     /// winter.
     Grass,
+    /// Spectators: each stands facing the nearest road, in clothes of its own colour.
+    Crowd,
 }
 
 impl ScatterModel {
@@ -1652,16 +1703,16 @@ impl ScatterModel {
             weight,
             far: None,
             materials: vec![],
-            foliage: None,
+            kind: None,
         }
     }
 
     /// What kind of plant it is.
-    pub fn foliage(&self) -> Foliage {
-        self.foliage.unwrap_or_else(|| {
+    pub fn kind(&self) -> Kind {
+        self.kind.unwrap_or_else(|| {
             crate::shapes::name(&self.model)
-                .and_then(crate::shapes::foliage)
-                .unwrap_or(Foliage::Evergreen)
+                .and_then(crate::shapes::kind)
+                .unwrap_or(Kind::Evergreen)
         })
     }
 

@@ -26,7 +26,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::shader::{ShaderRef, load_shader_library};
 use glam::{DQuat, DVec3};
 use open_racing_track::{
-    AlphaMode as TrackAlpha, DetailMask, FAR_AWAY, Instance, Level, PlantLook, Visual,
+    AlphaMode as TrackAlpha, DetailMask, FAR_AWAY, Instance, Level, Varies, Visual,
 };
 
 /// Simulation is Z-up (ISO 8855), Bevy is Y-up: rotate −90° about X.
@@ -138,8 +138,8 @@ const SURFACE: u32 = 8;
 const BASE_ALPHA_MASK: u32 = 16;
 /// The detail normal map is present.
 const DETAIL_NORMAL_MAP: u32 = 32;
-/// A plant's leaves: they take each copy's leaf colour, and fall when it is bare.
-const LEAVES: u32 = 64;
+/// Takes each copy's colour (leaves, clothes), and is left out of a copy without.
+const TINTED: u32 = 64;
 /// Moves in the wind.
 const WIND: u32 = 128;
 
@@ -199,17 +199,17 @@ pub struct TrackExtension {
 }
 
 impl TrackExtension {
-    /// Makes it a plant's (see `open_racing_track::PlantLook`), or none.
-    pub fn set_plant(&mut self, plant: Option<PlantLook>) {
+    /// Makes it vary from copy to copy (see `open_racing_track::Varies`), or not.
+    pub fn set_varies(&mut self, varies: Option<Varies>) {
         let p = &mut self.params;
-        p.flags &= !(LEAVES | WIND);
+        p.flags &= !(TINTED | WIND);
         (p.sway, p.flutter) = (0.0, 0.0);
         self.wind = None;
-        let Some(plant) = plant else {
+        let Some(plant) = varies else {
             return;
         };
-        if plant.leaves {
-            p.flags |= LEAVES;
+        if plant.tinted {
+            p.flags |= TINTED;
         }
         if plant.sway > 0.0 || plant.flutter > 0.0 {
             p.flags |= WIND;
@@ -392,7 +392,7 @@ pub fn spawn_copies(
             Mesh3d(part.mesh.clone()),
             MeshMaterial3d(part.material.clone()),
             instance_transform(c),
-            MeshTag(u32::from_le_bytes(c.leaves)),
+            MeshTag(u32::from_le_bytes(c.tint)),
             extra.clone(),
         ));
         if let Some(range) = &range {
@@ -474,7 +474,7 @@ pub fn merge_tile(
             let looks: Vec<[f32; 2]> = copies
                 .iter()
                 .flat_map(|c| {
-                    let [r, g, b, a] = c.leaves.map(f32::from);
+                    let [r, g, b, a] = c.tint.map(f32::from);
                     std::iter::repeat_n([r + 256.0 * g, b + 256.0 * a], part.positions.len())
                 })
                 .collect();
@@ -581,7 +581,7 @@ pub fn add_materials(
                 ..default()
             };
             extension.params.reflection = m.reflection;
-            extension.set_plant(m.plant);
+            extension.set_varies(m.varies);
             if extension.normal_map.is_some() {
                 extension.params.flags |= NORMAL_MAP;
             }

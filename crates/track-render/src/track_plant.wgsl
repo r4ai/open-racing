@@ -1,10 +1,10 @@
 // Plants: copies swaying in the wind, their leaves fluttering, and each copy's own
-// leaf colour, or none at all when it is bare. See `open_racing_track::PlantLook` and
-// `open_racing_track::Instance::leaves`.
+// leaf colour, or none at all when it is bare. See `open_racing_track::Varies` and
+// `open_racing_track::Instance::tint`.
 #define_import_path open_racing::track_plant
 
 #import bevy_pbr::{mesh_bindings::mesh, mesh_functions}
-#import open_racing::track_bindings::{params, wind, LEAVES, WIND}
+#import open_racing::track_bindings::{params, wind, TINTED, WIND}
 
 // The wind `sway` and `flutter` are given at, m/s.
 const REFERENCE_WIND: f32 = 10.0;
@@ -47,7 +47,7 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn moved(world: vec3<f32>, normal: vec3<f32>, origin: vec3<f32>, instance_index: u32, t: f32, look: u32) -> vec3<f32> {
     let s = slot(instance_index);
     let p = params(s);
-    if (p.flags & LEAVES) != 0u && unpack(look).w < 0.0 {
+    if (p.flags & TINTED) != 0u && unpack(look).w < 0.0 {
         return origin;
     }
     if (p.flags & WIND) == 0u {
@@ -72,9 +72,9 @@ fn moved(world: vec3<f32>, normal: vec3<f32>, origin: vec3<f32>, instance_index:
     return out;
 }
 
-// The base colour of a plant's leaves in a copy's colour (`look`), keeping their
-// brightness.
-fn leaf_colour(base: vec3<f32>, look: u32) -> vec3<f32> {
+// A base colour in a copy's colour (`look`), for materials that take it, keeping
+// its brightness.
+fn tinted(base: vec3<f32>, look: u32) -> vec3<f32> {
     let l = unpack(look);
     if l.w <= 0.0 {
         return base;

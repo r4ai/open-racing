@@ -473,7 +473,7 @@ impl<'a> Materials<'a> {
             // side, which would z-fight if both sides of each were drawn.
             double_sided: false,
             detail,
-            plant: None,
+            varies: None,
         };
         let i = visual.add_material(material);
         self.added[index] = Some(i);

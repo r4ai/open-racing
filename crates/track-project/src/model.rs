@@ -7,7 +7,7 @@ use std::path::Path;
 use glam::{DMat3, DVec3, Mat3, Mat4, Vec3};
 use open_racing_sim::GroundMesh;
 use open_racing_track::texture::{self, Image};
-use open_racing_track::{AlphaMode, Material, Mesh, PlantLook, Texture, Visual, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, Varies, Texture, Visual, VisualBuilder};
 
 use crate::Error;
 use crate::project::Prop;
@@ -91,8 +91,8 @@ pub fn load(path: &Path) -> Result<Model, Error> {
                 gltf::material::AlphaMode::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided(),
-            plant: leaves(&m).then_some(PlantLook {
-                leaves: true,
+            varies: leaves(&m).then_some(Varies {
+                tinted: true,
                 ..Default::default()
             }),
             ..Default::default()

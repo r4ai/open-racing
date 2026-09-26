@@ -352,11 +352,11 @@ fn run(cli: Cli) -> Result<(), Error> {
                 hi.z - lo.z
             );
             let kind = open_racing_track_project::project::ScatterModel::new(model.clone(), 1.0)
-                .foliage();
-            println!("as a scatter's model: {kind:?} unless its foliage says otherwise");
-            let plant = open_racing_track_project::scatter::plant(kind, &m);
+                .kind();
+            println!("as a scatter's model: {kind:?} unless its kind says otherwise");
+            let plant = open_racing_track_project::scatter::varies(kind, &m);
             for (i, mat) in m.look.materials.iter().enumerate() {
-                let leaves = mat.plant.is_some_and(|p| p.leaves);
+                let leaves = mat.varies.is_some_and(|p| p.tinted);
                 let alpha = match mat.alpha_mode {
                     open_racing_track::AlphaMode::Opaque => "opaque".to_string(),
                     open_racing_track::AlphaMode::Mask(c) => format!("cut out below {c}"),
@@ -403,7 +403,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 };
                 let image = open_racing_track::texture::decode(&far.look.textures[t as usize].data)
                     .map_err(|e| Error::Invalid(e.to_string()))?;
-                let what = if mat.plant.is_some_and(|p| p.leaves) {
+                let what = if mat.varies.is_some_and(|p| p.tinted) {
                     "leaves"
                 } else if far.look.materials.len() > 1 {
                     "wood"

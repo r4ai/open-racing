@@ -3,7 +3,7 @@
 
 use open_racing_track_project::ops::StrokeTarget;
 use open_racing_track_project::project::{
-    Foliage, MAX_LAYERS, MaterialSlot, Scatter, ScatterModel, Terrain,
+    Kind, Layout, MAX_LAYERS, MaterialSlot, Scatter, ScatterModel, Terrain,
 };
 
 use super::*;
@@ -237,29 +237,31 @@ fn model_details(
 ) -> bool {
     let mut changed = false;
     let (_, materials) = names(&c.editor.project);
-    let kind = |f: Foliage| match f {
-        Foliage::Rigid => "not a plant",
-        Foliage::Evergreen => "evergreen",
-        Foliage::Deciduous => "broadleaf",
-        Foliage::Grass => "grass",
+    let kind = |f: Kind| match f {
+        Kind::Rigid => "not a plant",
+        Kind::Evergreen => "evergreen",
+        Kind::Deciduous => "broadleaf",
+        Kind::Grass => "grass",
+        Kind::Crowd => "spectators",
     };
     row(ui, "Plant", |ui| {
-        egui::ComboBox::from_id_salt(("scatter foliage", &s.name, i))
-            .selected_text(kind(m.foliage()))
+        egui::ComboBox::from_id_salt(("scatter kind", &s.name, i))
+            .selected_text(kind(m.kind()))
             .width(150.0)
             .show_ui(ui, |ui| {
                 for f in [
-                    Foliage::Evergreen,
-                    Foliage::Deciduous,
-                    Foliage::Grass,
-                    Foliage::Rigid,
+                    Kind::Evergreen,
+                    Kind::Deciduous,
+                    Kind::Grass,
+                    Kind::Crowd,
+                    Kind::Rigid,
                 ] {
                     if ui
-                        .selectable_label(m.foliage() == f, kind(f))
+                        .selectable_label(m.kind() == f, kind(f))
                         .clicked()
-                        && m.foliage() != f
+                        && m.kind() != f
                     {
-                        m.foliage = Some(f);
+                        m.kind = Some(f);
                         changed = true;
                     }
                 }
@@ -440,6 +442,19 @@ fn scatter_ui(
     changed |= drag(ui, "Steepest °", &mut s.max_slope, 0.5, 0.0..=90.0);
     changed |= check(ui, &mut s.collide, "Cars collide with them");
     changed |= check(ui, &mut s.shadows, "They cast shadows");
+    changed |= row(ui, "Layout", |ui| {
+        let mut changed = false;
+        egui::ComboBox::from_id_salt(("scatter layout", k))
+            .selected_text(s.layout.label())
+            .show_ui(ui, |ui| {
+                for l in Layout::ALL {
+                    changed |= ui.selectable_value(&mut s.layout, l, l.label()).changed();
+                }
+            })
+            .response
+            .on_hover_text("Natural: a jittered grid, a little clumped. Even: spread evenly, none nearer than about half the spacing. Rows along roads: rows the spacing apart beyond the roads' edges and the clearance, facing the road (avenues, spectators)");
+        changed
+    });
     changed |= row(ui, "Variety", |ui| {
         ui.add(egui::Slider::new(&mut s.variety, 0.0..=1.0).max_decimals(2))
             .on_hover_text("How much the copies' leaf colours differ from each other: 0 all alike")

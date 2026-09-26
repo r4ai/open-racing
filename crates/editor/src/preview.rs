@@ -18,7 +18,7 @@ use open_racing_track_project::corners::{self, Corner};
 use open_racing_track_project::curve::Sampled;
 use open_racing_track_project::inspect::{self, Issue};
 use open_racing_track_project::model::{Model, Placement};
-use open_racing_track_project::project::{Foliage, MaterialDef};
+use open_racing_track_project::project::{Kind, MaterialDef};
 use open_racing_track_project::road::MeshData;
 use open_racing_track_project::terrain::{PaintMask, TerrainBuild};
 use open_racing_track_project::{Cache, Project, bake};
@@ -89,6 +89,8 @@ pub struct Built {
     pub colours: Vec<Vec<Vec<[f32; 4]>>>,
     /// The scatters' names, in the order of `copies` and `sizes`.
     pub names: Vec<String>,
+    /// Where the roads' edges run, for scatters laid in rows along them.
+    pub edges: Arc<open_racing_track_project::scatter::Edges>,
     /// The editor's revision it was built from.
     pub revision: u64,
     /// Builds finished so far.
@@ -182,6 +184,7 @@ struct Meshes {
     sizes: Vec<Vec<[f32; 2]>>,
     colours: Vec<Vec<Vec<[f32; 4]>>>,
     names: Vec<String>,
+    edges: Arc<open_racing_track_project::scatter::Edges>,
     revision: u64,
     road_names: Vec<String>,
     spline_names: Vec<String>,
@@ -200,7 +203,7 @@ struct ScatterPart {
     /// project's materials used for some of its own, and whether it casts shadows.
     near_look: String,
     near: Arc<Model>,
-    foliage: Foliage,
+    kind: Kind,
     /// The project's materials used for some of the model's own: (its material, the
     /// project's).
     materials: Vec<(usize, usize)>,
@@ -361,20 +364,20 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
                 .iter()
                 .filter_map(|x| Some((x.slot, project.material_index(&x.material)?)))
                 .collect();
-            let foliage = def.foliage();
+            let kind = def.kind();
             scatter.push(ScatterPart {
                 scatter: s.name.clone(),
                 model: m,
                 near_look: format!(
-                    "{}|{foliage:?}|{materials:?}|{}",
+                    "{}|{kind:?}|{materials:?}|{}",
                     def.model.display(),
                     s.shadows
                 ),
                 near: near[m].clone(),
-                foliage,
+                kind,
                 materials,
                 far: far[m].clone().map(|f| {
-                    let look = format!("far {:p}|{foliage:?}|{}", Arc::as_ptr(&f), s.shadows);
+                    let look = format!("far {:p}|{kind:?}|{}", Arc::as_ptr(&f), s.shadows);
                     (look, f)
                 }),
                 levels: open_racing_track_project::scatter::fades(s, far[m].is_some()),
@@ -392,6 +395,7 @@ fn build(project: Project, cache: SharedCache, dir: PathBuf, revision: u64) -> M
         sizes,
         colours,
         names: project.scatter.iter().map(|s| s.name.clone()).collect(),
+        edges: Arc::new(keepout.edges.clone()),
         revision,
         road_names: project.roads.iter().map(|r| r.name.clone()).collect(),
         spline_names: project.splines.iter().map(|s| s.name.clone()).collect(),
@@ -532,7 +536,7 @@ pub fn rebuild(
                     shape_parts(
                         model,
                         look,
-                        part.foliage,
+                        part.kind,
                         slots,
                         part.shadows,
                         &mut state,
@@ -591,6 +595,7 @@ pub fn rebuild(
         built.sizes = done.sizes;
         built.colours = done.colours;
         built.names = done.names;
+        built.edges = done.edges;
         built.revision = done.revision;
         built.road_names = done.road_names;
         built.spline_names = done.spline_names;
@@ -616,13 +621,13 @@ fn model_look(look: &str) -> String {
 }
 
 /// A model's meshes ready to draw copies of: its own materials as a plant of
-/// `foliage`, made once for the model and the kind, with the project's used for some
+/// `kind`, made once for the model and the kind, with the project's used for some
 /// of them (`slots`: the model's material, the project's), made the plant's too.
 #[allow(clippy::too_many_arguments)]
 fn shape_parts(
     model: &Model,
     look: &str,
-    foliage: Foliage,
+    kind: Kind,
     slots: &[(usize, usize)],
     shadows: bool,
     state: &mut Rebuild,
@@ -631,7 +636,7 @@ fn shape_parts(
     materials: &mut Assets<TrackMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<ShapePart> {
-    let plant = open_racing_track_project::scatter::plant_look(model, foliage);
+    let plant = open_racing_track_project::scatter::varied_look(model, kind);
     let own = state
         .wall_looks
         .entry(model_look(look))
@@ -648,9 +653,9 @@ fn shape_parts(
                 .find(|(s, _)| *s == slot)
                 .and_then(|(_, i)| state.handles.get(*i))
                 .and_then(|h| {
-                    let as_plant = plant.materials.get(slot)?.plant;
+                    let as_plant = plant.materials.get(slot)?.varies;
                     let mut material = materials.get(h)?.clone();
-                    material.extension.set_plant(as_plant);
+                    material.extension.set_varies(as_plant);
                     Some(materials.add(material))
                 });
             let material = project
@@ -741,7 +746,7 @@ impl Scattered {
                     for &e in &g.entities[i] {
                         commands
                             .entity(e)
-                            .insert((t, MeshTag(u32::from_le_bytes(c.leaves))));
+                            .insert((t, MeshTag(u32::from_le_bytes(c.tint))));
                     }
                     dirty.extend([render::tile_of(old), render::tile_of(c)]);
                 }
@@ -817,7 +822,7 @@ fn spawn_copy(
                 Mesh3d(part.mesh.clone()),
                 MeshMaterial3d(part.material.clone()),
                 t,
-                MeshTag(u32::from_le_bytes(c.leaves)),
+                MeshTag(u32::from_le_bytes(c.tint)),
                 ChildOf(group),
             ));
             if let Some(range) = &range {

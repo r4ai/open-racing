@@ -58,6 +58,7 @@ fn main() {
             points: vec![middle, middle + glam::DVec2::X * 60.0],
             fill: false,
             hardness: open_racing_track_project::project::HARDNESS,
+            stamp: None,
         });
     let t = Instant::now();
     let _ = bake::build_with(&stroked, &mut cache);

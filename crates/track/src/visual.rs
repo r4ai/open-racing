@@ -64,22 +64,24 @@ pub struct Material {
     /// Render back faces too.
     pub double_sided: bool,
     pub detail: Option<Detail>,
-    /// A plant's: it moves in the wind, and its leaves take each copy's colour.
-    pub plant: Option<PlantLook>,
+    /// Of a model drawn many times: it moves in the wind (a plant's), or takes each
+    /// copy's colour (a plant's leaves, spectators' clothes).
+    pub varies: Option<Varies>,
 }
 
-/// How a plant's material moves in the wind and takes its copies' looks. The wind
-/// comes from the game's weather; a copy's leaf colour is its `Instance::leaves`.
+/// How a material of a model drawn many times varies: a plant's moves in the wind,
+/// and leaves or clothes take each copy's colour. The wind comes from the game's
+/// weather; a copy's colour is its `Instance::tint`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PlantLook {
+pub struct Varies {
     /// How far it bends away from a 10 m/s wind at 1 m above the copy's foot, m; it
     /// bends with the square of the height, and with the square of the wind.
     pub sway: f32,
     /// How far its leaves flutter in a 10 m/s wind, m.
     pub flutter: f32,
-    /// It is leaves: they take each copy's leaf colour, and none are drawn of a bare
-    /// copy.
-    pub leaves: bool,
+    /// It takes each copy's colour (leaves, clothes), and is left out of a copy that
+    /// has none: a bare tree's leaves.
+    pub tinted: bool,
 }
 
 impl Default for Material {
@@ -96,7 +98,7 @@ impl Default for Material {
             alpha_mode: AlphaMode::Opaque,
             double_sided: false,
             detail: None,
-            plant: None,
+            varies: None,
         }
     }
 }
@@ -201,13 +203,14 @@ pub struct Instance {
     /// A unit quaternion (x, y, z, w).
     pub rotation: [f32; 4],
     pub scale: f32,
-    /// Its leaves' look (for materials of plants' leaves): an sRGB colour and how much
-    /// of it (0 to 254 for 0 to 1) is mixed into their own, keeping their brightness
-    /// as the colour's is to a luminance of 0.2; or `BARE` (255) for none at all.
-    pub leaves: [u8; 4],
+    /// Its colour, for materials that take it (`Varies::tinted`): an sRGB colour and
+    /// how much of it (0 to 254 for 0 to 1) is mixed into their own, keeping their
+    /// brightness as the colour's is to a luminance of 0.2; or `BARE` (255) for none of
+    /// them at all.
+    pub tint: [u8; 4],
 }
 
-/// `Instance::leaves` of a copy with its leaves fallen.
+/// `Instance::tint` of a copy without its tinted parts: a tree with its leaves fallen.
 pub const BARE: [u8; 4] = [0, 0, 0, 255];
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -393,13 +396,13 @@ impl Visual {
                 AlphaMode::Blend => (w.u8(2), w.f32(0.0)),
             };
             w.u8(m.double_sided.into());
-            match &m.plant {
+            match &m.varies {
                 None => w.u8(0),
                 Some(p) => {
                     w.u8(1);
                     w.f32(p.sway);
                     w.f32(p.flutter);
-                    w.u8(p.leaves.into());
+                    w.u8(p.tinted.into());
                 }
             }
             match &m.detail {
@@ -459,7 +462,7 @@ impl Visual {
             let leaves: Vec<u32> = i
                 .copies
                 .iter()
-                .map(|c| u32::from_le_bytes(c.leaves))
+                .map(|c| u32::from_le_bytes(c.tint))
                 .collect();
             w.u32s(&leaves);
         }
@@ -487,12 +490,12 @@ impl Visual {
                 (a, _) => return Err(Error::Format(format!("visual: unknown alpha mode {a}"))),
             };
             let double_sided = r.u8()? != 0;
-            let plant = match r.u8()? {
+            let varies = match r.u8()? {
                 0 => None,
-                _ => Some(PlantLook {
+                _ => Some(Varies {
                     sway: r.f32()?,
                     flutter: r.f32()?,
-                    leaves: r.u8()? != 0,
+                    tinted: r.u8()? != 0,
                 }),
             };
             let detail = match r.u8()? {
@@ -534,7 +537,7 @@ impl Visual {
                 alpha_mode,
                 double_sided,
                 detail,
-                plant,
+                varies,
             });
         }
         let meshes = |r: &mut Reader| -> Result<Vec<Mesh>, Error> {
@@ -583,7 +586,7 @@ impl Visual {
                     pos: [x, y, z],
                     rotation: [a, b, d, e],
                     scale,
-                    leaves: leaves.to_le_bytes(),
+                    tint: leaves.to_le_bytes(),
                 })
                 .collect();
             v.instances.push(Instances { levels, copies });
@@ -640,10 +643,10 @@ mod tests {
     fn copies_of_shapes_round_trip() {
         let mut b = VisualBuilder::new();
         let m = b.add_material(Material {
-            plant: Some(PlantLook {
+            varies: Some(Varies {
                 sway: 0.01,
                 flutter: 0.02,
-                leaves: true,
+                tinted: true,
             }),
             ..Default::default()
         });
@@ -662,7 +665,7 @@ mod tests {
             pos: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 0.6, 0.8],
             scale: 1.5,
-            leaves: [200, 120, 30, 180],
+            tint: [200, 120, 30, 180],
         };
         b.add_instances(Instances {
             levels: vec![Level {

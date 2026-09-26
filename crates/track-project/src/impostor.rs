@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use open_racing_track::texture::{self, Image, Mips};
-use open_racing_track::{AlphaMode, Material, Mesh, PlantLook, Texture, VisualBuilder};
+use open_racing_track::{AlphaMode, Material, Mesh, Varies, Texture, VisualBuilder};
 
 use crate::model::Model;
 
@@ -53,7 +53,7 @@ pub fn paints(model: &Model) -> Vec<Paint> {
                     AlphaMode::Mask(c) => Some(c),
                     AlphaMode::Blend => Some(0.5),
                 },
-                leaves: m.plant.is_some_and(|p| p.leaves),
+                leaves: m.varies.is_some_and(|p| p.tinted),
             }
         })
         .collect()
@@ -416,8 +416,8 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
             roughness: 0.9,
             reflectance: 0.3,
             alpha_mode: AlphaMode::Mask(0.5),
-            plant: leaves.then_some(PlantLook {
-                leaves: true,
+            varies: leaves.then_some(Varies {
+                tinted: true,
                 ..Default::default()
             }),
             ..Default::default()
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(far.meshes.len(), 2);
         assert_eq!(far.meshes[0].positions, far.meshes[1].positions);
         let [trunk, leaves] = [0, 1].map(|i| &far.look.materials[i]);
-        assert!(trunk.plant.is_none() && leaves.plant.is_some_and(|p| p.leaves));
+        assert!(trunk.varies.is_none() && leaves.varies.is_some_and(|p| p.tinted));
         // No texel is covered in both pictures.
         let [a, b] = [0, 1].map(|i| texture::decode(&far.look.textures[i].data).unwrap());
         let alpha = |im: &Image, k: usize| im.pixels[k * 4 + 3];

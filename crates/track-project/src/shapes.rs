@@ -5,16 +5,16 @@
 use std::path::Path;
 
 use glam::Vec3;
-use open_racing_track::{Material, Mesh, PlantLook, VisualBuilder};
+use open_racing_track::{Material, Mesh, Varies, VisualBuilder};
 
 use crate::model::Model;
-use crate::project::Foliage;
+use crate::project::Kind;
 
 /// What a path to a built-in model starts with.
 pub const PREFIX: &str = "builtin:";
 
 /// The built-in models, with what each is.
-pub const BUILTIN: [(&str, &str); 7] = [
+pub const BUILTIN: [(&str, &str); 8] = [
     ("pine", "a conifer, about 11 m tall"),
     ("tree", "a broadleaf tree, about 9 m tall"),
     ("poplar", "a tall, narrow tree, about 12 m"),
@@ -22,15 +22,17 @@ pub const BUILTIN: [(&str, &str); 7] = [
     ("rock", "a boulder, about 1.2 m"),
     ("grass", "a tuft of long grass, about 0.6 m"),
     ("cone", "a traffic cone, 0.7 m"),
+    ("spectator", "a spectator standing, facing +X, about 1.75 m"),
 ];
 
 /// What kind of plant the built-in model `name` is.
-pub fn foliage(name: &str) -> Option<Foliage> {
+pub fn kind(name: &str) -> Option<Kind> {
     Some(match name {
-        "pine" => Foliage::Evergreen,
-        "tree" | "poplar" | "bush" => Foliage::Deciduous,
-        "grass" => Foliage::Grass,
-        "rock" | "cone" => Foliage::Rigid,
+        "pine" => Kind::Evergreen,
+        "tree" | "poplar" | "bush" => Kind::Deciduous,
+        "grass" => Kind::Grass,
+        "rock" | "cone" => Kind::Rigid,
+        "spectator" => Kind::Crowd,
         _ => return None,
     })
 }
@@ -55,13 +57,17 @@ const STONE: [f32; 3] = [0.12, 0.11, 0.095];
 const STRAW: [f32; 3] = [0.09, 0.1, 0.025];
 const ORANGE: [f32; 3] = [0.9, 0.12, 0.01];
 const WHITE: [f32; 3] = [0.8, 0.8, 0.8];
+const SKIN: [f32; 3] = [0.45, 0.28, 0.2];
+const TROUSERS: [f32; 3] = [0.03, 0.035, 0.05];
+/// Clothes of a luminance of 0.2, which each copy's colour replaces.
+const CLOTHES: [f32; 3] = [0.2, 0.2, 0.2];
 
 /// Triangles of one material.
 struct Part {
     colour: [f32; 3],
     roughness: f32,
-    /// A plant's leaves.
-    leaves: bool,
+    /// It takes each copy's colour: a plant's leaves, clothes.
+    tinted: bool,
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
     indices: Vec<u32>,
@@ -72,17 +78,17 @@ impl Part {
         Self {
             colour,
             roughness,
-            leaves: false,
+            tinted: false,
             positions: vec![],
             normals: vec![],
             indices: vec![],
         }
     }
 
-    /// A plant's leaves.
-    fn leaves(colour: [f32; 3], roughness: f32) -> Self {
+    /// It takes each copy's colour: a plant's leaves, clothes.
+    fn tinted(colour: [f32; 3], roughness: f32) -> Self {
         Self {
-            leaves: true,
+            tinted: true,
             ..Self::new(colour, roughness)
         }
     }
@@ -239,7 +245,7 @@ pub fn model(name: &str) -> Option<Model> {
         "pine" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.28, 0.12, 3.0, 7);
-            let mut needles = Part::leaves(NEEDLES, 0.95);
+            let mut needles = Part::tinted(NEEDLES, 0.95);
             for (z, r, h) in [(1.6, 2.9, 4.6), (4.0, 2.2, 4.2), (6.4, 1.5, 4.4)] {
                 needles.cone(Vec3::Z * z, r, 0.0, h, 9);
             }
@@ -248,7 +254,7 @@ pub fn model(name: &str) -> Option<Model> {
         "tree" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.32, 0.18, 4.2, 7);
-            let mut leaves = Part::leaves(LEAVES, 0.9);
+            let mut leaves = Part::tinted(LEAVES, 0.9);
             leaves.blob(Vec3::new(0.0, 0.0, 5.9), Vec3::new(3.1, 3.1, 2.7), 0.14, 1);
             leaves.blob(Vec3::new(0.9, 0.6, 7.3), Vec3::new(2.1, 2.1, 1.8), 0.14, 2);
             leaves.blob(
@@ -262,12 +268,12 @@ pub fn model(name: &str) -> Option<Model> {
         "poplar" => {
             let mut trunk = Part::new(BARK, 0.9);
             trunk.cone(Vec3::ZERO, 0.25, 0.12, 3.0, 7);
-            let mut leaves = Part::leaves(POPLAR, 0.9);
+            let mut leaves = Part::tinted(POPLAR, 0.9);
             leaves.blob(Vec3::new(0.0, 0.0, 7.2), Vec3::new(1.5, 1.5, 5.0), 0.1, 4);
             vec![trunk, leaves]
         }
         "bush" => {
-            let mut leaves = Part::leaves(SHRUB, 0.95);
+            let mut leaves = Part::tinted(SHRUB, 0.95);
             leaves.blob(Vec3::new(0.0, 0.0, 0.55), Vec3::new(1.3, 1.1, 0.85), 0.2, 5);
             leaves.blob(Vec3::new(0.6, 0.3, 0.8), Vec3::new(0.7, 0.7, 0.55), 0.2, 6);
             vec![leaves]
@@ -283,7 +289,7 @@ pub fn model(name: &str) -> Option<Model> {
             vec![stone]
         }
         "grass" => {
-            let mut blades = Part::leaves(STRAW, 0.95);
+            let mut blades = Part::tinted(STRAW, 0.95);
             for k in 0..9u32 {
                 let a = k as f32 * 2.4;
                 let at = Vec3::new(a.cos(), a.sin(), 0.0) * (0.06 + 0.02 * k as f32);
@@ -301,6 +307,20 @@ pub fn model(name: &str) -> Option<Model> {
             white.cone(Vec3::Z * 0.28, 0.11, 0.07, 0.17, 12);
             vec![orange, white]
         }
+        "spectator" => {
+            let mut legs = Part::new(TROUSERS, 0.8);
+            for y in [-0.1, 0.1] {
+                legs.cone(Vec3::new(0.0, y, 0.0), 0.085, 0.075, 0.86, 6);
+            }
+            let mut shirt = Part::tinted(CLOTHES, 0.85);
+            shirt.cone(Vec3::Z * 0.84, 0.19, 0.22, 0.62, 8);
+            for y in [-0.27, 0.27] {
+                shirt.cone(Vec3::new(0.02, y, 0.82), 0.05, 0.065, 0.62, 5);
+            }
+            let mut skin = Part::new(SKIN, 0.6);
+            skin.blob(Vec3::new(0.0, 0.0, 1.6), Vec3::new(0.1, 0.09, 0.12), 0.05, 9);
+            vec![legs, shirt, skin]
+        }
         _ => return None,
     };
     Some(assemble(parts))
@@ -316,8 +336,8 @@ fn assemble(parts: Vec<Part>) -> Model {
             base_color: [r, g, b, 1.0],
             roughness: part.roughness,
             reflectance: 0.3,
-            plant: part.leaves.then_some(PlantLook {
-                leaves: true,
+            varies: part.tinted.then_some(Varies {
+                tinted: true,
                 ..Default::default()
             }),
             ..Default::default()

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use bevy_egui::egui;
 use glam::{DVec2, DVec3};
+use open_racing_track_project::stamp::{Stamp, StampShape};
 use open_racing_track_project::ops::{Op, StrokeTarget};
 use open_racing_track_project::project::{
     Brush, GroundLayer, HARDNESS, LayerStroke, MAX_LAYERS, Stroke,
@@ -85,6 +86,8 @@ pub struct Size {
     pub strength: f64,
     /// 0 to 1: the share of the radius a stroke acts fully within.
     pub hardness: f64,
+    /// A shape of texture strokes act through, in patches.
+    pub stamp: Option<Stamp>,
 }
 
 /// The brushes' settings, and the stroke being painted.
@@ -123,16 +126,19 @@ impl Default for Brushes {
                     radius: 25.0,
                     strength: 0.5,
                     hardness: HARDNESS,
+                    stamp: None,
                 },
                 Size {
                     radius: 6.0,
                     strength: 1.0,
                     hardness: HARDNESS,
+                    stamp: None,
                 },
                 Size {
                     radius: 25.0,
                     strength: 0.7,
                     hardness: HARDNESS,
+                    stamp: None,
                 },
             ],
             height: 2.0,
@@ -265,6 +271,7 @@ fn start(
             points: vec![p],
             fill: b.fill,
             hardness: size.hardness,
+            stamp: size.stamp,
         },
         base: built.terrain.clone(),
         grid: None,
@@ -658,7 +665,7 @@ pub fn live(
             let mut s = s.clone();
             s.strokes.push(live.stroke.clone());
             let ground = built.ground.as_deref();
-            live.dots = open_racing_track_project::scatter::planned(&s)
+            live.dots = open_racing_track_project::scatter::planned(&s, &built.edges)
                 .into_iter()
                 .map(|c| c.pos)
                 .filter(|p| p.cmpge(lo).all() && p.cmple(hi).all())
@@ -927,6 +934,59 @@ pub fn settings_ui(ui: &mut egui::Ui, c: &mut Ctx, compact: bool) {
         .changed()
     {
         size.hardness = percent / 100.0;
+    }
+    stamp_ui(ui, size);
+}
+
+/// The stamp a brush acts through: its shape and the size of its patches.
+fn stamp_ui(ui: &mut egui::Ui, size: &mut Size) {
+    let label = size.stamp.map_or("No stamp", |s| s.shape.label());
+    egui::ComboBox::from_id_salt("brush stamp")
+        .selected_text(label)
+        .width(90.0)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(size.stamp.is_none(), "No stamp").clicked() {
+                size.stamp = None;
+            }
+            for shape in StampShape::ALL {
+                let on = size.stamp.is_some_and(|s| s.shape == shape);
+                if ui.selectable_label(on, shape.label()).clicked() {
+                    size.stamp = Some(Stamp {
+                        shape,
+                        ..size.stamp.unwrap_or(Stamp {
+                            shape,
+                            size: 20.0,
+                            angle: 0.0,
+                        })
+                    });
+                }
+            }
+        })
+        .response
+        .on_hover_text("A shape of texture the brush acts through, lying still on the ground: clumps, spots or streaks rather than an even wash; strokes over the same place build up the same shapes");
+    if let Some(s) = &mut size.stamp {
+        ui.add(
+            egui::DragValue::new(&mut s.size)
+                .speed(0.5)
+                .range(1.0..=500.0)
+                .suffix(" m"),
+        )
+        .on_hover_text("How big its patches are");
+        if s.shape == StampShape::Streaks {
+            let mut degrees = s.angle.to_degrees();
+            if ui
+                .add(
+                    egui::DragValue::new(&mut degrees)
+                        .speed(1.0)
+                        .range(-180.0..=180.0)
+                        .suffix("°"),
+                )
+                .on_hover_text("Which way the streaks run, anticlockwise from the east")
+                .changed()
+            {
+                s.angle = degrees.to_radians();
+            }
+        }
     }
 }
 
