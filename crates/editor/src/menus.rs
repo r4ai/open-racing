@@ -91,9 +91,18 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 {
                     commands::run(Cmd::ToggleOrtho, c);
                 }
-                ui.toggle_value(&mut c.tool.snap, "Snap").on_hover_text(
-                    "Snap to whole metres, 5° and tenths (Ctrl while moving does the opposite)",
-                );
+                ui.menu_button("⏷", |ui| {
+                    ui.set_min_width(230.0);
+                    crate::sidebar::snapping_ui(ui, c);
+                })
+                .response
+                .on_hover_text("Snapping: steps, and what dragged nodes catch on");
+                let s = c.tool.snapping;
+                ui.toggle_value(&mut c.tool.snap, "Snap")
+                    .on_hover_text(format!(
+                        "Step to {} m, {}° and ×{} (Ctrl while moving does the opposite)",
+                        s.grid, s.angle, s.factor
+                    ));
             });
         });
     });

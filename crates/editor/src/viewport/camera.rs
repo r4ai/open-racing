@@ -431,30 +431,35 @@ pub fn view_input(
     }
 }
 
-/// Frames the selected nodes, or the selected road or spline.
+/// Frames the selected nodes, or every selected road, spline and prop.
 pub fn frame_selection(editor: &Editor, orbit: &mut Orbit) {
-    if let Some(prop) = editor
-        .selection
-        .prop()
-        .and_then(|i| editor.project.props.get(i))
+    let sel = &editor.selection;
+    if let Some((_, nodes, _)) = editor.line()
+        && !sel.nodes.is_empty()
     {
-        let p = to_bevy(prop.pos);
-        return frame(orbit, &[p - Vec3::splat(15.0), p + Vec3::splat(15.0)]);
-    }
-    let Some((_, nodes, _)) = editor.line() else {
-        return frame_all(editor, orbit);
-    };
-    let points: Vec<Vec3> = if editor.selection.nodes.is_empty() {
-        nodes.iter().map(|n| to_bevy(n.pos)).collect()
-    } else {
-        editor
-            .selection
+        let points: Vec<Vec3> = sel
             .nodes
             .iter()
             .filter_map(|&i| nodes.get(i))
             .map(|n| to_bevy(n.pos))
-            .collect()
-    };
+            .collect();
+        return frame(orbit, &points);
+    }
+    let mut points = Vec::new();
+    for item in sel.items() {
+        if let Some((_, nodes, _)) = item_line(&editor.project, item) {
+            points.extend(nodes.iter().map(|n| to_bevy(n.pos)));
+        } else if let Item::Prop(i) = item
+            && let Some(prop) = editor.project.props.get(i)
+        {
+            // Room round a model.
+            let p = to_bevy(prop.pos);
+            points.extend([p - Vec3::splat(15.0), p + Vec3::splat(15.0)]);
+        }
+    }
+    if points.is_empty() {
+        return frame_all(editor, orbit);
+    }
     frame(orbit, &points);
 }
 

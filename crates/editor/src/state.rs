@@ -295,19 +295,29 @@ impl Editor {
         self.status = what.into();
     }
 
+    /// Drops from the selection what no longer exists: after an undo, a reload or a
+    /// deletion the lists may be shorter.
     fn clamp_selection(&mut self) {
-        if let Some(Item::Prop(p)) = self.selection.item {
-            if p >= self.project.props.len() {
-                self.selection = Selection::default();
-            }
-            return;
-        }
-        let count = self.line().map(|(_, nodes, _)| nodes.len());
+        let p = &self.project;
+        let exists = |item: Item| match item {
+            Item::Road(r) => r < p.roads.len(),
+            Item::Spline(s) => s < p.splines.len(),
+            Item::Prop(i) => i < p.props.len(),
+        };
         let s = &mut self.selection;
-        match count {
-            Some(n) => s.nodes.retain(|&i| i < n),
-            None => *s = Selection::default(),
+        s.others.retain(|&o| exists(o) && Some(o) != s.item);
+        s.others.dedup();
+        match s.item {
+            Some(item) if exists(item) => {}
+            Some(_) => {
+                // The active one went: the next selected takes its place.
+                s.item = s.others.pop();
+                s.nodes.clear();
+            }
+            None => s.nodes.clear(),
         }
+        let count = self.line().map_or(0, |(_, nodes, _)| nodes.len());
+        self.selection.nodes.retain(|&i| i < count);
     }
 
     pub fn save(&mut self) {

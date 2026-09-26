@@ -242,12 +242,46 @@ fn tool_tab(ui: &mut egui::Ui, c: &mut Ctx) {
         });
     }
     section(ui, "Snapping", "sidebar snap", true, |ui| {
-        ui.checkbox(&mut c.tool.snap, "Snap while transforming");
-        ui.weak("Whole metres, 5° and tenths. Holding Ctrl while moving does the opposite.");
+        snapping_ui(ui, c);
     });
     section(ui, "Draw", "sidebar draw", true, |ui| {
         ui.weak("Shift A in the view, or the toolbar, draws a road, kerb, wall or fence: click points, Enter finishes. Kerbs snap to road edges (Ctrl: free).");
     });
+}
+
+/// The steps transforms snap to, and what dragged nodes and stretch ends catch on.
+pub fn snapping_ui(ui: &mut egui::Ui, c: &mut Ctx) {
+    ui.checkbox(&mut c.tool.snap, "Step while transforming")
+        .on_hover_text("Holding Ctrl while moving does the opposite");
+    let s = &mut c.tool.snapping;
+    let field = |ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64, suffix: &str| {
+        row(ui, label, |ui| {
+            let w = ui.available_width().max(40.0);
+            ui.add_sized(
+                [w, ui.spacing().interact_size.y],
+                egui::DragValue::new(v)
+                    .speed(speed)
+                    .range(0.0..=1000.0)
+                    .suffix(suffix),
+            )
+        })
+    };
+    field(ui, "Grid", &mut s.grid, 0.05, " m");
+    field(ui, "Angle", &mut s.angle, 0.5, "°");
+    field(ui, "Scale", &mut s.factor, 0.01, "");
+    field(ui, "Fine", &mut s.fine, 0.01, "")
+        .on_hover_text("Heights, widths and distances (m), and places along a road (u)");
+    ui.separator();
+    ui.weak("A node or stretch end dragged on its own catches on:");
+    ui.checkbox(&mut s.nodes, "Other lines' nodes (joins them)");
+    ui.checkbox(&mut s.edges, "Road edges and centre lines");
+    ui.checkbox(&mut s.corners, "Nodes and corners, for stretch ends");
+    field(ui, "Reach", &mut s.reach, 0.05, " m");
+    field(ui, "Along", &mut s.along, 0.05, " m")
+        .on_hover_text("How near along the road a stretch end catches");
+    if ui.small_button("Defaults").clicked() {
+        *s = Default::default();
+    }
 }
 
 /// The distance measured, and scaling the reference image so that it comes out as a

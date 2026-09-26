@@ -624,11 +624,12 @@ pub(super) fn draw_point(
     kind: &DrawKind,
     pointer: DVec3,
     ctrl: bool,
+    snapping: &Snapping,
 ) -> DVec3 {
     let DrawKind::Spline(preset) = kind else {
         return pointer;
     };
-    if ctrl || !preset.is_band() {
+    if ctrl || !preset.is_band() || !snapping.edges {
         return pointer;
     }
     let half = match preset.shape(&editor.project) {
@@ -644,7 +645,7 @@ pub(super) fn draw_point(
         let d = (pointer - f.pos).truncate().dot(f.lateral.truncate());
         for (side, edge) in [(Side::Left, f.width_left), (Side::Right, -f.width_right)] {
             let gap = (d - edge).abs();
-            if gap < EDGE_SNAP && best.is_none_or(|b| gap < b.1) {
+            if gap < snapping.reach && best.is_none_or(|b| gap < b.1) {
                 let at = edge + side.sign() * half;
                 best = Some((f.pos + f.lateral * at, gap));
             }
@@ -667,7 +668,7 @@ pub(super) fn draw(
     let kind = tool.draw.as_ref().map(|d| d.kind.clone()).expect("drawing");
     tool.draw_at = tool
         .pointer
-        .map(|p| draw_point(editor, built, &kind, p, ctrl));
+        .map(|p| draw_point(editor, built, &kind, p, ctrl, &tool.snapping));
     tool.hint = "Draw: click to add points · Backspace removes the last · Enter or right click finishes · Esc cancels · Ctrl: no snapping".into();
     let d = tool.draw.as_mut().expect("drawing");
     if over.is_some()

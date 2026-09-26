@@ -29,6 +29,7 @@ use bevy_egui::input::EguiWantsInput;
 use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 use glam::{DVec2, DVec3};
 use open_racing_sim::GroundMesh;
+use open_racing_track_project::Node;
 use open_racing_track_project::curve::{Frame, Sampled, handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Range, Road, Shape, Side, StationCurve};
@@ -67,8 +68,6 @@ const DRAG_THRESHOLD: f32 = 4.0;
 const LIFT: f64 = 0.3;
 /// Vertical field of view.
 const FOV: f32 = 50.0 * std::f32::consts::PI / 180.0;
-/// How close to a road's edge a kerb being drawn snaps onto it, m.
-const EDGE_SNAP: f64 = 2.5;
 
 #[derive(Component)]
 pub struct EditorCamera;
@@ -176,11 +175,11 @@ pub enum Axis {
 enum Target {
     Nodes {
         item: Item,
-        start: Vec<(usize, DVec3)>,
+        start: Vec<(usize, Node)>,
     },
     /// Several whole items, in object mode: every node of each line, and props.
     Many {
-        lines: Vec<(Item, Vec<(usize, DVec3)>)>,
+        lines: Vec<(Item, Vec<(usize, Node)>)>,
         /// (index, place, turn, size)
         props: Vec<(usize, DVec3, f64, f64)>,
     },
@@ -357,6 +356,74 @@ impl Default for Overlays {
     }
 }
 
+/// What snapping steps to while transforming, and what a node or stretch end dragged on
+/// its own catches on (the sidebar's Tool tab).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Snapping {
+    /// Grid moves land on, m.
+    pub grid: f64,
+    /// Turns, degrees.
+    pub angle: f64,
+    /// Scale factors.
+    pub factor: f64,
+    /// Heights, widths, distances and places along a road (in `u`).
+    pub fine: f64,
+    /// Nodes catch on other lines' nodes (joining them).
+    pub nodes: bool,
+    /// Nodes catch on roads' edges (kerbs, walls) and centre lines (a pit lane's ends).
+    pub edges: bool,
+    /// Stretch ends catch on nodes and corners' entries, apexes and exits.
+    pub corners: bool,
+    /// How near a node must come to what it catches on, m.
+    pub reach: f64,
+    /// How near along the road a stretch end must come, m.
+    pub along: f64,
+}
+
+impl Default for Snapping {
+    fn default() -> Self {
+        Self {
+            grid: 1.0,
+            angle: 5.0,
+            factor: 0.1,
+            fine: 0.1,
+            nodes: true,
+            edges: true,
+            corners: true,
+            reach: 2.5,
+            along: 4.0,
+        }
+    }
+}
+
+fn step(v: f64, by: f64) -> f64 {
+    if by > 0.0 { (v / by).round() * by } else { v }
+}
+
+impl Snapping {
+    pub fn grid(&self, p: DVec2) -> DVec2 {
+        DVec2::new(step(p.x, self.grid), step(p.y, self.grid))
+    }
+
+    /// A turn in radians, stepped.
+    pub fn angle(&self, a: f64) -> f64 {
+        step(a.to_degrees(), self.angle).to_radians()
+    }
+
+    pub fn factor(&self, k: f64) -> f64 {
+        step(k, self.factor)
+    }
+
+    /// A height, width or distance, m, or a place along a road.
+    pub fn fine(&self, v: f64) -> f64 {
+        step(v, self.fine)
+    }
+
+    pub fn height(&self, v: f64) -> f64 {
+        self.fine(v)
+    }
+}
+
 /// The state of the view's tools.
 #[derive(Resource, Default)]
 pub struct Tool {
@@ -380,6 +447,7 @@ pub struct Tool {
     pub boxing: Option<(Vec2, Vec2)>,
     /// Snap to the grid without holding Ctrl (Ctrl then frees).
     pub snap: bool,
+    pub snapping: Snapping,
     /// What the view is doing, for the header.
     pub hint: String,
     /// A model to place with the next click.
@@ -431,6 +499,7 @@ impl Tool {
             active: self.active,
             overlays: self.overlays,
             snap: self.snap,
+            snapping: self.snapping,
             ..default()
         };
     }
@@ -564,6 +633,19 @@ mod tests {
     use super::*;
     use bevy::camera::RenderTargetInfo;
     use open_racing_track_project::Node;
+
+    /// The pointer at `cursor`, with a value typed or not, stepping or not, and Ctrl held
+    /// or not.
+    fn pointer(view: View, cursor: Vec2, typed: Option<f64>, snap: bool, free: bool) -> Gesture {
+        Gesture {
+            view,
+            cursor,
+            typed,
+            snap,
+            free,
+            snapping: Snapping::default(),
+        }
+    }
 
     #[test]
     fn cursor_keeps_window_coordinates_inside_offset_view() {
@@ -736,7 +818,7 @@ mod tests {
         let f = smp.frame_at(smp.s_at(before.to) + 20.0);
         let to = view.screen(f.pos).unwrap();
         let m = tool.modal.as_ref().unwrap();
-        let (ops, _) = transform_ops(&editor, &built, view, m, to, None, false, true);
+        let (ops, _) = transform_ops(&editor, &built, m, &pointer(view, to, None, false, true));
         assert!(editor.apply(ops, None));
         let s = &editor.project.roads[0].left[i];
         let moved = smp.s_at(s.ranges[0].to) - smp.s_at(before.to);
@@ -775,7 +857,8 @@ mod tests {
         let m = tool.modal.as_ref().unwrap();
         let f = smp.frame_at(smp.s_at(1.0));
         let to = view.screen(f.pos + flat_left(&f) * 9.0).unwrap();
-        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        let (ops, readout) =
+            transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
         assert!(readout.contains("9.00"), "{readout}");
         editor.apply(ops, None);
         let r = &editor.project.roads[0];
@@ -785,7 +868,8 @@ mod tests {
         // B sets both sides alike.
         let m = tool.modal.as_mut().unwrap();
         m.both = true;
-        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        let (ops, readout) =
+            transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
         assert!(readout.contains("both sides"), "{readout}");
         editor.apply(ops, None);
         let r = &editor.project.roads[0];
@@ -815,7 +899,12 @@ mod tests {
         let m = tool.modal.as_ref().unwrap();
         let f = smp.frame_at(range_middle(smp, &rg));
         let to = view.screen(f.pos + flat_left(&f) * (f.width_left + 2.0));
-        let (ops, _) = transform_ops(&editor, &built, view, m, to.unwrap(), None, true, false);
+        let (ops, _) = transform_ops(
+            &editor,
+            &built,
+            m,
+            &pointer(view, to.unwrap(), None, true, false),
+        );
         editor.apply(ops, None);
         let w = editor.project.roads[0].left[0].width;
         assert!((w - 2.0).abs() < 0.05, "{w}");
@@ -827,9 +916,9 @@ mod tests {
         let (editor, built, _, _, dir) = top_down("snaps", DVec3::ZERO);
         let smp = &built.roads[0];
         let s2 = smp.s_at(2.0);
-        let (u, what) = range_snap(smp, None, s2 + 2.5).unwrap();
+        let (u, what) = range_snap(smp, None, s2 + 2.5, &Snapping::default()).unwrap();
         assert_eq!((u, what.as_str()), (2.0, "node 2"));
-        assert!(range_snap(smp, None, s2 + 30.0).is_none());
+        assert!(range_snap(smp, None, s2 + 30.0, &Snapping::default()).is_none());
 
         // A wall's node near the circuit's right edge.
         let mut editor = editor;
@@ -845,7 +934,15 @@ mod tests {
         let f = smp.frame_at(smp.s_at(0.5));
         let edge = f.pos - flat_left(&f) * f.width_right;
         let near = edge - flat_left(&f) * 1.5;
-        let (at, what) = snap_node(&editor, &built, Item::Spline(0), 0, near).unwrap();
+        let (at, what) = snap_node(
+            &editor,
+            &built,
+            Item::Spline(0),
+            0,
+            near,
+            &Snapping::default(),
+        )
+        .unwrap();
         assert!(at.distance(edge) < 0.3, "{at:?} {edge:?}");
         assert!(what.contains("Right edge"), "{what}");
         // And onto another line's node, joining them.
@@ -855,6 +952,7 @@ mod tests {
             Item::Spline(0),
             1,
             DVec3::new(249.0, 1.0, 0.0),
+            &Snapping::default(),
         )
         .unwrap();
         assert_eq!(at, editor.project.roads[0].nodes[1].pos);
@@ -952,7 +1050,8 @@ mod tests {
         start_modal(&mut editor, &mut tool, &built, Mode::Grab, None, at, false);
         let m = tool.modal.as_ref().unwrap();
         let to = view.screen(DVec3::new(135.0, -37.5, 0.0)).unwrap();
-        let (ops, readout) = transform_ops(&editor, &built, view, m, to, None, true, false);
+        let (ops, readout) =
+            transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
         assert!(readout.contains("2 items"), "{readout}");
         assert!(editor.apply(ops, None));
         editor.end_drag();
@@ -965,6 +1064,90 @@ mod tests {
         assert!(editor.project.splines.is_empty());
         assert_eq!(editor.project.roads.len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn turning_and_scaling_nodes_takes_their_handles_along() {
+        let (mut editor, built, camera, t, dir) = top_down("turn handles", DVec3::ZERO);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        assert!(editor.apply(
+            vec![Op::SetNodeHandles {
+                line: "circuit".into(),
+                index: 1,
+                mode: HandleMode::Free,
+                incoming: DVec3::new(-20.0, 0.0, 0.0),
+                outgoing: DVec3::new(30.0, 0.0, 1.0),
+            }],
+            None
+        ));
+        editor.selection.item = Some(Item::Road(0));
+        editor.selection.nodes = vec![0, 1, 2];
+        let mut tool = Tool::editing(true);
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Rotate,
+            None,
+            Vec2::ZERO,
+            false,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        let (ops, _) = transform_ops(
+            &editor,
+            &built,
+            m,
+            &pointer(view, Vec2::ZERO, Some(90.0), false, false),
+        );
+        assert!(editor.apply(ops, None));
+        let (incoming, outgoing) = handles(&editor.project.roads[0].nodes, true, 1);
+        assert!(
+            (incoming - DVec3::new(0.0, -20.0, 0.0)).length() < 1e-9,
+            "{incoming}"
+        );
+        assert!(
+            (outgoing - DVec3::new(0.0, 30.0, 1.0)).length() < 1e-9,
+            "{outgoing}"
+        );
+        editor.cancel_drag();
+
+        // Scaling by 2 across the plane doubles them, and keeps them level.
+        let mut tool = Tool::editing(true);
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Scale,
+            None,
+            Vec2::ZERO,
+            false,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        let (ops, _) = transform_ops(
+            &editor,
+            &built,
+            m,
+            &pointer(view, Vec2::ZERO, Some(2.0), false, false),
+        );
+        assert!(editor.apply(ops, None));
+        let (_, outgoing) = handles(&editor.project.roads[0].nodes, true, 1);
+        assert!(
+            (outgoing - DVec3::new(60.0, 0.0, 1.0)).length() < 1e-9,
+            "{outgoing}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn minus_turns_a_typed_value_s_sign_round() {
+        let mut typed = String::new();
+        for keys in ["1", "2", "-", ".", "5", "-", "-"] {
+            type_value(&mut typed, keys);
+        }
+        assert_eq!(typed, "-12.5");
     }
 
     #[test]
