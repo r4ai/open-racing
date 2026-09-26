@@ -766,15 +766,13 @@ impl Model {
                 if !cut && fresh > 0.0 {
                     // Port-injected: the fresh charge is air and fuel at this λ.
                     let fuel = fresh / (1.0 + afr * lambda);
-                    let spread = 1.0 + comb.variation * self.rng.normal();
-                    let dur = combustion::duration_deg(&comb, rpm, lambda)
-                        * spread.clamp(0.5, 2.0)
-                        * (1.0 + 1.5 * l.y);
+                    let dur = combustion::duration_deg(&comb, rpm, lambda) * (1.0 + 1.5 * l.y);
+                    let slow = combustion::cycle_variation(&comb, l.y, self.rng.normal());
                     let heat = comb.efficiency * combustion::burnable(lambda) * fuel * lhv;
                     let cyl = &mut self.cylinders[ci];
                     cyl.burn = Some(Burn {
-                        start_deg: spark,
-                        duration_deg: dur,
+                        start_deg: spark + 0.5 * slow * dur,
+                        duration_deg: dur * (1.0 + slow),
                         heat,
                         fresh,
                         done: 0.0,
@@ -787,7 +785,8 @@ impl Model {
             let mut dburned = 0.0;
             let mut burning = false;
             if let Some(b) = &mut self.cylinders[ci].burn {
-                let since = (deg1 - b.start_deg).rem_euclid(720.0);
+                // Negative until a late flame kernel starts to burn.
+                let since = (deg1 - b.start_deg + 360.0).rem_euclid(720.0) - 360.0;
                 let f = since / b.duration_deg;
                 let x = combustion::wiebe(comb.wiebe_a, comb.wiebe_m, f);
                 let dx = (x - b.done).max(0.0);

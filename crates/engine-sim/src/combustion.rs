@@ -30,6 +30,17 @@ pub fn duration_deg(c: &Combustion, rpm: f64, lambda: f64) -> f64 {
     c.duration_deg * speed * mix
 }
 
+/// How much slower (positive) or faster than the mean one cycle's flame is, as a share of
+/// the burn duration, for a standard normal draw `z`. Cycle-to-cycle variation comes
+/// mostly from the early flame kernel, which the turbulence and mixture at the plug make
+/// grow faster or slower (Heywood §9.4): a slow kernel starts the main burn late and the
+/// burn runs long, so both move together (the burn starts `slow`/2 of a duration late
+/// and lasts `1 + slow` times as long). Residual gas slows the kernel and spreads it
+/// more, which is why an engine at idle runs rougher than at full load.
+pub fn cycle_variation(c: &Combustion, residual: f64, z: f64) -> f64 {
+    (c.variation * (1.0 + 4.0 * residual) * z.clamp(-2.5, 2.5)).clamp(-0.4, 0.8)
+}
+
 /// Share of the fuel that can burn at excess-air ratio `lambda`: rich of stoichiometric
 /// there is not enough oxygen for all of it.
 #[inline]

@@ -182,7 +182,9 @@ pub struct Combustion {
     pub speed_exponent: f64,
     /// Share of the fuel's heat released (the rest leaves unburned or dissociated).
     pub efficiency: f64,
-    /// Relative cycle-to-cycle spread of the burn duration.
+    /// Relative cycle-to-cycle spread of the flame's development (its start and its
+    /// duration together), without residual gas; 0.03 gives a COV of IMEP of about 1–2 %
+    /// at full load and near 8 % at idle.
     #[serde(default)]
     pub variation: f64,
     #[serde(default)]
