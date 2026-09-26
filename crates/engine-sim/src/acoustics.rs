@@ -16,8 +16,11 @@
 //!   steeply with speed. It is what fills the spectrum between the engine orders above a
 //!   kilohertz or so, where the gas pulses themselves have little left.
 //!
-//! A microphone sums them with their distances' delays and 1/r spreading; inside the
-//! cabin the body lets the low frequencies through and damps the high ones.
+//! A microphone sums them with their distances' delays and 1/r spreading, and outside
+//! hears each again off the ground (z = 0) as from its mirror image, weakened by the
+//! ground's reflection coefficient: the comb of reinforcements and notches every
+//! recording made over a road has. Inside the cabin the body lets the low frequencies
+//! through and damps the high ones.
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +56,8 @@ pub struct SoundSettings {
     pub flow_noise: f64,
     /// Where the engine's block is, m.
     pub block: [f64; 3],
+    /// Pressure reflection coefficient of the ground at z = 0 (asphalt ≈ 0.9, none: 0).
+    pub ground: f64,
 }
 
 impl Default for SoundSettings {
@@ -67,6 +72,7 @@ impl Default for SoundSettings {
             valves: 0.02,
             flow_noise: 1.0,
             block: [0.0; 3],
+            ground: 0.9,
         }
     }
 }
@@ -91,9 +97,22 @@ impl SoundSettings {
     }
 }
 
+/// A source's way to a microphone: straight, and off the ground.
 struct SourcePath {
     delay: Delay,
     gain: f64,
+    reflected: Option<(Delay, f64)>,
+}
+
+impl SourcePath {
+    #[inline]
+    fn process(&mut self, x: f64) -> f64 {
+        let mut p = self.gain * self.delay.process(x);
+        if let Some((d, g)) = &mut self.reflected {
+            p += *g * d.process(x);
+        }
+        p
+    }
 }
 
 struct MicState {
@@ -132,11 +151,16 @@ impl Acoustics {
             .mics
             .iter()
             .map(|mic| {
+                let ground = if mic.cabin { 0.0 } else { settings.ground };
                 let path = |pos: [f64; 3], k: f64| {
                     let r = dist(pos, mic.position);
+                    let image = [pos[0], pos[1], -pos[2]];
+                    let ri = dist(image, mic.position);
                     SourcePath {
                         delay: Delay::new(r / C_AIR * rate),
                         gain: k / r,
+                        reflected: (ground != 0.0)
+                            .then(|| (Delay::new(ri / C_AIR * rate), ground * k / ri)),
                     }
                 };
                 MicState {
@@ -229,9 +253,9 @@ impl Acoustics {
         for (i, mic) in self.mics.iter_mut().enumerate() {
             let mut p = 0.0;
             for (k, path) in mic.mouths.iter_mut().enumerate().take(n) {
-                p += path.gain * path.delay.process(mouth[k]);
+                p += path.process(mouth[k]);
             }
-            p += mic.block.gain * mic.block.delay.process(block);
+            p += mic.block.process(block);
             if let Some(f) = &mut mic.cabin {
                 for b in f.iter_mut() {
                     p = b.process(p);
@@ -243,5 +267,58 @@ impl Acoustics {
             mic.out.process(p, &mut self.scratch);
             out[i].extend_from_slice(&self.scratch);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::Build;
+    use crate::samples;
+
+    /// Outside, a click from a tailpipe arrives twice: straight, and off the ground from
+    /// its image below it, later by the paths' difference and weaker by their ratio and
+    /// the ground's reflection.
+    #[test]
+    fn microphones_hear_the_ground() {
+        let (e, i, x) = (samples::i4(), samples::i4_intake(), samples::i4_exhaust());
+        let (m, _) = Build::new(&e)
+            .system("intake", &i)
+            .system("exhaust", &x)
+            .build()
+            .unwrap();
+        let tail = m.mouths.iter().find(|m| m.name.contains("tail")).unwrap();
+        let s = tail.position;
+        let mic = [s[0] - 2.0, s[1], 1.0];
+        let settings = SoundSettings {
+            mics: vec![Mic {
+                name: "m".into(),
+                position: mic,
+                cabin: false,
+            }],
+            ..Default::default()
+        };
+        let mut ac = Acoustics::new(&m, settings);
+        let k = m
+            .mouths
+            .iter()
+            .position(|m| m.name.contains("tail"))
+            .unwrap();
+        let path = &mut ac.mics[0].mouths[k];
+        let heard: Vec<f64> = (0..400)
+            .map(|i| path.process(if i == 0 { 1.0 } else { 0.0 }))
+            .collect();
+        let rate = m.quality.rate() as f64;
+        let (r, ri) = (dist(s, mic), dist([s[0], s[1], -s[2]], mic));
+        // Each arrival lands on the two samples round its fractional delay.
+        let arrival = |t: f64| -> f64 {
+            let i = (t * rate).floor() as usize;
+            heard[i] + heard[i + 1]
+        };
+        let (direct, bounced) = (arrival(r / C_AIR), arrival(ri / C_AIR));
+        assert!((direct - path.gain).abs() < 1e-12, "{direct}");
+        assert!((bounced / direct - 0.9 * r / ri).abs() < 1e-9, "{bounced}");
+        let total: f64 = heard.iter().sum();
+        assert!((total - direct - bounced).abs() < 1e-12);
     }
 }
