@@ -30,11 +30,15 @@ pub const LODS: usize = 3;
 const STEP: f64 = 0.25;
 /// Cards are made at most this much larger to cover for those left out.
 const MAX_GROWTH: f32 = 4.0;
+/// The most of a level's triangles the solid parts of a plant with leaves have.
+const SOLID_SHARE: f64 = 0.3;
+/// How far a card may move from its shape when it is simplified, relative to its size.
+const CARD_ERROR: f32 = 0.3;
 
 /// Triangles a model of a kind may have in its most detailed level.
 pub fn budget(kind: Kind) -> usize {
     match kind {
-        Kind::Evergreen | Kind::Deciduous => 30_000,
+        Kind::Evergreen | Kind::Deciduous => 60_000,
         Kind::Grass => 4_000,
         Kind::Rigid => 12_000,
         Kind::Crowd => 3_000,
@@ -411,22 +415,47 @@ fn uv_transformed(uv: Vec2, transform: Option<([f32; 2], f32, [f32; 2])>) -> Vec
     Vec2::new(c * v.x + s * v.y, -s * v.x + c * v.y) + Vec2::from(offset)
 }
 
-/// The model's levels of detail: its parts at each.
+/// The model's levels of detail: its parts at each. Leaves, whose cards are what a
+/// crown is seen by, have the most of each level's triangles; the solid parts at most
+/// `SOLID_SHARE` of them unless the leaves need less.
 fn levels(parts: &[Part], looks: &[Look], kind: Kind) -> Vec<Vec<Part>> {
-    let total: usize = parts.iter().map(Part::triangles).sum();
-    let first = (budget(kind) as f64 / total.max(1) as f64).min(1.0);
+    let is_leaves = |p: &Part| looks.get(p.material).is_some_and(|l| l.leaves);
+    // Each card as few triangles as its outline needs, before any is left out.
+    let parts: Vec<Part> = parts
+        .iter()
+        .map(|p| {
+            if is_leaves(p) {
+                simple_cards(p)
+            } else {
+                p.clone()
+            }
+        })
+        .collect();
+    let count = |leaves: bool| -> f64 {
+        parts
+            .iter()
+            .filter(|p| is_leaves(p) == leaves)
+            .map(Part::triangles)
+            .sum::<usize>() as f64
+    };
+    let (solid, leaves) = (count(false), count(true));
     let mut out: Vec<Vec<Part>> = Vec::new();
     for level in 0..LODS {
-        let fraction = first * STEP.powi(level as i32);
+        let budget = budget(kind) as f64 * STEP.powi(level as i32);
+        let share = if leaves > 0.0 { SOLID_SHARE } else { 1.0 };
+        let for_leaves = (budget - (budget * share).min(solid)).min(leaves);
+        let for_solid = (budget - for_leaves).min(solid);
+        let fraction = |budget: f64, all: f64| (budget / all.max(1.0)).min(1.0);
+        let (solid_fraction, leaf_fraction) =
+            (fraction(for_solid, solid), fraction(for_leaves, leaves));
         let reduced: Vec<Part> = parts
             .iter()
             .map(|p| {
-                let target = ((p.triangles() as f64 * fraction).ceil() as usize).max(2);
-                let leaves = looks.get(p.material).is_some_and(|l| l.leaves);
-                if leaves {
-                    thin_cards(p, target, kind == Kind::Grass)
+                let target = |f: f64| ((p.triangles() as f64 * f).ceil() as usize).max(2);
+                if is_leaves(p) {
+                    thin_cards(p, target(leaf_fraction), kind == Kind::Grass)
                 } else {
-                    simplified(p, target, level)
+                    simplified(p, target(solid_fraction), level)
                 }
             })
             .filter(|p| !p.indices.is_empty())
@@ -447,33 +476,92 @@ fn levels(parts: &[Part], looks: &[Look], kind: Kind) -> Vec<Vec<Part>> {
 
 /// Indices of `part` simplified towards `target` indices within `error` (relative to
 /// the part's size), keeping its texture coordinates where they were: a card keeps the
-/// outline of what its texture shows, however thin it is.
-fn simplify(part: &Part, target: usize, error: f32) -> Vec<u32> {
+/// outline of what its texture shows, however thin it is. Texture coordinates count
+/// by the span they cover, so that a texture repeated many times over (bark) does not
+/// keep every vertex.
+fn simplify(part: &Part, target: usize, error: f32, options: SimplifyOptions) -> Vec<u32> {
     let positions: Vec<[f32; 3]> = part.positions.iter().map(|p| p.to_array()).collect();
     let uvs: Vec<f32> = part.uvs.iter().flat_map(|uv| uv.to_array()).collect();
+    let (lo, hi) = part
+        .uvs
+        .iter()
+        .fold((Vec2::MAX, Vec2::MIN), |(lo, hi), &uv| {
+            (lo.min(uv), hi.max(uv))
+        });
+    let weight = 1.0 / (hi - lo).max_element().max(1.0);
     let locks = vec![false; positions.len()];
     meshopt::simplify_with_attributes_and_locks_decoder(
         &part.indices,
         &positions,
         &uvs,
-        &[1.0, 1.0],
+        &[weight, weight],
         std::mem::size_of::<[f32; 2]>(),
         &locks,
         target,
         error,
-        SimplifyOptions::None,
+        options,
         None,
     )
 }
 
 /// A solid part simplified to about `target` triangles, within an error that grows
-/// with the level.
+/// with the level, and further while it is far from the target. Photoscans whose
+/// every edge is shared oddly (a trunk's) keep all their vertices unless simplifying
+/// may pull seams apart.
 fn simplified(part: &Part, target: usize, level: usize) -> Part {
     if part.triangles() <= target {
         return part.clone();
     }
-    let error = [0.01, 0.04, 0.12][level.min(2)];
-    part.compact(&simplify(part, target * 3, error))
+    let errors = [0.01, 0.04, 0.12, 0.3];
+    let near = |indices: &[u32]| indices.len() <= target * 3 * 2;
+    let mut indices = Vec::new();
+    for &error in &errors[level.min(2)..] {
+        indices = simplify(part, target * 3, error, SimplifyOptions::None);
+        if near(&indices) {
+            return part.compact(&indices);
+        }
+    }
+    for &error in &errors[level.min(2)..] {
+        indices = simplify(part, target * 3, error, SimplifyOptions::Permissive);
+        if near(&indices) {
+            break;
+        }
+    }
+    part.compact(&indices)
+}
+
+/// Each card of leaves (each island of triangles) simplified on its own, within an
+/// error relative to its own size: simplifying the crown as a whole would take small
+/// cards for slivers and drop them.
+fn simple_cards(part: &Part) -> Part {
+    let islands = islands(part);
+    let mut by_island: Vec<Vec<u32>> = Vec::new();
+    for t in part.indices.as_chunks::<3>().0 {
+        let i = islands[t[0] as usize] as usize;
+        if by_island.len() <= i {
+            by_island.resize_with(i + 1, Vec::new);
+        }
+        by_island[i].extend_from_slice(t);
+    }
+    let mut out = Part {
+        material: part.material,
+        ..Default::default()
+    };
+    for indices in by_island.iter().filter(|i| !i.is_empty()) {
+        let card = part.compact(indices);
+        let simple = simplify(&card, 6, CARD_ERROR, SimplifyOptions::None);
+        let card = if simple.is_empty() {
+            card
+        } else {
+            card.compact(&simple)
+        };
+        let first = out.positions.len() as u32;
+        out.positions.extend(&card.positions);
+        out.normals.extend(&card.normals);
+        out.uvs.extend(&card.uvs);
+        out.indices.extend(card.indices.iter().map(|i| i + first));
+    }
+    out
 }
 
 /// Leaves brought to about `target` triangles: only some of their cards (or blades,

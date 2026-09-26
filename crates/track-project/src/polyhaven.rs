@@ -18,7 +18,7 @@ use crate::project::{Alpha, Kind, Layout, MaterialDef, Scatter, ScatterModel, Te
 pub const RES: &str = "1k";
 /// Changes whenever preparing makes different files, so that those made before are
 /// made again.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Plants and rocks offered first, light enough to scatter by the thousand once
 /// prepared, and what each is.
