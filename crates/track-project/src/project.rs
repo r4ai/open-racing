@@ -146,9 +146,13 @@ pub enum BuiltinTexture {
     Fence,
     /// Stacked tyres seen from the side.
     Tyres,
+    /// Blocks of two colours (sRGB) along the texture, as on a kerb: red and white,
+    /// blue and yellow, green and white.
+    Stripes([u8; 3], [u8; 3]),
 }
 
 impl BuiltinTexture {
+    /// The textures with nothing to set (stripes have their colours).
     pub const ALL: [Self; 10] = [
         Self::Asphalt,
         Self::Kerb,
@@ -488,6 +492,47 @@ pub struct Strip {
     /// The corner it was laid round, which keeps it there as the road changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner: Option<Anchor>,
+    /// Places along the road where it is wider or narrower, or its profile higher or
+    /// lower, than elsewhere: it eases from one to the next, and keeps to the first and
+    /// last beyond them. None: `width` all along.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<StripKey>,
+    /// A model repeated along it in place of its plain look; cars still drive on its
+    /// profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRun>,
+}
+
+/// A place along a road where a strip beside it has a width and a height of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StripKey {
+    /// Where, as a spline parameter of the road.
+    pub u: f64,
+    /// Its width there, m.
+    pub width: f64,
+    /// Its profile's heights there, times.
+    #[serde(default = "one")]
+    pub height: f64,
+}
+
+impl Strip {
+    /// The widest it is anywhere, m.
+    pub fn widest(&self) -> f64 {
+        self.keys.iter().map(|k| k.width).fold(self.width, f64::max)
+    }
+
+    /// Makes it `width` wide: with keys, each wider or narrower in proportion.
+    pub fn set_width(&mut self, width: f64) {
+        let k = if self.width > 1e-9 {
+            width / self.width
+        } else {
+            1.0
+        };
+        for key in &mut self.keys {
+            key.width *= k;
+        }
+        self.width = width;
+    }
 }
 
 /// A kind of kerb, gravel trap, run-off or verge, made once and laid anywhere: along a
@@ -503,6 +548,10 @@ pub struct StripStyle {
     /// Metres over which it narrows to nothing at the ends of its stretches.
     #[serde(default)]
     pub fade: f64,
+    /// A model repeated along it in place of its plain look: a kerb of the real
+    /// circuit's shape, rumble strips, cat's eyes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRun>,
 }
 
 /// A kind of wall, guard rail, fence or tyre stack, made once and put along roads and
@@ -532,15 +581,18 @@ impl StripStyle {
             fade: self.fade,
             style: Some(self.name.clone()),
             corner: None,
+            keys: vec![],
+            model: self.model.clone(),
         }
     }
 
-    /// Gives a strip of this type its look and feel; its width stays its own.
+    /// Gives a strip of this type its look and feel; its width and keys stay its own.
     pub fn restyle(&self, s: &mut Strip) {
         s.surface = self.surface.clone();
         s.material = self.material.clone();
         s.profile = self.profile.clone();
         s.fade = self.fade;
+        s.model = self.model.clone();
         s.style = Some(self.name.clone());
     }
 }
@@ -574,10 +626,11 @@ impl WallStyle {
     }
 }
 
-/// A 3D model repeated along a wall in place of its plain shape: a tyre stack, a
-/// section of guard rail, a fence panel. The model's +X runs along the wall, its +Z is
-/// up and its +Y faces the road (a spline's left); its origin sits on the wall's line.
-/// Cars still collide with the wall's plain shape.
+/// A 3D model repeated along a wall or a strip in place of its plain shape: a tyre
+/// stack, a section of guard rail, a fence panel, a kerb. The model's +X runs along it,
+/// its +Z is up and its +Y faces the road (a spline's left); its origin sits on the
+/// wall's line, or at the foot of a strip's inner edge halfway across it. Cars still
+/// collide with the plain shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelRun {
     /// A glTF file (.glb or .gltf), relative to the project's directory.
@@ -866,6 +919,10 @@ impl Road {
             r.from = f(r.from);
             r.to = f(r.to);
         }
+        for s in self.left.iter_mut().chain(self.right.iter_mut()) {
+            s.keys.iter_mut().for_each(|k| k.u = f(k.u));
+            s.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+        }
         for m in &mut self.marks {
             m.at = f(m.at);
         }
@@ -1069,6 +1126,9 @@ pub enum Shape {
         /// Height above the ground or the nodes, m, so that it shows over what is under.
         #[serde(default)]
         lift: f64,
+        /// A model repeated along it in place of its plain look.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelRun>,
     },
     /// A wall, guard rail or fence standing on the line.
     Wall {
@@ -1289,6 +1349,8 @@ impl Project {
             fade: 4.0,
             style: Some(s("kerb")),
             corner: None,
+            keys: vec![],
+            model: None,
         };
         let grass = |width| Strip {
             name: "grass".into(),
@@ -1300,6 +1362,8 @@ impl Project {
             fade: 0.0,
             style: Some(s("grass")),
             corner: None,
+            keys: vec![],
+            model: None,
         };
         let barrier = |side| Barrier {
             name: "wall".into(),
@@ -1513,8 +1577,16 @@ impl Project {
                     r.name
                 ));
             }
-            if r.left.iter().chain(&r.right).any(|s| s.width < 0.0) {
-                return invalid(format!("road \"{}\": a strip has a negative width", r.name));
+            if r.left.iter().chain(&r.right).any(|s| {
+                s.width < 0.0
+                    || s.keys
+                        .iter()
+                        .any(|k| !(k.width >= 0.0 && k.u.is_finite() && k.height.is_finite()))
+            }) {
+                return invalid(format!(
+                    "road \"{}\": a strip has a negative width, or a key out of place",
+                    r.name
+                ));
             }
             for side in [Side::Left, Side::Right] {
                 let strips = r.strips(side);

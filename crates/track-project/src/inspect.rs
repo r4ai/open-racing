@@ -395,7 +395,7 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
                     .iter()
                     .map(|s| StripSummary {
                         name: s.name.clone(),
-                        width: s.width,
+                        width: s.widest(),
                         surface: s.surface.clone(),
                         stretches: stretches(smp, &s.ranges),
                     })

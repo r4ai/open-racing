@@ -27,6 +27,8 @@ pub const UNSELECTED: Color = Color::srgba(0.85, 0.87, 0.9, 0.45);
 pub const HOVER: Color = Color::srgb(1.0, 0.95, 0.7);
 /// Stretches of strips, and handles for widths.
 pub const STRIP: Color = Color::srgb(0.2, 0.85, 0.75);
+/// Nodes of strips (their widths and heights along the road).
+pub const STRIP_KEY: Color = Color::srgb(0.45, 1.0, 0.9);
 /// Stretches of barriers.
 pub const BARRIER: Color = Color::srgb(0.7, 0.7, 0.95);
 /// A road's first node, showing which way it runs.

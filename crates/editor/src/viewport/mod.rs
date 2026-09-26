@@ -142,6 +142,10 @@ pub enum Hit {
     Edge(usize, usize, Side),
     /// A line painted along the selected road (edit mode): the road and the line.
     Line(usize, usize),
+    /// A node of a strip of the selected road: its width and height there.
+    StripKey(KeyRef),
+    /// A strip of the selected road (edit mode): the road, its side and the strip.
+    Strip(usize, Side, usize),
     /// A road's or spline's body.
     Body(Item),
     /// A part of the active tool's gizmo: an axis, or `Free` for its middle or ring.
@@ -170,6 +174,15 @@ pub enum Part {
     Row(usize),
     /// A line painted along the road.
     Line(usize),
+}
+
+/// One node (key) of a strip beside a road.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyRef {
+    pub road: usize,
+    pub side: Side,
+    pub strip: usize,
+    pub key: usize,
 }
 
 /// One end of one stretch of a road's part.
@@ -247,6 +260,12 @@ enum Target {
     /// A strip's width or a barrier's offset, at a stretch of it.
     Reach {
         end: RangeEnd,
+    },
+    /// A strip's node moved along the road and out (its width), or up (its height),
+    /// from the height it had.
+    StripKey {
+        key: KeyRef,
+        height: f64,
     },
     /// A painted line moved across the road, grabbed `s` metres along it.
     Line {
@@ -1138,6 +1157,71 @@ mod tests {
         let (ops, _) = transform_ops(&editor, &built, m, &pointer(view, to, None, true, false));
         assert!(editor.apply(ops, None));
         assert!((line(&editor).offset - 3.0).abs() < 1e-9);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_kerb_s_node_widens_and_raises_it_there_only() {
+        let (mut editor, built, camera, t, dir) =
+            top_down("kerb node", DVec3::new(450.0, 130.0, 0.0));
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        editor.selection.select(Item::Road(0));
+        let smp = &built.roads[0];
+        // The left kerb round the first corner (u 1.6 to 4.4): a node at u 3.
+        let at = smp.frame_at(smp.s_at(3.0)).pos;
+        assert!(add_strip_key(&mut editor, &built, 0, Side::Left, 0, at));
+        let keys = editor.project.roads[0].left[0].keys.clone();
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        let key = KeyRef {
+            road: 0,
+            side: Side::Left,
+            strip: 0,
+            key: 1,
+        };
+        let road = &editor.project.roads[0];
+        let handle = key_pos(road, smp, key).unwrap();
+        let screen = view.screen(handle + DVec3::Z * LIFT).unwrap();
+        assert_eq!(
+            pick(&editor, &built, view, screen, Some(handle), false),
+            Some(Hit::StripKey(key))
+        );
+
+        // Dragged 1.3 m further out: 2.5 m wide there, as it was 10 m away.
+        let mut tool = Tool::editing(true);
+        start_modal(
+            &mut editor,
+            &mut tool,
+            &built,
+            Mode::Grab,
+            Some(Hit::StripKey(key)),
+            screen,
+            true,
+        );
+        let m = tool.modal.as_ref().unwrap();
+        let f = smp.frame_at(smp.s_at(keys[1].u));
+        let to = view.screen(handle + flat_left(&f) * 1.3).unwrap();
+        let (ops, readout) =
+            transform_ops(&editor, &built, m, &pointer(view, to, None, true, true));
+        assert!(readout.contains("2.50 m wide"), "{readout}");
+        assert!(editor.apply(ops, None));
+        let strip = &editor.project.roads[0].left[0];
+        assert_eq!(strip.keys[1].width, 2.5);
+        assert!((smp.strip_shape(strip, smp.s_at(keys[1].u) + 10.0).0 - 1.2).abs() < 1e-6);
+        // Z raises it instead.
+        let m = tool.modal.as_mut().unwrap();
+        m.axis = Axis::Z;
+        let (ops, readout) = transform_ops(
+            &editor,
+            &built,
+            m,
+            &pointer(view, to, Some(2.0), true, true),
+        );
+        assert!(readout.contains("×2.00"), "{readout}");
+        assert!(editor.apply(ops, None));
+        assert_eq!(editor.project.roads[0].left[0].keys[1].height, 2.0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

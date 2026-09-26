@@ -229,6 +229,7 @@ pub fn input(
                     | Hit::Reach(_)
                     | Hit::Edge(..)
                     | Hit::Line(..)
+                    | Hit::StripKey(_)
                     | Hit::Landform(..)),
                 ) => {
                     tool.press = None;
@@ -351,7 +352,13 @@ pub(super) fn click(
     edit: bool,
 ) {
     if add {
-        add_node_at(editor, built, pointer);
+        match (hit, pointer) {
+            // Ctrl + click on a strip: a node of the strip there.
+            (Some(Hit::Strip(r, side, i)), Some(at)) => {
+                add_strip_key(editor, built, r, side, i, at);
+            }
+            _ => add_node_at(editor, built, pointer),
+        }
         return;
     }
     match hit {
@@ -375,6 +382,8 @@ pub(super) fn click(
             | Hit::Reach(_)
             | Hit::Edge(..)
             | Hit::Line(..)
+            | Hit::StripKey(_)
+            | Hit::Strip(..)
             | Hit::Gizmo(_),
         ) => {}
         // Empty space: in edit mode no nodes, in object mode nothing at all.
@@ -619,6 +628,72 @@ pub fn add_node_at(editor: &mut Editor, built: &Built, pointer: Option<DVec3>) {
     ) {
         editor.selection.select_node(item, before);
     }
+}
+
+/// How far either side of a strip's first node the two nodes holding it as it is go, m.
+const KEY_HOLD: f64 = 10.0;
+
+/// Adds a node to strip `i` of road `r` where `at` is along the road, at the width and
+/// height it has there. A strip's first node comes with one either side, `KEY_HOLD`
+/// along, holding it as it is round them: dragging the node then changes it only
+/// nearby.
+pub fn add_strip_key(
+    editor: &mut Editor,
+    built: &Built,
+    r: usize,
+    side: Side,
+    i: usize,
+    at: DVec3,
+) -> bool {
+    use open_racing_track_project::project::StripKey;
+    let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r)) else {
+        return false;
+    };
+    let Some(mut strip) = road.strips(side).get(i).cloned() else {
+        return false;
+    };
+    let s = smp.frames[smp.nearest(at)].s;
+    let key = |s: f64| {
+        let s = if smp.closed {
+            s.rem_euclid(smp.length)
+        } else {
+            s.clamp(0.0, smp.length)
+        };
+        let (width, height) = smp.strip_shape(&strip, s);
+        StripKey {
+            u: smp.u_at(s),
+            width,
+            height,
+        }
+    };
+    let mut keys = vec![key(s)];
+    if strip.keys.is_empty() {
+        keys.extend([key(s - KEY_HOLD), key(s + KEY_HOLD)]);
+    }
+    let added = keys.len();
+    strip.keys.extend(keys);
+    strip.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+    strip.keys.dedup_by(|a, b| (a.u - b.u).abs() < 1e-4);
+    let (road, name) = (road.name.clone(), strip.name.clone());
+    let done = editor.apply(
+        vec![Op::PutStrip {
+            road,
+            side,
+            strip,
+            at: None,
+        }],
+        None,
+    );
+    if done {
+        editor.status = if added > 1 {
+            format!(
+                "a node on {name}, with two holding it as it is 10 m either side: drag it out to widen it there, Z to raise it"
+            )
+        } else {
+            format!("a node on {name}: drag it out to widen it there, Z to raise it")
+        };
+    }
+    done
 }
 
 /// E: a new node after the active one (before it at the start of an open line), grabbed.

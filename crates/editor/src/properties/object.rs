@@ -70,6 +70,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                                 profile,
                                 surface,
                                 material,
+                                model,
                                 ..
                             },
                         ) => Shape::Band {
@@ -79,6 +80,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                             surface,
                             material,
                             lift: *lift,
+                            model,
                         },
                         (_, shape) => shape,
                     };
@@ -98,6 +100,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 surface,
                 material,
                 lift,
+                model,
             } => {
                 changed |= drag(ui, "Width m", width, 0.05, 0.0..=100.0);
                 changed |= row(ui, "Lies", |ui| {
@@ -114,6 +117,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 profile_ui(ui, profile, ("spline profile", i));
                 combo_row(ui, "Surface", ("sp surface", i), surface, &surfaces);
                 combo_row(ui, "Material", ("sp material", i), material, &materials);
+                model_ui(ui, ("spline", i), model, library, Along::Strip);
                 changed |= drag(ui, "Lift m", lift, 0.005, -1.0..=1.0);
             }
             Shape::Wall {
@@ -126,7 +130,7 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 drag(ui, "Height m", height, 0.05, 0.05..=30.0);
                 drag(ui, "Thickness m", thickness, 0.05, 0.0..=10.0);
                 combo_row(ui, "Material", ("sp material", i), material, &materials);
-                model_ui(ui, ("spline", i), model, library);
+                model_ui(ui, ("spline", i), model, library, Along::Wall);
                 changed |= check(ui, collide, "Cars collide with it");
             }
         }
@@ -135,8 +139,9 @@ pub(super) fn spline_tab(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, libr
                 profile,
                 surface,
                 material,
+                model,
                 ..
-            } => format!("{profile:?} {surface} {material}"),
+            } => format!("{profile:?} {surface} {material} {model:?}"),
             Shape::Wall {
                 height,
                 thickness,

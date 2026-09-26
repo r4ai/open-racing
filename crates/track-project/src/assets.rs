@@ -81,7 +81,7 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
             refs.push((portable(&w.model), format!("row {} of {}", w.name, r.name)));
         }
     }
-    for (m, user) in wall_models(project) {
+    for (m, user) in run_models(project) {
         refs.push((portable(&m.model), user));
     }
     if let Some(r) = &project.reference {
@@ -90,13 +90,19 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     refs
 }
 
-/// The models walls show, with what uses each: wall types, and barriers and splines not
-/// made from one.
-pub fn wall_models(project: &Project) -> Vec<(&ModelRun, String)> {
+/// The models repeated along walls and strips, with what uses each: wall and strip
+/// types, and barriers, strips and splines not made from one.
+pub fn run_models(project: &Project) -> Vec<(&ModelRun, String)> {
     let mut out: Vec<(&ModelRun, String)> = project
         .wall_styles
         .iter()
         .filter_map(|w| Some((w.model.as_ref()?, format!("wall type {}", w.name))))
+        .chain(
+            project
+                .strip_styles
+                .iter()
+                .filter_map(|s| Some((s.model.as_ref()?, format!("strip type {}", s.name)))),
+        )
         .collect();
     for r in &project.roads {
         for b in r.barriers.iter().filter(|b| b.style.is_none()) {
@@ -104,10 +110,15 @@ pub fn wall_models(project: &Project) -> Vec<(&ModelRun, String)> {
                 out.push((m, format!("barrier {} of {}", b.name, r.name)));
             }
         }
+        for s in r.left.iter().chain(&r.right).filter(|s| s.style.is_none()) {
+            if let Some(m) = &s.model {
+                out.push((m, format!("strip {} of {}", s.name, r.name)));
+            }
+        }
     }
     for sp in project.splines.iter().filter(|s| s.style.is_none()) {
-        if let Shape::Wall { model: Some(m), .. } = &sp.shape {
-            out.push((m, format!("wall {}", sp.name)));
+        if let Shape::Wall { model: Some(m), .. } | Shape::Band { model: Some(m), .. } = &sp.shape {
+            out.push((m, format!("spline {}", sp.name)));
         }
     }
     out
@@ -304,6 +315,29 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
             });
         }
     }
+    for s in &project.strip_styles {
+        if let Some(model) = moved(&s.model) {
+            ops.push(Op::PutStripStyle {
+                style: crate::project::StripStyle { model, ..s.clone() },
+            });
+        }
+    }
+    for r in &project.roads {
+        for side in [crate::project::Side::Left, crate::project::Side::Right] {
+            for s in r.strips(side).iter().filter(|s| s.style.is_none()) {
+                if let Some(model) = moved(&s.model) {
+                    let mut s = s.clone();
+                    s.model = model;
+                    ops.push(Op::PutStrip {
+                        road: r.name.clone(),
+                        side,
+                        strip: s,
+                        at: None,
+                    });
+                }
+            }
+        }
+    }
     for r in &project.roads {
         for b in r.barriers.iter().filter(|b| b.style.is_none()) {
             if let Some(model) = moved(&b.model) {
@@ -318,7 +352,7 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
     }
     for sp in project.splines.iter().filter(|s| s.style.is_none()) {
         let mut sp = sp.clone();
-        if let Shape::Wall { model, .. } = &mut sp.shape
+        if let Shape::Wall { model, .. } | Shape::Band { model, .. } = &mut sp.shape
             && let Some(m) = moved(model)
         {
             *model = m;

@@ -114,6 +114,9 @@ trackctl guide                          # this text
   - `Flat` continues the plane of whatever lies inside it.
   - `Crown(h)` rises to `h` in the middle, like a kerb.
   - `Slope(d)` falls by `d` to its outer edge.
+  - `Shape([(x, height)])` is any cross-section: heights (m) at fractions across, joined by straight lines. A shape starting above 0 at `x` 0 steps straight up from the road there (a raised kerb's edge).
+- `keys: [(u, width, height)]` make a strip wider or narrower, and its profile higher or lower (`height` times), at places along the road: it eases from one key to the next and keeps to the first and last beyond them. Without keys it is `width` wide all along.
+- `model: Some((model, length?, bend?, flip?))` repeats a glTF model along it in place of its plain look (its origin at the foot of the strip's inner edge, halfway across; +X along, +Z up, +Y towards the road). Cars still drive on its profile.
 
 **Splines.** A spline is a kerb, wall or fence along its own line, placed anywhere rather than beside a road.
 
@@ -129,7 +132,7 @@ trackctl guide                          # this text
 - `drag` adds rolling resistance.
 - `Asphalt` and `Kerb` count as track. Everything else is off track.
 
-**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint`, `Dirt`, `Fence` (chain link, see-through with `alpha: Mask`) and `Tyres`. The alternative is `File("assets/textures/x.png")`, a path relative to the project; `trackctl import` puts files there.
+**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Stripes((r, g, b), (r, g, b))` (blocks of any two sRGB colours, 0–255, along the road: a kerb's blue and yellow), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint`, `Dirt`, `Fence` (chain link, see-through with `alpha: Mask`) and `Tyres`. The alternative is `File("assets/textures/x.png")`, a path relative to the project; `trackctl import` puts files there.
 
 - `tile` gives the metres covered by one repetition of the texture, across the road and then along it.
 - `normal` is a tangent-space normal map, tiled like the texture.
@@ -228,13 +231,14 @@ refitted round it whenever the road changes, `shift` metres beyond its usual pla
 barrier may carry `model: (model, length?, bend?, flip?)`, a glTF model repeated along it
 in place of its plain shape (its +X along the wall, +Z up, +Y towards the road); cars
 still hit the plain wall. A strip's `profile` may be `Shape([(x, height)])`: any
-cross-section, points at fractions across.
+cross-section, points at fractions across; its `keys` and `model` are described under
+Strips.
 
 **Strip and wall types**
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `PutStripStyle` / `RemoveStripStyle` | `style: (name, width, profile, surface, material, fade)` / `name` | adds or replaces a kind of kerb, gravel, run-off or verge; strips and splines made from it take its look (keeping their widths) |
+| `PutStripStyle` / `RemoveStripStyle` | `style: (name, width, profile, surface, material, fade, model?)` / `name` | adds or replaces a kind of kerb, gravel, run-off or verge; strips and splines made from it take its look and model (keeping their widths and keys) |
 | `PutWallStyle` / `RemoveWallStyle` | `style: (name, height, thickness, material, model?)` / `name` | adds or replaces a kind of wall, rail, fence or tyre stack; barriers and walls made from it take its shape and model |
 
 New projects start with kerb, flat, raised, sausage and stepped kerbs, gravel, run-off

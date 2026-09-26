@@ -110,6 +110,8 @@ pub fn reverse(p: &mut Project, name: &str) -> Result<(), Error> {
     for s in road.left.iter_mut().chain(road.right.iter_mut()) {
         reversed_ranges(&mut s.ranges, &f);
         turn(&mut s.corner);
+        s.keys.iter_mut().for_each(|k| k.u = f(k.u));
+        s.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
     }
     for b in &mut road.barriers {
         b.side = b.side.other();
@@ -268,6 +270,15 @@ fn cut(road: &Road, from: usize, to: usize, name: &str) -> Road {
             if let Some(c) = &mut s.corner {
                 c.apex = along(c.apex);
             }
+            s.keys = s
+                .keys
+                .iter()
+                .map(|k| crate::project::StripKey {
+                    u: along(k.u),
+                    ..*k
+                })
+                .filter(|k| (0.0..=b - a).contains(&k.u))
+                .collect();
             out.strips_mut(side).push(s);
         }
     }
@@ -554,10 +565,12 @@ pub fn join(p: &mut Project, name: &str, with: &str) -> Result<(), Error> {
             if let Some(c) = &mut s.corner {
                 c.apex += off;
             }
+            s.keys.iter_mut().for_each(|k| k.u += off);
             match out.strips(side).iter().position(|t| t.name == s.name) {
                 Some(i) => {
                     let t = &mut out.strips_mut(side)[i];
                     t.ranges = joined(&t.ranges, &s.ranges);
+                    t.keys.extend(s.keys);
                 }
                 None => {
                     s.ranges = only_b(&s.ranges);

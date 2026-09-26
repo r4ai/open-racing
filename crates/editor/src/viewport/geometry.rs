@@ -108,8 +108,52 @@ impl PartValue {
 pub(super) fn inner_width(road: &Road, smp: &Sampled, side: Side, i: usize, f: &Frame) -> f64 {
     road.strips(side)[..i]
         .iter()
-        .map(|s| s.width * smp.presence(&s.ranges, s.fade, f.s))
+        .map(|s| smp.strip_shape(s, f.s).0 * smp.presence(&s.ranges, s.fade, f.s))
         .sum()
+}
+
+/// Width of strip `i` of a side at frame `f`, from its keys.
+fn strip_width(road: &Road, smp: &Sampled, side: Side, i: usize, f: &Frame) -> f64 {
+    smp.strip_shape(&road.strips(side)[i], f.s).0
+}
+
+/// Where the handle of a strip's key is drawn: on its outer edge.
+pub(super) fn key_pos(road: &Road, smp: &Sampled, key: KeyRef) -> Option<DVec3> {
+    let k = road.strips(key.side).get(key.strip)?.keys.get(key.key)?;
+    let f = smp.frame_at(smp.s_at(k.u));
+    Some(f.pos + flat_left(&f) * part_reach(road, smp, Part::Strip(key.side, key.strip), &f))
+}
+
+/// The keys of a road's strips.
+pub(super) fn strip_keys(road: &Road, r: usize) -> impl Iterator<Item = KeyRef> + '_ {
+    [Side::Left, Side::Right].into_iter().flat_map(move |side| {
+        road.strips(side)
+            .iter()
+            .enumerate()
+            .flat_map(move |(strip, s)| {
+                (0..s.keys.len()).map(move |key| KeyRef {
+                    road: r,
+                    side,
+                    strip,
+                    key,
+                })
+            })
+    })
+}
+
+/// The strip `d` m left of the road's centre at frame `f`, where it is.
+pub(super) fn strip_at(road: &Road, smp: &Sampled, f: &Frame, d: f64) -> Option<(Side, usize)> {
+    let side = if d >= 0.0 { Side::Left } else { Side::Right };
+    let mut edge = edge_of(f, side);
+    let out = d.abs();
+    for (i, s) in road.strips(side).iter().enumerate() {
+        let w = smp.strip_shape(s, f.s).0 * smp.presence(&s.ranges, s.fade, f.s);
+        if w > 0.0 && (edge..=edge + w).contains(&out) {
+            return Some((side, i));
+        }
+        edge += w;
+    }
+    None
 }
 
 pub(super) fn edge_of(f: &Frame, side: Side) -> f64 {
@@ -125,7 +169,7 @@ pub(super) fn part_offset(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> 
     match part {
         Part::Strip(side, i) => {
             let inner = inner_width(road, smp, side, i, f);
-            side.sign() * (edge_of(f, side) + inner + 0.5 * road.strips(side)[i].width)
+            side.sign() * (edge_of(f, side) + inner + 0.5 * strip_width(road, smp, side, i, f))
         }
         Part::Barrier(i) => {
             let b = &road.barriers[i];
@@ -145,7 +189,7 @@ pub(super) fn part_reach(road: &Road, smp: &Sampled, part: Part, f: &Frame) -> f
     match part {
         Part::Strip(side, i) => {
             let inner = inner_width(road, smp, side, i, f);
-            side.sign() * (edge_of(f, side) + inner + road.strips(side)[i].width)
+            side.sign() * (edge_of(f, side) + inner + strip_width(road, smp, side, i, f))
         }
         Part::Barrier(_) | Part::Row(_) | Part::Line(_) => part_offset(road, smp, part, f),
     }

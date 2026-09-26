@@ -195,12 +195,11 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                 for strip in road.strips(side) {
                     // A strip fading out narrows and flattens.
                     let presence = sampled.presence(&strip.ranges, strip.fade, f.s);
-                    let width = strip.width * presence;
+                    let (width, height) = sampled.strip_shape(strip, f.s);
+                    let (width, height) = (width * presence, height * presence);
                     let (d0, h0) = *outline.last().unwrap();
-                    let cols = columns(&strip.profile, strip.width);
-                    for c in 1..=cols {
-                        let x = c as f64 / cols as f64;
-                        outline.push((d0 + width * x, h0 + presence * strip.profile.height(x)));
+                    for x in column_xs(&strip.profile, strip.widest()) {
+                        outline.push((d0 + width * x, h0 + height * strip.profile.height(x)));
                     }
                 }
                 outline
@@ -210,6 +209,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
 
     let mut visual = Vec::new();
     let mut solid = Vec::new();
+    let mut models = Vec::new();
     let point = |f: &Frame, d: f64, h: f64| f.pos + f.lateral * d + f.normal * h;
 
     // The road itself, from its right edge to its left.
@@ -249,7 +249,7 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
         let si = side as usize;
         let mut col0 = 0;
         for strip in road.strips(side) {
-            let cols = columns(&strip.profile, strip.width);
+            let cols = column_xs(&strip.profile, strip.widest()).len();
             // Only where the strip is: nothing is built where it has narrowed to none,
             // and only the rows of chunks with something in them are worked out.
             let n = frames.len();
@@ -279,8 +279,31 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
                     row
                 })
                 .collect();
+            if let Some(run) = &strip.model {
+                // At the foot of its inner edge halfway across, facing the road.
+                let sign = side.sign();
+                let points: Vec<LinePoint> = frames
+                    .iter()
+                    .zip(&outlines)
+                    .map(|(f, o)| {
+                        let ((d_in, h_in), (d_out, _)) = (o[si][col0], o[si][col0 + cols]);
+                        LinePoint {
+                            pos: point(f, sign * 0.5 * (d_in + d_out), h_in),
+                            toward: -sign * f.lateral.with_z(0.0).normalize_or(DVec3::Y),
+                        }
+                    })
+                    .collect();
+                let present = |k: usize| here[k] && here[(k + 1) % n];
+                models.push(ModelLine::new(run, &points, sampled.closed, present));
+            }
+            // A strip a model shows is only there for the cars to drive on.
+            let mut hidden = Vec::new();
             add_band(
-                &mut visual,
+                if strip.model.is_some() {
+                    &mut hidden
+                } else {
+                    &mut visual
+                },
                 &mut solid,
                 &sampled,
                 &rows,
@@ -370,7 +393,6 @@ pub fn build(project: &Project, index: usize) -> RoadBuild {
     }
 
     // Barriers: faces towards the road, over the top and away from it.
-    let mut models = Vec::new();
     for barrier in &road.barriers {
         let si = barrier.side as usize;
         let sign = barrier.side.sign();
@@ -496,6 +518,21 @@ pub(crate) fn add_wall(
 /// Width of a strip's columns at most, m: fine enough for other roads crossing it to
 /// press it down under themselves.
 const STRIP_COLUMN: f64 = 2.0;
+
+/// How far across a stepped strip's step rises, m: steep, but not sheer.
+const STEP_RUN: f64 = 0.02;
+
+/// Where a strip's outline has points across it, as fractions of its width from its
+/// inner edge (1 its outer edge): evenly, and just inside its inner edge too when its
+/// profile starts with a step up (or down) from what is inside it.
+pub(crate) fn column_xs(profile: &Profile, width: f64) -> Vec<f64> {
+    let cols = columns(profile, width);
+    let mut xs: Vec<f64> = (1..=cols).map(|c| c as f64 / cols as f64).collect();
+    if profile.height(0.0).abs() > 1e-6 {
+        xs.insert(0, (STEP_RUN / width.max(STEP_RUN)).min(0.25 / cols as f64));
+    }
+    xs
+}
 
 /// Columns a strip of this profile and full width is built with.
 pub(crate) fn columns(profile: &Profile, width: f64) -> usize {
@@ -699,7 +736,9 @@ mod tests {
             w + road
                 .strips(side)
                 .iter()
-                .map(|s| s.width * b.sampled.presence(&s.ranges, s.fade, f.s))
+                .map(|s| {
+                    b.sampled.strip_shape(s, f.s).0 * b.sampled.presence(&s.ranges, s.fade, f.s)
+                })
                 .sum::<f64>()
         };
         assert!(
@@ -707,6 +746,97 @@ mod tests {
             "{offsets:?}"
         );
         assert!((offsets[offsets.len() - 1] - reach(Side::Left)).abs() < 1e-2);
+    }
+
+    /// How far out the left side's outline reaches at the frame nearest `u`.
+    fn left_reach(b: &RoadBuild, u: f64) -> f64 {
+        let k = b.sampled.nearest(b.sampled.frame_at(b.sampled.s_at(u)).pos);
+        b.edges(k)[0].0
+    }
+
+    #[test]
+    fn strip_keys_widen_and_raise_a_strip_where_they_are() {
+        let mut project = Project::new("t");
+        let road = &mut project.roads[0];
+        // The kerb all round, 1.2 m wide but 3 m at node 3.
+        road.left[0].ranges.clear();
+        road.left[0].keys = vec![
+            crate::project::StripKey {
+                u: 1.0,
+                width: 1.2,
+                height: 1.0,
+            },
+            crate::project::StripKey {
+                u: 3.0,
+                width: 3.0,
+                height: 2.0,
+            },
+            crate::project::StripKey {
+                u: 5.0,
+                width: 1.2,
+                height: 1.0,
+            },
+        ];
+        let mut plain = project.clone();
+        plain.roads[0].left[0].keys.clear();
+        let before = build(&plain, 0);
+        let b = build(&project, 0);
+        let wider = left_reach(&b, 3.0) - left_reach(&before, 3.0);
+        assert!((wider - 1.8).abs() < 0.05, "{wider}");
+        assert!((left_reach(&b, 1.0) - left_reach(&before, 1.0)).abs() < 0.05);
+        // Its crown twice as high there.
+        let road = &project.roads[0];
+        let k = b
+            .sampled
+            .nearest(b.sampled.frame_at(b.sampled.s_at(3.0)).pos);
+        let edge = b.sampled.frames[k].width_left;
+        let top = b.height_at(road, k, edge + 1.5);
+        assert!((top - 0.06).abs() < 0.005, "{top}");
+    }
+
+    #[test]
+    fn a_profile_starting_high_steps_up_from_the_road() {
+        let mut project = Project::new("t");
+        let kerb = &mut project.roads[0].left[0];
+        kerb.ranges.clear();
+        kerb.profile = Profile::Shape(vec![[0.0, 0.05], [1.0, 0.05]]);
+        let b = build(&project, 0);
+        let road = &project.roads[0];
+        let edge = b.sampled.frames[0].width_left;
+        assert!(b.height_at(road, 0, edge - 0.01).abs() < 1e-3);
+        assert!((b.height_at(road, 0, edge + 0.05) - 0.05).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_strip_a_model_shows_is_driven_on_but_not_drawn() {
+        let mut project = Project::new("t");
+        let plain = build(&project, 0);
+        project.roads[0].left[0].model = Some(ModelRun {
+            model: "kerb.glb".into(),
+            length: 2.0,
+            bend: true,
+            flip: false,
+        });
+        let b = build(&project, 0);
+        assert_eq!(b.models.len(), plain.models.len() + 1);
+        let strips = |b: &RoadBuild, solid: bool| {
+            if solid {
+                b.solid.iter().filter(|p| p.layer == Layer::Strip).count()
+            } else {
+                b.visual.iter().filter(|p| p.layer == Layer::Strip).count()
+            }
+        };
+        assert_eq!(strips(&b, true), strips(&plain, true));
+        assert!(strips(&b, false) < strips(&plain, false));
+        // Along the kerb's two stretches, halfway across it and facing the road.
+        let line = b.models.last().unwrap();
+        assert_eq!(line.stretches.len(), 2);
+        let run = &line.stretches[0];
+        let p = run[run.len() / 2];
+        let f = &b.sampled.frames[b.sampled.nearest(p.pos)];
+        let d = (p.pos - f.pos).dot(f.lateral);
+        assert!((d - (f.width_left + 0.6)).abs() < 0.1, "{d}");
+        assert!(p.toward.dot(f.lateral) < -0.99);
     }
 
     #[test]

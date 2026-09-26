@@ -73,6 +73,7 @@ impl Preset {
                     surface: s.surface.clone(),
                     material: s.material.clone(),
                     lift: 0.01,
+                    model: s.model.clone(),
                 };
                 Some((shape, resolution))
             }

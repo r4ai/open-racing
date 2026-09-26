@@ -824,12 +824,14 @@ impl Op {
                         profile,
                         surface,
                         material,
+                        model,
                         ..
                     } = &mut sp.shape
                     {
                         *profile = style.profile.clone();
                         *surface = style.surface.clone();
                         *material = style.material.clone();
+                        *model = style.model.clone();
                     }
                 }
                 put(&mut p.strip_styles, style, |s| &s.name, None);

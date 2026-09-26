@@ -821,6 +821,13 @@ fn mouse_hints(c: &Ctx) -> String {
         Some(Hit::Edge(..)) => {
             "Road edge  ·  Drag: the width on this side at the selected nodes".into()
         }
+        Some(Hit::StripKey(k)) => format!(
+            "Node {} of a strip  ·  Drag: along the road and out (its width) · Z while dragging: its height · Right: remove",
+            k.key
+        ),
+        Some(Hit::Strip(..)) => {
+            "Strip  ·  Ctrl+click: a node here, to change its width or height nearby · Right: menu".into()
+        }
         Some(Hit::Line(r, i)) => format!(
             "Line {}  ·  Drag: move it across (catches on the centre, the edges and other lines; Ctrl: free) · Right: menu",
             c.editor

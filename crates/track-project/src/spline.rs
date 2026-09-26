@@ -8,7 +8,7 @@ use crate::curve::Sampled;
 use crate::project::{Align, Project, Shape};
 use crate::road::{
     BARRIER_SINK, Layer, LinePoint, ModelLine, Solid, SolidPart, VisualPart, add_band, add_wall,
-    columns,
+    column_xs,
 };
 
 /// How far above a point draping looks for the ground first, m: enough for ground a
@@ -54,6 +54,7 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
             profile,
             surface,
             lift,
+            model,
             ..
         } => {
             let (d0, d1) = match align {
@@ -61,23 +62,43 @@ pub fn build(project: &Project, index: usize, ground: Option<&GroundMesh>) -> Sp
                 Align::Left => (0.0, *width),
                 Align::Right => (-width, 0.0),
             };
-            let cols = columns(profile, *width);
+            // Its right edge on what is under it, then up any step its profile starts
+            // with.
+            let xs: Vec<f64> = std::iter::once(0.0)
+                .chain(column_xs(profile, *width))
+                .collect();
+            let height = |x: f64| if x == 0.0 { 0.0 } else { profile.height(x) };
             // From the right edge to the left, so that the band faces up.
             let rows: Vec<Vec<(DVec3, f64)>> = frames
                 .iter()
                 .map(|f| {
-                    (0..=cols)
-                        .map(|c| {
-                            let x = c as f64 / cols as f64;
+                    xs.iter()
+                        .map(|&x| {
                             let d = d0 + (d1 - d0) * x;
-                            let h = lift + profile.height(x);
+                            let h = lift + height(x);
                             (drape(f.pos + f.lateral * d) + DVec3::Z * h, d - d0)
                         })
                         .collect()
                 })
                 .collect();
+            if let Some(run) = model {
+                // At the foot of its right edge halfway across, facing the line's left.
+                let points: Vec<LinePoint> = frames
+                    .iter()
+                    .map(|f| LinePoint {
+                        pos: drape(f.pos + f.lateral * (0.5 * (d0 + d1))) + DVec3::Z * *lift,
+                        toward: f.lateral.with_z(0.0).normalize_or(DVec3::Y),
+                    })
+                    .collect();
+                models.push(ModelLine::new(run, &points, sampled.closed, |_| true));
+            }
+            let mut hidden = Vec::new();
             add_band(
-                &mut visual,
+                if model.is_some() {
+                    &mut hidden
+                } else {
+                    &mut visual
+                },
                 &mut solid,
                 &sampled,
                 &rows,

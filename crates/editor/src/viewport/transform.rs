@@ -92,6 +92,21 @@ pub fn start_modal(
             }
         }
         Some(Hit::Range(end)) => Target::Range { end },
+        Some(Hit::StripKey(key)) => {
+            let Some(k) = editor
+                .project
+                .roads
+                .get(key.road)
+                .and_then(|r| r.strips(key.side).get(key.strip))
+                .and_then(|s| s.keys.get(key.key))
+            else {
+                return;
+            };
+            Target::StripKey {
+                key,
+                height: k.height,
+            }
+        }
         Some(Hit::Line(road, line)) => {
             let (Some(smp), Some(at)) = (built.roads.get(road), tool.pointer) else {
                 return;
@@ -234,6 +249,18 @@ pub fn start_modal(
             };
             (Mode::Grab, reach_pos(road, smp, end.part, rg))
         }
+        Target::StripKey { key, .. } => {
+            let (Some(r), Some(smp)) = (
+                editor.project.roads.get(key.road),
+                built.roads.get(key.road),
+            ) else {
+                return;
+            };
+            let Some(at) = key_pos(r, smp, *key) else {
+                return;
+            };
+            (Mode::Grab, at)
+        }
         Target::Line { road, line, s } => {
             let (Some(r), Some(smp)) = (editor.project.roads.get(*road), built.roads.get(*road))
             else {
@@ -320,6 +347,8 @@ pub(super) fn modal(
         let allowed = match m.mode {
             Mode::Rotate | Mode::Tilt => false,
             Mode::Width => a != Axis::Z,
+            // A strip's node goes along and out, or up with Z.
+            _ if matches!(m.target, Target::StripKey { .. }) => a == Axis::Z,
             _ => true,
         };
         if keys.just_pressed(k) && allowed {
@@ -372,6 +401,9 @@ pub(super) fn modal(
         Mode::Width => "X left only · Y right only",
         Mode::Tilt => "",
         _ if edge => "B both sides",
+        _ if matches!(m.target, Target::StripKey { .. }) => {
+            "Z its height (typed: times its profile's) · catches on nodes and corners"
+        }
         _ if matches!(m.target, Target::Nodes { .. }) => {
             "X/Y/Z axis · O proportional · wheel reach"
         }
@@ -495,6 +527,7 @@ pub(super) fn transform_ops(
         Target::Edge { .. } => edge_ops(built, m, p),
         Target::Range { .. } => range_ops(editor, built, m, p),
         Target::Line { .. } => line_ops(editor, built, m, p),
+        Target::StripKey { .. } => strip_key_ops(editor, built, m, p),
         Target::Shape { .. } => shape_ops(m, p),
         Target::Prop { .. } => prop_ops(editor, m, p),
         Target::Marker { .. } => marker_ops(editor, built, m, p),
@@ -699,9 +732,12 @@ fn reach_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
     let reach = part_reach(road, smp, end.part, &f).abs();
     let readout = match &mut value {
         PartValue::Strip(side, strip) => {
-            let inner = reach - strip.width;
-            strip.width = step(side.sign() * d - inner).max(0.1);
-            format!("{}: {:.2} m wide", strip.name, strip.width)
+            // With nodes, each wider or narrower alike.
+            let here = smp.strip_shape(strip, f.s).0;
+            let wide = step(side.sign() * d - (reach - here)).max(0.1);
+            let k = if here > 1e-9 { wide / here } else { 1.0 };
+            strip.set_width((strip.width * k).max(0.1));
+            format!("{}: {wide:.2} m wide", strip.name)
         }
         PartValue::Barrier(barrier) => {
             let edge = reach - barrier.offset;
@@ -720,6 +756,90 @@ fn reach_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>
         }
     };
     (vec![value.put(&road.name)], readout)
+}
+
+/// A strip's node dragged: along the road (catching on nodes and corners) and out for
+/// its width, or up and down (Z) for its height.
+fn strip_key_ops(editor: &Editor, built: &Built, m: &Modal, p: &Gesture) -> (Vec<Op>, String) {
+    let Target::StripKey { key, height } = &m.target else {
+        return (vec![], String::new());
+    };
+    let (Some(road), Some(smp)) = (
+        editor.project.roads.get(key.road),
+        built.roads.get(key.road),
+    ) else {
+        return (vec![], String::new());
+    };
+    let Some(mut strip) = road.strips(key.side).get(key.strip).cloned() else {
+        return (vec![], String::new());
+    };
+    if key.key >= strip.keys.len() {
+        return (vec![], String::new());
+    }
+    let readout = if m.axis == Axis::Z {
+        // The pointer raises the profile's highest point by as much as it moves up.
+        let peak = (0..=32)
+            .map(|i| strip.profile.height(i as f64 / 32.0).abs())
+            .fold(0.0, f64::max)
+            .max(0.005);
+        let h = match p.typed {
+            Some(t) => t,
+            None => {
+                let h = height + p.slide(m).z / peak;
+                if p.snap { (h * 20.0).round() / 20.0 } else { h }
+            }
+        }
+        .max(0.0);
+        strip.keys[key.key].height = h;
+        format!(
+            "{} node {}: height ×{h:.2} (highest {:.1} cm)",
+            strip.name,
+            key.key,
+            100.0 * h * peak
+        )
+    } else {
+        let Some(at) = p.view.on_plane(p.cursor, m.pivot.z) else {
+            return (vec![], String::new());
+        };
+        let f = &smp.frames[smp.nearest(at)];
+        let caught = (!p.free)
+            .then(|| range_snap(smp, built.corners.get(key.road), f.s, &p.snapping))
+            .flatten();
+        let u = match &caught {
+            Some((u, _)) => *u,
+            None if p.snap => p.snapping.fine(f.u),
+            None => f.u,
+        };
+        let f = smp.frame_at(smp.s_at(u));
+        let inner = edge_of(&f, key.side) + inner_width(road, smp, key.side, key.strip, &f);
+        let out = key.side.sign() * (at - f.pos).dot(flat_left(&f)) - inner;
+        let w = match p.typed {
+            Some(t) => t,
+            None if p.snap => p.snapping.fine(out),
+            None => out,
+        }
+        .max(0.05);
+        let k = &mut strip.keys[key.key];
+        (k.u, k.width) = (u, w);
+        if caught.is_some() {
+            *m.snapped.lock().expect("snap") =
+                Some(f.pos + flat_left(&f) * (key.side.sign() * (inner + w)));
+        }
+        let at = caught.map_or(String::new(), |(_, what)| format!(" → on {what}"));
+        format!(
+            "{} node {}: {w:.2} m wide at u {u:.2}{at}",
+            strip.name, key.key
+        )
+    };
+    (
+        vec![Op::PutStrip {
+            road: road.name.clone(),
+            side: key.side,
+            strip,
+            at: None,
+        }],
+        readout,
+    )
 }
 
 /// How near a dragged line must come to what it catches on, m.

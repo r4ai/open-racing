@@ -14,7 +14,7 @@ pub(super) fn library_tab(
         "Made once, used anywhere: changing a type changes every kerb, strip or wall made from it.",
     );
     section(ui, "Kerb & strip types", "strip types", true, |ui| {
-        strip_types(ui, editor, state)
+        strip_types(ui, editor, state, library)
     });
     section(ui, "Wall types", "wall types", true, |ui| {
         wall_types(ui, editor, state, library)
@@ -59,12 +59,83 @@ fn add_row(ui: &mut egui::Ui, text: &mut String, hint: &str, button: &str) -> Op
     added
 }
 
-fn strip_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
+/// Kerb reds and whites, for a new two-colour look.
+const STRIPES: ([u8; 3], [u8; 3]) = ([200, 32, 26], [236, 236, 230]);
+
+/// The look of a strip type as blocks of two colours along it, as a kerb's: the colours
+/// and the blocks' length when its material is such, else a button to paint it so (in a
+/// material of its own). The operations to make, before the type's own.
+fn stripes_ui(ui: &mut egui::Ui, project: &Project, s: &mut StripStyle) -> Vec<Op> {
+    let mut ops = Vec::new();
+    let material = project.materials.iter().find(|m| m.name == s.material);
+    row(ui, "Colours", |ui| match material {
+        Some(m)
+            if matches!(
+                m.texture,
+                TextureSource::Builtin(BuiltinTexture::Stripes(..))
+            ) =>
+        {
+            let mut m = m.clone();
+            let TextureSource::Builtin(BuiltinTexture::Stripes(mut a, mut b)) = m.texture else {
+                return;
+            };
+            let mut block = 0.5 * m.tile[1] as f64;
+            let mut changed = ui.color_edit_button_srgb(&mut a).changed();
+            changed |= ui.color_edit_button_srgb(&mut b).changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut block)
+                        .speed(0.05)
+                        .range(0.1..=20.0)
+                        .suffix(" m blocks"),
+                )
+                .changed();
+            if changed {
+                m.texture = TextureSource::Builtin(BuiltinTexture::Stripes(a, b));
+                m.tile[1] = (2.0 * block) as f32;
+                ops.push(Op::PutMaterial { material: m });
+            }
+        }
+        _ => {
+            if ui
+                .button("Paint in two colours")
+                .on_hover_text("Blocks of two colours along it, in a material of its own")
+                .clicked()
+            {
+                let name = crate::presets::free_name(&format!("{} colours", s.name), |n| {
+                    project.material_index(n).is_some()
+                });
+                let base = material
+                    .or_else(|| project.materials.iter().find(|m| m.name == "kerb"))
+                    .cloned()
+                    .unwrap_or_else(|| project.materials[0].clone());
+                ops.push(Op::PutMaterial {
+                    material: MaterialDef {
+                        name: name.clone(),
+                        color: [1.0; 3],
+                        texture: TextureSource::Builtin(BuiltinTexture::Stripes(
+                            STRIPES.0, STRIPES.1,
+                        )),
+                        tile: [s.width.max(0.1) as f32, 2.0],
+                        normal: TextureSource::None,
+                        alpha: Alpha::Opaque,
+                        ..base
+                    },
+                });
+                s.material = name;
+            }
+        }
+    });
+    ops
+}
+
+fn strip_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State, library: &Library) {
     let (surfaces, materials) = names(&editor.project);
     let styles = editor.project.strip_styles.clone();
     for (i, before) in styles.iter().enumerate() {
         let mut s = before.clone();
         let mut remove = false;
+        let mut first = Vec::new();
         let used = uses(&editor.project, &s.name);
         let title = format!("{}  ·  {:.1} m  ·  used {used}×", s.name, s.width);
         egui::CollapsingHeader::new(title)
@@ -74,6 +145,14 @@ fn strip_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
                 profile_ui(ui, &mut s.profile, ("strip type profile", i));
                 combo_row(ui, "Surface", ("sts", i), &mut s.surface, &surfaces);
                 combo_row(ui, "Material", ("stm", i), &mut s.material, &materials);
+                first = stripes_ui(ui, &editor.project, &mut s);
+                model_ui(
+                    ui,
+                    ("strip type model", i),
+                    &mut s.model,
+                    library,
+                    Along::Strip,
+                );
                 drag(ui, "Fade m", &mut s.fade, 0.1, 0.0..=100.0);
                 ui.weak("New strips start at its width; each keeps its own.");
                 remove = row(ui, "", |ui| {
@@ -87,11 +166,9 @@ fn strip_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
             editor.apply(vec![Op::RemoveStripStyle { name }], None);
             return;
         }
-        if s != *before {
-            editor.apply(
-                vec![Op::PutStripStyle { style: s }],
-                Some(&format!("strip type {i}")),
-            );
+        if s != *before || !first.is_empty() {
+            first.push(Op::PutStripStyle { style: s });
+            editor.apply(first, Some(&format!("strip type {i}")));
         }
     }
     if let Some(name) = add_row(
@@ -117,6 +194,7 @@ fn strip_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State) {
                 surface: surfaces.first().cloned().unwrap_or_default(),
                 material: materials.first().cloned().unwrap_or_default(),
                 fade: 2.0,
+                model: None,
             });
         style.name = name;
         if editor.apply(vec![Op::PutStripStyle { style }], None) {
@@ -140,7 +218,7 @@ fn wall_types(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State, library
                 drag(ui, "Height m", &mut w.height, 0.05, 0.05..=30.0);
                 drag(ui, "Thickness m", &mut w.thickness, 0.05, 0.0..=10.0);
                 combo_row(ui, "Material", ("wtm", i), &mut w.material, &materials);
-                model_ui(ui, ("wall type", i), &mut w.model, library);
+                model_ui(ui, ("wall type", i), &mut w.model, library, Along::Wall);
                 if w.model.is_some() {
                     ui.weak("Cars hit a plain wall this high and thick; the model is what shows.");
                 }
@@ -261,6 +339,7 @@ pub(super) fn texture_picker(
 ) -> bool {
     let text = match &*source {
         TextureSource::None => "none".to_string(),
+        TextureSource::Builtin(BuiltinTexture::Stripes(..)) => "Stripes (built in)".to_string(),
         TextureSource::Builtin(t) => format!("{t:?} (built in)"),
         TextureSource::File(p) => p.to_string_lossy().into_owned(),
     };
@@ -281,6 +360,11 @@ pub(super) fn texture_picker(
                             format!("{t:?} (built in)"),
                         )
                         .changed();
+                }
+                let stripes = matches!(source, TextureSource::Builtin(BuiltinTexture::Stripes(..)));
+                if ui.selectable_label(stripes, "Stripes (built in)").clicked() && !stripes {
+                    *source = TextureSource::Builtin(BuiltinTexture::Stripes(STRIPES.0, STRIPES.1));
+                    changed = true;
                 }
             }
             for a in library.textures() {
@@ -321,6 +405,11 @@ fn materials(ui: &mut egui::Ui, editor: &mut Editor, state: &mut State, library:
             changed |= row(ui, "Texture", |ui| {
                 texture_picker(ui, ("tex", i), &mut m.texture, library, true, &editor.dir)
             });
+            if let TextureSource::Builtin(BuiltinTexture::Stripes(a, b)) = &mut m.texture {
+                changed |= row(ui, "Stripes", |ui| {
+                    ui.color_edit_button_srgb(a).changed() | ui.color_edit_button_srgb(b).changed()
+                });
+            }
             changed |= row(ui, "Normal map", |ui| {
                 texture_picker(
                     ui,

@@ -142,7 +142,7 @@ fn cornered(ui: &mut egui::Ui, c: &mut Ctx, count: usize, what: &str) {
     });
 }
 
-pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
+pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
     let Some(r) = c.editor.selection.road() else {
         return;
     };
@@ -179,8 +179,15 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                 let (mut changed, mut removed) = (false, false);
                 let open = focused(c, Focus::Strip(side, i));
                 let kind = s.style.as_deref().unwrap_or("custom");
+                let wide = if s.keys.is_empty() {
+                    format!("{:.1} m", s.width)
+                } else {
+                    let narrowest = s.keys.iter().map(|k| k.width).fold(f64::INFINITY, f64::min);
+                    format!("{narrowest:.1}–{:.1} m, {} nodes", s.widest(), s.keys.len())
+                };
+                let mut add_key = false;
                 let resp =
-                    egui::CollapsingHeader::new(format!("{}  ·  {kind}, {:.1} m", s.name, s.width))
+                    egui::CollapsingHeader::new(format!("{}  ·  {kind}, {wide}", s.name))
                         .id_salt(("strip", r, side as u8, i))
                         .open(open)
                         .show(ui, |ui| {
@@ -203,13 +210,28 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                                 }
                                 changed = true;
                             }
-                            changed |= drag(ui, "Width m", &mut s.width, 0.05, 0.0..=200.0);
+                            let mut width = s.width;
+                            if drag(ui, "Width m", &mut width, 0.05, 0.0..=200.0) {
+                                // Its nodes each wider or narrower alike.
+                                s.set_width(width);
+                                changed = true;
+                            }
+                            changed |= strip_keys_ui(ui, &mut s, period);
+                            add_key = row(ui, "", |ui| {
+                                ui.small_button(match node {
+                                    Some(n) => format!("+ Node at node {n}"),
+                                    None => "+ Node halfway along it".to_string(),
+                                })
+                                .on_hover_text("A node to make it wider, narrower, higher or lower there; drag it in the view")
+                                .clicked()
+                            });
                             // Its own look: changing any of it leaves its type.
                             let look = (
                                 s.surface.clone(),
                                 s.material.clone(),
                                 s.profile.clone(),
                                 s.fade,
+                                s.model.clone(),
                             );
                             combo_row(
                                 ui,
@@ -227,12 +249,14 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                             );
                             profile_ui(ui, &mut s.profile, (r, side as u8, i));
                             drag(ui, "Fade m", &mut s.fade, 0.1, 0.0..=100.0);
+                            model_ui(ui, ("strip model", r, side as u8, i), &mut s.model, library, Along::Strip);
                             if look
                                 != (
                                     s.surface.clone(),
                                     s.material.clone(),
                                     s.profile.clone(),
                                     s.fade,
+                                    s.model.clone(),
                                 )
                             {
                                 s.style = None;
@@ -243,6 +267,21 @@ pub(super) fn strips_tab(ui: &mut egui::Ui, c: &mut Ctx) {
                         });
                 if open.is_some() {
                     resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+                }
+                if add_key && let Some(smp) = c.built.roads.get(r) {
+                    let s_at = match node {
+                        Some(n) => smp.s_at(n as f64),
+                        None => strip.ranges.first().map_or(0.5 * smp.length, |rg| {
+                            let (a, mut b) = (smp.s_at(rg.from), smp.s_at(rg.to));
+                            if b < a && smp.closed {
+                                b += smp.length;
+                            }
+                            (0.5 * (a + b)).rem_euclid(smp.length.max(1e-9))
+                        }),
+                    };
+                    let at = smp.frame_at(s_at).pos;
+                    crate::viewport::add_strip_key(c.editor, c.built, r, side, i, at);
+                    return;
                 }
                 if removed {
                     c.editor.apply(
@@ -539,7 +578,7 @@ pub(super) fn barriers_tab(ui: &mut egui::Ui, c: &mut Ctx, library: &Library) {
                 drag(ui, "Height m", &mut b.height, 0.05, 0.1..=20.0);
                 drag(ui, "Thickness m", &mut b.thickness, 0.05, 0.0..=5.0);
                 combo_row(ui, "Material", ("bm", r, i), &mut b.material, &materials);
-                model_ui(ui, ("barrier", r, i), &mut b.model, library);
+                model_ui(ui, ("barrier", r, i), &mut b.model, library, Along::Wall);
                 if look != (b.height, b.thickness, b.material.clone(), b.model.clone()) {
                     b.style = None;
                     changed = true;

@@ -3,14 +3,16 @@
 
 use bevy_egui::egui;
 use open_racing_track_project::ops::Op;
-use open_racing_track_project::project::{HandleMode, PaintLine};
+use open_racing_track_project::project::{HandleMode, PaintLine, Side};
 
 use crate::commands::{self, Cmd, Ctx, entry};
 use crate::edit;
 use crate::presets;
 use crate::sidebar::overlay_checks;
 use crate::state::{Item, item_line};
-use crate::viewport::{Hit, Marker, Menu, PartValue, RangeEnd, ToolKind, ViewDir, add_node_at};
+use crate::viewport::{
+    Hit, KeyRef, Marker, Menu, PartValue, RangeEnd, ToolKind, ViewDir, add_node_at,
+};
 
 /// The strip above the 3D view: its menus, what a transform is doing, snapping, the
 /// projection and the overlays.
@@ -437,6 +439,8 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
             }
         }
         Some(Hit::Line(r, i)) => used |= line_menu(ui, c, r, i),
+        Some(Hit::StripKey(key)) => used |= strip_key_menu(ui, c, key),
+        Some(Hit::Strip(r, side, i)) => used |= strip_menu(ui, c, r, side, i, menu.world),
         Some(Hit::Gizmo(_) | Hit::Reach(_) | Hit::Edge(..)) | None => {}
     }
     if menu.hit.is_some() {
@@ -465,6 +469,107 @@ fn add_items(ui: &mut egui::Ui, c: &mut Ctx) -> bool {
     }
     ui.separator();
     used | command(ui, c, Cmd::PlaceProp)
+}
+
+/// The menu for a node of a strip; true once an entry is used.
+fn strip_key_menu(ui: &mut egui::Ui, c: &mut Ctx, key: KeyRef) -> bool {
+    let Some(road) = c.editor.project.roads.get(key.road) else {
+        return false;
+    };
+    let Some(strip) = road.strips(key.side).get(key.strip).cloned() else {
+        return false;
+    };
+    let Some(k) = strip.keys.get(key.key).copied() else {
+        return false;
+    };
+    let road = road.name.clone();
+    ui.strong(format!("Node {} of {}", key.key, strip.name));
+    ui.weak(format!("{:.2} m wide, height ×{:.2}", k.width, k.height));
+    ui.separator();
+    let mut changed = None;
+    if k.height != 1.0 && item(ui, "Its profile's own height", "") {
+        let mut s = strip.clone();
+        s.keys[key.key].height = 1.0;
+        changed = Some(s);
+    }
+    if item(ui, "Its type's width", "") {
+        let mut s = strip.clone();
+        s.keys[key.key].width = s.width;
+        changed = Some(s);
+    }
+    if item(ui, "Remove node", "") {
+        let mut s = strip.clone();
+        s.keys.remove(key.key);
+        changed = Some(s);
+    }
+    if item(ui, "Remove all its nodes", "") {
+        let mut s = strip;
+        s.keys.clear();
+        changed = Some(s);
+    }
+    let Some(strip) = changed else {
+        return false;
+    };
+    c.editor.apply(
+        vec![Op::PutStrip {
+            road,
+            side: key.side,
+            strip,
+            at: None,
+        }],
+        None,
+    );
+    true
+}
+
+/// The menu for a strip of the selected road; true once an entry is used.
+fn strip_menu(
+    ui: &mut egui::Ui,
+    c: &mut Ctx,
+    r: usize,
+    side: Side,
+    i: usize,
+    at: Option<glam::DVec3>,
+) -> bool {
+    let Some(strip) = c
+        .editor
+        .project
+        .roads
+        .get(r)
+        .and_then(|road| road.strips(side).get(i))
+        .cloned()
+    else {
+        return false;
+    };
+    ui.strong(format!("Strip {} ({side:?})", strip.name));
+    ui.separator();
+    let mut used = false;
+    if let Some(at) = at
+        && item(ui, "Add a node here", "Ctrl+click")
+    {
+        used = true;
+        crate::viewport::add_strip_key(c.editor, c.built, r, side, i, at);
+    }
+    if item(ui, "Type, look and stretches…", "") {
+        used = true;
+        c.shell.maximized = false;
+        c.shell.tab = crate::ui::PropTab::Strips;
+        c.shell.focus = Some(crate::ui::Focus::Strip(side, i));
+    }
+    ui.separator();
+    if item(ui, "Remove strip", "") {
+        used = true;
+        let road = c.editor.project.roads[r].name.clone();
+        c.editor.apply(
+            vec![Op::RemoveStrip {
+                road,
+                side,
+                name: strip.name,
+            }],
+            None,
+        );
+    }
+    used
 }
 
 /// A new line painted along the whole road where `at` is across it, snapped to 5 cm.

@@ -37,6 +37,7 @@ pub fn strip_styles() -> Vec<StripStyle> {
         surface: surface.into(),
         material: material.into(),
         fade,
+        model: None,
     };
     vec![
         s("kerb", 1.2, Profile::Crown(0.03), "kerb", "kerb", 3.0),
@@ -124,6 +125,24 @@ pub fn materials() -> Vec<MaterialDef> {
     ]
 }
 
+impl BuiltinTexture {
+    /// A number of its own, for its noise.
+    fn seed(self) -> u32 {
+        match self {
+            Self::Asphalt => 0,
+            Self::Kerb | Self::Stripes(..) => 1,
+            Self::Grass => 2,
+            Self::Gravel => 3,
+            Self::Concrete => 4,
+            Self::Armco => 5,
+            Self::Paint => 6,
+            Self::Dirt => 7,
+            Self::Fence => 8,
+            Self::Tyres => 9,
+        }
+    }
+}
+
 /// Deterministic value noise in [0, 1], tiling every `period` texels.
 fn noise(x: usize, y: usize, period: usize, seed: u32) -> f32 {
     let hash = |x: usize, y: usize| {
@@ -168,8 +187,8 @@ pub fn image(texture: BuiltinTexture) -> Image {
     let mut pixels = Vec::with_capacity(SIZE * SIZE * 4);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let n = fbm(x, y, texture as u32 * 101);
-            let grain = noise(x, y, 128, 7 + texture as u32);
+            let n = fbm(x, y, texture.seed() * 101);
+            let grain = noise(x, y, 128, 7 + texture.seed());
             let mut alpha = 1.0;
             let rgb: [f32; 3] = match texture {
                 BuiltinTexture::Asphalt => {
@@ -184,6 +203,11 @@ pub fn image(texture: BuiltinTexture) -> Image {
                     } else {
                         [0.9 * wear, 0.9 * wear, 0.88 * wear]
                     }
+                }
+                BuiltinTexture::Stripes(a, b) => {
+                    let wear = 0.9 + 0.1 * n;
+                    let c = if y < SIZE / 2 { a } else { b };
+                    c.map(|v| v as f32 / 255.0 * wear)
                 }
                 BuiltinTexture::Grass => {
                     let v = 0.7 + 0.3 * n + 0.15 * grain;

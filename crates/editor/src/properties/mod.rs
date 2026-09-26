@@ -189,7 +189,7 @@ pub fn show(
                     None => {}
                 },
                 PropTab::Corners => crate::corners::tab(ui, c, library),
-                PropTab::Strips => strips_tab(ui, c),
+                PropTab::Strips => strips_tab(ui, c, library),
                 PropTab::Lines => lines_tab(ui, c),
                 PropTab::Barriers => barriers_tab(ui, c, library),
                 PropTab::Rows => rows_tab(ui, c, library),
@@ -482,31 +482,194 @@ fn profile_ui(
     changed
 }
 
-/// Points of a shaped profile: a drawing of it, and each point's place across (%) and
-/// height (cm).
+/// Ready shapes for a strip's profile, of a height: (name, points across).
+fn shape_presets(h: f64) -> [(&'static str, Vec<[f64; 2]>); 6] {
+    let wave = |f: &dyn Fn(f64) -> f64| {
+        (0..=16)
+            .map(|i| i as f64 / 16.0)
+            .map(|x| [x, f(x)])
+            .collect()
+    };
+    [
+        ("Step", vec![[0.0, h], [1.0, h]]),
+        (
+            "Step and crown",
+            wave(&|x| h * (0.6 + 0.4 * (std::f64::consts::PI * x).sin())),
+        ),
+        (
+            "Double hump",
+            wave(&|x| h * (std::f64::consts::TAU * x).sin().abs()),
+        ),
+        (
+            "Saw-tooth",
+            vec![
+                [0.0, 0.0],
+                [0.3, h],
+                [0.34, 0.0],
+                [0.64, h],
+                [0.68, 0.0],
+                [1.0, h],
+            ],
+        ),
+        ("Ramp up", vec![[0.0, 0.0], [0.7, h], [1.0, h]]),
+        (
+            "Sausage",
+            wave(&|x| {
+                if (0.3..=0.7).contains(&x) {
+                    h * (std::f64::consts::PI * (x - 0.3) / 0.4).sin()
+                } else {
+                    0.0
+                }
+            }),
+        ),
+    ]
+}
+
+/// Points of a shaped profile: a drawing of it to drag them in (double-click adds one,
+/// a right click removes it), the step up from the road at its inner edge, ready shapes,
+/// and each point's place across (%) and height (cm).
 fn shape_ui(
     ui: &mut egui::Ui,
     points: &mut Vec<[f64; 2]>,
     id: impl std::hash::Hash + std::fmt::Debug,
 ) -> bool {
     let mut changed = false;
+    let id = ui.make_persistent_id(("shape", id));
+    let height = |points: &[[f64; 2]], x: f64| Profile::Shape(points.to_vec()).height(x);
     row(ui, "", |ui| {
         let w = ui.available_width().max(80.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 44.0), egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-        let top = points.iter().map(|p| p[1].abs()).fold(0.05, f64::max);
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(w, 72.0), egui::Sense::click_and_drag());
+        let resp = resp.on_hover_text(
+            "Its cross-section, from its inner edge (left) outwards, the road's level dotted: drag a point · double-click: add one · right click: remove one",
+        );
+        // The heights it spans: kept while a point is dragged, so that it follows the
+        // pointer.
+        let natural = points.iter().map(|p| p[1].abs()).fold(0.05, f64::max) * 1.3;
+        let top: f64 = if resp.dragged() {
+            ui.data(|d| d.get_temp(id)).unwrap_or(natural)
+        } else {
+            natural
+        };
+        ui.data_mut(|d| d.insert_temp(id, top));
+        let span = 1.35 * top;
+        let inner = rect.shrink(6.0);
         let at = |p: [f64; 2]| {
             egui::pos2(
-                rect.left() + 4.0 + p[0] as f32 * (rect.width() - 8.0),
-                rect.center().y + 6.0 - (p[1] / top) as f32 * (0.5 * rect.height() - 8.0),
+                inner.left() + p[0] as f32 * inner.width(),
+                inner.bottom() - ((p[1] + 0.35 * top) / span) as f32 * inner.height(),
             )
         };
-        let line: Vec<egui::Pos2> = points.iter().map(|&p| at(p)).collect();
+        let from = |q: egui::Pos2| {
+            [
+                ((q.x - inner.left()) / inner.width()).clamp(0.0, 1.0) as f64,
+                (inner.bottom() - q.y) as f64 / inner.height() as f64 * span - 0.35 * top,
+            ]
+        };
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+        let road = at([0.0, 0.0]).y;
+        for k in 0..24 {
+            let x = inner.left() + inner.width() * k as f32 / 24.0;
+            painter.hline(
+                x..=x + 4.0,
+                road,
+                egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+            );
+        }
+        // From the road's edge up any step, across, to the outer edge.
+        let mut line = vec![egui::pos2(inner.left() - 6.0, road), at([0.0, 0.0])];
+        line.push(at([0.0, height(points, 0.0)]));
+        line.extend(points.iter().map(|&p| at(p)));
+        line.push(at([1.0, height(points, 1.0)]));
         painter.add(egui::Shape::line(
             line,
             egui::Stroke::new(1.5, crate::theme::STRIP_UI),
         ));
+        let nearest = |points: &[[f64; 2]], q: egui::Pos2| {
+            points
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| (i, at(p).distance(q)))
+                .filter(|&(_, d)| d < 9.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        let hover = resp.hover_pos().and_then(|q| nearest(points, q));
+        let drag_id = id.with("drag");
+        if resp.drag_started()
+            && let Some(i) = resp.interact_pointer_pos().and_then(|q| nearest(points, q))
+        {
+            ui.data_mut(|d| d.insert_temp(drag_id, i));
+        }
+        let dragged: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+        if let (Some(i), Some(q)) = (dragged, resp.interact_pointer_pos())
+            && resp.dragged()
+            && i < points.len()
+        {
+            let lo = if i > 0 { points[i - 1][0] } else { 0.0 };
+            let hi = points.get(i + 1).map_or(1.0, |p| p[0]);
+            let [x, h] = from(q);
+            points[i] = [x.clamp(lo, hi), (h * 1000.0).round() / 1000.0];
+            changed = true;
+        }
+        if resp.drag_stopped() {
+            ui.data_mut(|d| d.remove::<usize>(drag_id));
+        }
+        if resp.double_clicked()
+            && let Some(q) = resp.interact_pointer_pos()
+            && nearest(points, q).is_none()
+        {
+            points.push(from(q));
+            changed = true;
+        }
+        if resp.secondary_clicked()
+            && points.len() > 1
+            && let Some(i) = resp.interact_pointer_pos().and_then(|q| nearest(points, q))
+        {
+            points.remove(i);
+            changed = true;
+        }
+        for (i, &p) in points.iter().enumerate() {
+            let lit = hover == Some(i) || dragged == Some(i);
+            painter.circle_filled(
+                at(p),
+                if lit { 4.5 } else { 3.0 },
+                if lit {
+                    egui::Color32::WHITE
+                } else {
+                    crate::theme::STRIP_UI
+                },
+            );
+        }
+    });
+    // The step up from the road at its inner edge: the height its shape starts at.
+    let mut step = height(points, 0.0) * 100.0;
+    if row(ui, "Step up", |ui| {
+        ui.add(egui::DragValue::new(&mut step).speed(0.1).suffix(" cm"))
+            .on_hover_text("How high it rises straight up from the road at its inner edge")
+            .changed()
+    }) {
+        match points.first_mut() {
+            Some(p) if p[0] <= 1e-9 => p[1] = step / 100.0,
+            _ => points.insert(0, [0.0, step / 100.0]),
+        }
+        changed = true;
+    }
+    row(ui, "Ready shapes", |ui| {
+        let h = points
+            .iter()
+            .map(|p| p[1].abs())
+            .fold(0.0, f64::max)
+            .max(0.03);
+        ui.horizontal_wrapped(|ui| {
+            for (name, shape) in shape_presets(h) {
+                if ui.small_button(name).clicked() {
+                    *points = shape;
+                    changed = true;
+                }
+            }
+        });
     });
     let mut remove = None;
     let n = points.len();
@@ -562,9 +725,63 @@ fn shape_ui(
             changed = true;
         }
     });
-    let _ = id;
     if changed {
         points.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    }
+    changed
+}
+
+/// A strip's nodes: where each is along the road, and its width and height there, with
+/// a button to add one at the selected node (or the strip's middle). Their handles are
+/// dragged in the view too.
+fn strip_keys_ui(
+    ui: &mut egui::Ui,
+    strip: &mut open_racing_track_project::project::Strip,
+    period: f64,
+) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    if strip.keys.is_empty() {
+        row(ui, "Nodes", |ui| {
+            ui.weak("none: as wide all along")
+                .on_hover_text("Ctrl+click the strip in the view (edit mode) to add one, then drag it out to widen it there, Z to raise it")
+        });
+    }
+    for (i, k) in strip.keys.iter_mut().enumerate() {
+        row(ui, if i == 0 { "Nodes" } else { "" }, |ui| {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut k.u)
+                        .speed(0.01)
+                        .range(0.0..=period)
+                        .prefix("u "),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut k.width)
+                        .speed(0.02)
+                        .range(0.0..=200.0)
+                        .suffix(" m"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut k.height)
+                        .speed(0.02)
+                        .range(0.0..=20.0)
+                        .prefix("×"),
+                )
+                .on_hover_text("Its profile's height here, times")
+                .changed();
+            if ui.small_button("✖").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        strip.keys.remove(i);
+        changed = true;
     }
     changed
 }
@@ -590,24 +807,42 @@ fn style_combo(
     changed
 }
 
-/// A wall's model: none (its plain shape), or one of the project's models repeated
-/// along it, with the length of each copy and how it follows the line.
+/// What a model is repeated along.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Along {
+    Wall,
+    Strip,
+}
+
+/// A wall's or a strip's model: none (its plain shape), or one of the project's models
+/// repeated along it, with the length of each copy and how it follows the line.
 fn model_ui(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug + Copy,
     model: &mut Option<ModelRun>,
     library: &Library,
+    along: Along,
 ) -> bool {
     let mut changed = false;
+    let (plain, tip) = match along {
+        Along::Wall => (
+            "none: plain wall",
+            "A glTF model repeated along the wall: +X along it, +Z up, +Y towards the road. Cars hit the plain wall. Import models under Assets.",
+        ),
+        Along::Strip => (
+            "none: plain strip",
+            "A glTF model repeated along it in place of its plain look: +X along it, +Z up, +Y towards the road, its origin at the foot of the inner edge halfway across. Cars drive on its profile. Import models under Assets.",
+        ),
+    };
     row(ui, "Model", |ui| {
-        let text = model.as_ref().map_or("none: plain wall".to_string(), |m| {
+        let text = model.as_ref().map_or(plain.to_string(), |m| {
             m.model.to_string_lossy().into_owned()
         });
         egui::ComboBox::from_id_salt(("model", id))
             .selected_text(text)
             .width(ui.available_width().max(60.0))
             .show_ui(ui, |ui| {
-                if ui.selectable_label(model.is_none(), "none: plain wall").clicked() {
+                if ui.selectable_label(model.is_none(), plain).clicked() {
                     *model = None;
                     changed = true;
                 }
@@ -625,9 +860,7 @@ fn model_ui(
                 }
             })
             .response
-            .on_hover_text(
-                "A glTF model repeated along the wall: +X along it, +Z up, +Y towards the road. Import models under Assets.",
-            );
+            .on_hover_text(tip);
     });
     if let Some(m) = model {
         changed |= row(ui, "Copy length", |ui| {

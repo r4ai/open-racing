@@ -188,6 +188,24 @@ pub fn gizmos(
                 }
             }
         }
+        // The strips' nodes, on their outer edges, joined across to the inner edge.
+        if overlays.stretches {
+            for key in strip_keys(road, r) {
+                let Some(at) = key_pos(road, smp, key) else {
+                    continue;
+                };
+                let f = smp.frame_at(smp.s_at(road.strips(key.side)[key.strip].keys[key.key].u));
+                let inner = key.side.sign()
+                    * (edge_of(&f, key.side) + inner_width(road, smp, key.side, key.strip, &f));
+                let color = lit(Hit::StripKey(key), theme::STRIP_KEY);
+                gizmos.line(lift(f.pos + flat_left(&f) * inner), lift(at), color);
+                gizmos.sphere(
+                    Isometry3d::from_translation(lift(at)),
+                    0.8 * node_size(eye, at),
+                    color,
+                );
+            }
+        }
         for &n in sel.nodes.iter().filter(|&&n| n < road.nodes.len()) {
             let centre = smp.frame_at(smp.s_at(n as f64)).pos;
             for side in [Side::Left, Side::Right] {

@@ -15,10 +15,17 @@ pub(super) fn pick(
 ) -> Option<Hit> {
     let near = |p: DVec3, r: f32| view.screen(p).map(|s| s.distance(at)).filter(|&d| d < r);
     let sel = &editor.selection;
-    // Stretch ends of the selected road's strips and barriers.
+    // Stretch ends of the selected road's strips and barriers, and its strips' keys.
     if let Some(r) = sel.road()
         && let (Some(road), Some(smp)) = (editor.project.roads.get(r), built.roads.get(r))
     {
+        for key in strip_keys(road, r) {
+            if key_pos(road, smp, key)
+                .is_some_and(|p| near(p + DVec3::Z * LIFT, PICK_RADIUS).is_some())
+            {
+                return Some(Hit::StripKey(key));
+            }
+        }
         for (part, ranges) in parts(road) {
             for (range, rg) in ranges.iter().enumerate() {
                 for (to, u) in [(false, rg.from), (true, rg.to)] {
@@ -80,7 +87,10 @@ pub(super) fn pick(
     if let Some((hit, _)) = best {
         return Some(hit);
     }
-    if edit && let Some(hit) = pick_line(editor, built, view, at, ground_at) {
+    if edit
+        && let Some(hit) = pick_line(editor, built, view, at, ground_at)
+            .or_else(|| pick_strip(editor, built, ground_at))
+    {
         return Some(hit);
     }
     // Props, by where they stand.
@@ -145,6 +155,16 @@ fn pick_line(
         consider_pick(&mut best, Hit::Line(r, i), view.screen(p), at);
     }
     best.map(|(hit, _)| hit)
+}
+
+/// The strip of the selected road under the pointer.
+fn pick_strip(editor: &Editor, built: &Built, ground_at: Option<DVec3>) -> Option<Hit> {
+    let r = editor.selection.road()?;
+    let (road, smp) = (editor.project.roads.get(r)?, built.roads.get(r)?);
+    let g = ground_at?;
+    let f = smp.frames.get(smp.nearest(g))?;
+    let (side, i) = strip_at(road, smp, f, (g - f.pos).dot(flat_left(f)))?;
+    Some(Hit::Strip(r, side, i))
 }
 
 /// Where the selection's transform gizmo stands: a prop, or the middle of the selected
