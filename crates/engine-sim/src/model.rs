@@ -225,13 +225,16 @@ pub struct Mouth {
     /// Outward volume flow, m³/s, this step and the step before.
     pub flow: f64,
     pub prev_flow: f64,
-    /// Outward gas velocity, m/s.
+    /// Outward gas velocity, m/s, and the gas's density there, kg/m³.
     pub velocity: f64,
+    pub density: f64,
+    /// Area of the mouth, m².
+    pub area: f64,
     pub radiation: Radiation,
 }
 
 impl Mouth {
-    pub fn new(name: String, link: usize, position: [f64; 3]) -> Self {
+    pub fn new(name: String, link: usize, position: [f64; 3], area: f64) -> Self {
         Self {
             name,
             link,
@@ -239,6 +242,8 @@ impl Mouth {
             flow: 0.0,
             prev_flow: 0.0,
             velocity: 0.0,
+            density: 0.0,
+            area,
             radiation: Radiation::default(),
         }
     }
@@ -524,6 +529,7 @@ impl Model {
             m.prev_flow = m.flow;
             m.flow = 0.0;
             m.velocity = 0.0;
+            m.density = 0.0;
         }
         for c in &mut self.cylinders {
             c.seated = 0.0;
@@ -660,6 +666,7 @@ impl Model {
                         let rho = s.w.rho;
                         m.flow += f[0] / rho * h / self.dt;
                         m.velocity += f[0] / (rho * area) * h / self.dt;
+                        m.density += rho * h / self.dt;
                     }
                     // Positive from a to b: out of the pipe when the pipe is `a`.
                     if matches!(a, Port::Pipe(..)) {

@@ -72,6 +72,31 @@ impl Biquad {
     }
 }
 
+/// A band pass whose centre can move every sample: Simper's trapezoidal state-variable
+/// filter, 0 dB at its centre. Its equivalent noise bandwidth is π·f/(2Q).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Svf {
+    ic1: f64,
+    ic2: f64,
+}
+
+impl Svf {
+    #[inline]
+    pub fn bandpass(&mut self, x: f64, f: f64, q: f64, rate: f64) -> f64 {
+        let g = (PI * (f / rate).min(0.45)).tan();
+        let k = 1.0 / q;
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        let v3 = x - self.ic2;
+        let v1 = a1 * self.ic1 + a2 * v3;
+        let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
+        self.ic1 = 2.0 * v1 - self.ic1;
+        self.ic2 = 2.0 * v2 - self.ic2;
+        k * v1
+    }
+}
+
 /// Removes the mean: a one-pole high pass at a few hertz.
 #[derive(Clone, Copy, Debug)]
 pub struct DcBlocker {

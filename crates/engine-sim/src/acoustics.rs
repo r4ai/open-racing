@@ -9,8 +9,12 @@
 //!   structure's attenuation, a high pass (Austen & Priede's structure attenuation curve,
 //!   simplified).
 //! - The valves strike their seats: a click ringing at the head's resonance.
-//! - The jet leaving a mouth is turbulent: noise growing with its velocity (Lighthill's
-//!   scaling, semi-empirical).
+//! - The jet leaving a mouth is turbulent. Lighthill's acoustic efficiency of a subsonic
+//!   jet, η ≈ 10⁻⁴·M⁵ of its kinetic power ½ρU³A, radiated round the mouth, in a broad
+//!   band peaking at a Strouhal number fD/U ≈ 0.25 (Tam's similarity spectra): it follows
+//!   the pulsating velocity, so the hiss comes in bursts with the firing and rises
+//!   steeply with speed. It is what fills the spectrum between the engine orders above a
+//!   kilohertz or so, where the gas pulses themselves have little left.
 //!
 //! A microphone sums them with their distances' delays and 1/r spreading; inside the
 //! cabin the body lets the low frequencies through and damps the high ones.
@@ -18,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::combustion::Rng;
-use crate::dsp::{Biquad, DcBlocker, Delay, Resampler};
+use crate::dsp::{Biquad, DcBlocker, Delay, Resampler, Svf};
 use crate::model::Model;
 
 /// Speed of sound in the air, m/s.
@@ -45,7 +49,7 @@ pub struct SoundSettings {
     pub combustion: f64,
     /// Valve seating clicks at 1 m, Pa.
     pub valves: f64,
-    /// Jet noise of the mouths at 1 m, Pa at 100 m/s.
+    /// Jet noise of the mouths, as a share of Lighthill's estimate.
     pub flow_noise: f64,
     /// Where the engine's block is, m.
     pub block: [f64; 3],
@@ -61,7 +65,7 @@ impl Default for SoundSettings {
             }],
             combustion: 2e-11,
             valves: 0.02,
-            flow_noise: 0.05,
+            flow_noise: 1.0,
             block: [0.0; 3],
         }
     }
@@ -107,7 +111,8 @@ pub struct Acoustics {
     mics: Vec<MicState>,
     structure: [Biquad; 2],
     valve_ring: Biquad,
-    jet: Vec<Biquad>,
+    jet: Vec<Svf>,
+    rho_air: f64,
     rng: Rng,
     /// Scratch for one input sample's output.
     scratch: Vec<f64>,
@@ -161,11 +166,8 @@ impl Acoustics {
                 Biquad::lowpass(6000.0, rate, 0.707),
             ],
             valve_ring: Biquad::bandpass(3200.0, rate, 12.0),
-            jet: model
-                .mouths
-                .iter()
-                .map(|_| Biquad::lowpass(3500.0, rate, 0.707))
-                .collect(),
+            jet: vec![Svf::default(); model.mouths.len()],
+            rho_air: rho,
             rng: Rng::new(0x5eed),
             scratch: Vec::with_capacity(4),
             settings,
@@ -197,13 +199,32 @@ impl Acoustics {
         // Mouths.
         let mut mouth = [0.0f64; 16];
         let n = model.mouths.len().min(16);
+        let four_pi = 4.0 * std::f64::consts::PI;
         for (k, m) in model.mouths.iter().take(n).enumerate() {
             let dq = (m.flow - m.prev_flow) / dt;
-            let v = m.velocity.abs();
-            let noise =
-                (self.rng.uniform() - 0.5) * 3.46 * self.settings.flow_noise * (v / 100.0).powi(3);
-            let jet = self.jet[k].process(noise);
-            mouth[k] = dq + jet * (4.0 * std::f64::consts::PI) / 1.2;
+            // Drawn in, the air is not a jet: a sink flow, far quieter.
+            let (u, share) = if m.velocity >= 0.0 {
+                (m.velocity, 1.0)
+            } else {
+                (-m.velocity, 0.1)
+            };
+            let power = share
+                * self.settings.flow_noise
+                * 1e-4
+                * (u / C_AIR).powi(5)
+                * 0.5
+                * m.density
+                * u.powi(3)
+                * m.area;
+            // Pressure at 1 m of that power spread over a sphere.
+            let p1 = (power * self.rho_air * C_AIR / four_pi).sqrt();
+            let d = (4.0 * m.area / std::f64::consts::PI).sqrt();
+            let (f, q) = ((0.25 * u / d).max(20.0), 0.6);
+            let bandwidth = std::f64::consts::PI * f / (2.0 * q);
+            let white = (self.rng.uniform() - 0.5) * 12f64.sqrt();
+            let x = white * p1 * (0.5 * self.rate / bandwidth).sqrt();
+            let jet = self.jet[k].bandpass(x, f, q, self.rate);
+            mouth[k] = dq + jet * four_pi / self.rho_air;
         }
         for (i, mic) in self.mics.iter_mut().enumerate() {
             let mut p = 0.0;

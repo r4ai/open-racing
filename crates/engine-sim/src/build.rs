@@ -232,6 +232,7 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                             format!("{}:{}", sys.name, ps.name),
                             m.links.len() - 1,
                             add(sys.offset, *at),
+                            m.pipes[p].end_area(which),
                         ));
                     }
                     spec::End::Terminal(t) => {
@@ -342,8 +343,12 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                 flow: 0.0,
                 guess: 0.0,
             });
-            m.mouths
-                .push(Mouth::new(name.clone(), m.links.len() - 1, [0.0; 3]));
+            m.mouths.push(Mouth::new(
+                name.clone(),
+                m.links.len() - 1,
+                [0.0; 3],
+                m.pipes[*p].end_area(*end),
+            ));
             warnings.push(format!("{name} opens straight to the air"));
         } else {
             m.links.push(Link {
