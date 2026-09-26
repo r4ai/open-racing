@@ -375,7 +375,7 @@ pub fn run(cmd: Cmd, c: &mut Ctx) {
         Width => viewport::start_modal(c.editor, c.tool, c.built, Mode::Width, None, at, false),
         Tilt => viewport::start_modal(c.editor, c.tool, c.built, Mode::Tilt, None, at, false),
         Extrude => viewport::extrude(c.editor, c.tool, c.built, at),
-        Subdivide => edit::subdivide(c.editor, c.built),
+        Subdivide => edit::subdivide(c.editor),
         SmoothHeights => edit::smooth(c.editor, edit::Smooth::Heights),
         SmoothShape => edit::smooth(c.editor, edit::Smooth::Shape),
         Flatten => edit::flatten(c.editor),

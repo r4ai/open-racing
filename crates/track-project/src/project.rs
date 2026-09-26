@@ -202,6 +202,61 @@ impl NodeHandles {
         }
     }
 
+    /// The handles with their offsets put through `f`, a turn or a scaling of the node's
+    /// surroundings; automatic ones follow by themselves.
+    pub fn map(self, f: impl Fn(DVec3) -> DVec3) -> Self {
+        match self {
+            Self::Auto => Self::Auto,
+            Self::Aligned {
+                outgoing,
+                incoming_length,
+            } => Self::Aligned {
+                outgoing: f(outgoing),
+                incoming_length: f(-outgoing.normalize_or_zero() * incoming_length).length(),
+            },
+            Self::Free { incoming, outgoing } => Self::Free {
+                incoming: f(incoming),
+                outgoing: f(outgoing),
+            },
+        }
+    }
+
+    /// The mode and both offsets, as `Op::SetNodeHandles` takes them; zero for
+    /// automatic handles.
+    pub fn offsets(self) -> (HandleMode, DVec3, DVec3) {
+        match self {
+            Self::Auto => (HandleMode::Auto, DVec3::ZERO, DVec3::ZERO),
+            Self::Aligned {
+                outgoing,
+                incoming_length,
+            } => (
+                HandleMode::Aligned,
+                -outgoing.normalize_or_zero() * incoming_length,
+                outgoing,
+            ),
+            Self::Free { incoming, outgoing } => (HandleMode::Free, incoming, outgoing),
+        }
+    }
+
+    /// The handles reversed, for a line driven the other way: incoming and outgoing
+    /// swap.
+    pub fn reversed(self) -> Self {
+        match self {
+            Self::Auto => Self::Auto,
+            Self::Aligned {
+                outgoing,
+                incoming_length,
+            } => Self::Aligned {
+                outgoing: -outgoing.normalize_or_zero() * incoming_length,
+                incoming_length: outgoing.length(),
+            },
+            Self::Free { incoming, outgoing } => Self::Free {
+                incoming: outgoing,
+                outgoing: incoming,
+            },
+        }
+    }
+
     pub fn from_offsets(mode: HandleMode, incoming: DVec3, outgoing: DVec3) -> Self {
         match mode {
             HandleMode::Auto => Self::Auto,
@@ -699,37 +754,49 @@ impl Road {
             || self.barriers.iter().any(|b| b.corner.is_some())
     }
 
-    /// Inserts a node before `index`, keeping keys and ranges where they were on the
-    /// road.
-    pub fn insert_node(&mut self, index: usize, node: Node) {
+    /// Inserts a node before `index`, keeping keys, ranges and corner anchors where
+    /// they were on the road. Gives what became of the road's spline parameters, for
+    /// the markers on it.
+    pub fn insert_node(&mut self, index: usize, node: Node) -> impl Fn(f64) -> f64 + use<> {
+        let f = inserted(&self.nodes, self.closed, index, node.pos);
         self.nodes.insert(index, node);
-        self.shift_params(index as f64 - 1.0, 1.0);
+        self.map_params(&f);
+        f
     }
 
-    /// Removes a node, keeping keys and ranges where they were on the road as far as
-    /// possible.
-    pub fn remove_node(&mut self, index: usize) {
+    /// Removes a node, keeping keys, ranges and corner anchors where they were on the
+    /// road as far as possible. Gives what became of the road's spline parameters.
+    pub fn remove_node(&mut self, index: usize) -> impl Fn(f64) -> f64 + use<> {
+        let f = removed(&self.nodes, self.closed, index);
         self.nodes.remove(index);
-        self.shift_params(index as f64, -1.0);
+        self.map_params(&f);
+        f
     }
 
-    /// Moves every parameter beyond `after` by `by`. On a closed road what falls off the
-    /// start wraps round to the end, as the segments before and after node 0 join.
-    fn shift_params(&mut self, after: f64, by: f64) {
-        let period = self.period().max(1.0);
-        let closed = self.closed;
-        let shift = |u: &mut f64| {
-            if *u > after {
-                let v = *u + by;
-                *u = if closed && v < 0.0 {
-                    v.rem_euclid(period)
-                } else {
-                    v.clamp(0.0, period)
-                };
+    /// Splits segment `i` in two at its middle with a node that keeps the road's shape,
+    /// and what lay on the segment on the same places. Gives what became of the road's
+    /// spline parameters.
+    pub fn split_segment(&mut self, i: usize) -> impl Fn(f64) -> f64 + use<> {
+        self.nodes = split_segment(&self.nodes, self.closed, i);
+        let i = i as f64;
+        let f = move |u: f64| {
+            if u <= i {
+                u
+            } else if u < i + 1.0 {
+                i + 2.0 * (u - i)
+            } else {
+                u + 1.0
             }
         };
+        self.map_params(&f);
+        f
+    }
+
+    /// Puts every spline parameter of the road through `f`: its profiles' keys, its
+    /// parts' stretches, its marks and the apexes its corner parts were laid round.
+    pub fn map_params(&mut self, f: &impl Fn(f64) -> f64) {
         for c in [&mut self.width_left, &mut self.width_right, &mut self.bank] {
-            c.keys.iter_mut().for_each(|k| shift(&mut k.u));
+            c.keys.iter_mut().for_each(|k| k.u = f(k.u));
             c.keys.sort_by(|a, b| a.u.total_cmp(&b.u));
         }
         let ranges = self
@@ -740,13 +807,179 @@ impl Road {
             .chain(self.barriers.iter_mut().flat_map(|b| b.ranges.iter_mut()))
             .chain(self.lines.iter_mut().flat_map(|l| l.ranges.iter_mut()));
         for r in ranges {
-            shift(&mut r.from);
-            shift(&mut r.to);
+            r.from = f(r.from);
+            r.to = f(r.to);
         }
         for m in &mut self.marks {
-            shift(&mut m.at);
+            m.at = f(m.at);
+        }
+        let anchors = self
+            .left
+            .iter_mut()
+            .chain(self.right.iter_mut())
+            .filter_map(|s| s.corner.as_mut())
+            .chain(self.barriers.iter_mut().filter_map(|b| b.corner.as_mut()));
+        for a in anchors {
+            a.apex = f(a.apex);
         }
     }
+}
+
+/// A map of a line's old spline parameters to its new ones, from where each old
+/// segment's stretch goes: `segment(m, f)` for the fraction `f` along segment `m`.
+fn remap(
+    segments: usize,
+    closed: bool,
+    segment: impl Fn(usize, f64) -> f64,
+) -> impl Fn(f64) -> f64 {
+    move |u: f64| {
+        if segments == 0 {
+            return u;
+        }
+        let end = segments as f64;
+        let u = if closed && u >= end {
+            // The end of a stretch running to the loop's end stays there.
+            return segment(segments - 1, 1.0);
+        } else if closed {
+            u.rem_euclid(end)
+        } else {
+            u.clamp(0.0, end)
+        };
+        let m = (u.floor() as usize).min(segments - 1);
+        segment(m, u - m as f64)
+    }
+}
+
+/// How far along segment `i` of a line, as a fraction, it passes nearest to `p`.
+fn nearest_along(nodes: &[Node], closed: bool, i: usize, p: DVec3) -> f64 {
+    let c = crate::curve::segment(nodes, closed, i);
+    let d = |t: f64| crate::curve::bezier(&c, t).distance_squared(p);
+    let mut best = (0..=64)
+        .map(|k| k as f64 / 64.0)
+        .min_by(|a, b| d(*a).total_cmp(&d(*b)))
+        .unwrap_or(0.5);
+    let mut step = 1.0 / 64.0;
+    for _ in 0..20 {
+        step *= 0.5;
+        for t in [best - step, best + step] {
+            if (0.0..=1.0).contains(&t) && d(t) < d(best) {
+                best = t;
+            }
+        }
+    }
+    best
+}
+
+/// What inserting a node at `pos` before node `index` does to a line's spline
+/// parameters: the segment it splits divides where the node lies along it, and the
+/// segments after it move on by one.
+fn inserted(nodes: &[Node], closed: bool, index: usize, pos: DVec3) -> impl Fn(f64) -> f64 + use<> {
+    let n = nodes.len();
+    let split = if closed && n >= 2 {
+        Some((index + n - 1) % n)
+    } else if index > 0 && index < n {
+        Some(index - 1)
+    } else {
+        None
+    };
+    let t = split.map_or(0.5, |i| {
+        nearest_along(nodes, closed, i, pos).clamp(1e-3, 1.0 - 1e-3)
+    });
+    // Where old node `m` goes.
+    let moved = move |m: usize| if m >= index { m + 1 } else { m } as f64;
+    remap(crate::curve::segments(n, closed), closed, move |m, f| {
+        if Some(m) != split {
+            moved(m) + f
+        } else if f < t {
+            moved(m) + f / t
+        } else {
+            index as f64 + (f - t) / (1.0 - t)
+        }
+    })
+}
+
+/// What removing node `index` does to a line's spline parameters: the two segments
+/// either side of it join into one, shared out by their lengths, and the segments after
+/// it move back by one. A stretch on an open line's end segment that goes is kept at
+/// the new end.
+fn removed(nodes: &[Node], closed: bool, index: usize) -> impl Fn(f64) -> f64 + use<> {
+    let n = nodes.len();
+    let joined = if closed && n >= 3 {
+        Some(((index + n - 1) % n, index))
+    } else if index > 0 && index + 1 < n {
+        Some((index - 1, index))
+    } else {
+        None
+    };
+    let length = |i: usize| {
+        let c = crate::curve::segment(nodes, closed, i);
+        (0..16)
+            .map(|k| {
+                let t = |k: usize| k as f64 / 16.0;
+                crate::curve::bezier(&c, t(k)).distance(crate::curve::bezier(&c, t(k + 1)))
+            })
+            .sum::<f64>()
+    };
+    let share = joined.map_or(0.5, |(a, b)| {
+        let (la, lb) = (length(a), length(b));
+        if la + lb > 1e-9 { la / (la + lb) } else { 0.5 }
+    });
+    let moved = move |m: usize| if m > index { m - 1 } else { m } as f64;
+    remap(
+        crate::curve::segments(n, closed),
+        closed,
+        move |m, f| match joined {
+            Some((a, _)) if m == a => moved(a) + f * share,
+            Some((a, b)) if m == b => moved(a) + share + f * (1.0 - share),
+            // An open line's first or last segment, gone with its end node.
+            None if !closed && index == 0 && m == 0 => 0.0,
+            None if !closed && index > 0 && m + 1 == index => moved(m),
+            _ => moved(m) + f,
+        },
+    )
+}
+
+/// `nodes` with segment `i` split in two at its middle by a node that keeps the line's
+/// shape (de Casteljau's construction). With automatic handles at both ends everything
+/// stays automatic and the new node lies on the curve; otherwise both ends' handles are
+/// made explicit as they are now, their halves into the segment halved, so that the
+/// line keeps its shape exactly.
+pub fn split_segment(nodes: &[Node], closed: bool, i: usize) -> Vec<Node> {
+    let n = nodes.len();
+    let j = (i + 1) % n;
+    let [p0, p1, p2, p3] = crate::curve::segment(nodes, closed, i);
+    let mid = crate::curve::bezier(&[p0, p1, p2, p3], 0.5);
+    let mut out = nodes.to_vec();
+    let node = if nodes[i].handles.is_auto() && nodes[j].handles.is_auto() {
+        Node::new(mid)
+    } else {
+        let (a, b, c) = ((p0 + p1) * 0.5, (p1 + p2) * 0.5, (p2 + p3) * 0.5);
+        let (ab, bc) = ((a + b) * 0.5, (b + c) * 0.5);
+        let mut halve = |k: usize, outgoing_side: bool, offset: DVec3| {
+            let (mut incoming, mut outgoing) = crate::curve::handles(nodes, closed, k);
+            if outgoing_side {
+                outgoing = offset;
+            } else {
+                incoming = offset;
+            }
+            let mode = match nodes[k].handles.mode() {
+                HandleMode::Free => HandleMode::Free,
+                HandleMode::Auto | HandleMode::Aligned => HandleMode::Aligned,
+            };
+            out[k].handles = NodeHandles::from_offsets(mode, incoming, outgoing);
+        };
+        halve(i, true, a - p0);
+        halve(j, false, c - p3);
+        Node {
+            pos: mid,
+            handles: NodeHandles::Aligned {
+                outgoing: bc - mid,
+                incoming_length: (ab - mid).length(),
+            },
+        }
+    };
+    out.insert(i + 1, node);
+    out
 }
 
 /// Which side of its line a spline's band lies on, looking along the line.

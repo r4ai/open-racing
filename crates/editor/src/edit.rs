@@ -8,7 +8,6 @@ use open_racing_track_project::curve::{handles, segments};
 use open_racing_track_project::ops::{Curve, Op};
 use open_racing_track_project::project::{HandleMode, Key, Road, StationCurve};
 
-use crate::preview::Built;
 use crate::state::{Editor, Item, item_line};
 
 /// The name of a road, spline or prop.
@@ -148,47 +147,29 @@ pub fn auto_handles(editor: &mut Editor, item: Item, index: usize) {
 }
 
 /// Adds a node halfway along each segment between selected nodes, or along every
-/// segment with none selected, on the curve as last built.
-pub fn subdivide(editor: &mut Editor, built: &Built) {
+/// segment with none selected, keeping the line's shape.
+pub fn subdivide(editor: &mut Editor) {
     let (Some(item), Some((name, nodes, closed))) = (editor.selection.item, editor.line()) else {
         return;
     };
     let n = nodes.len();
     let sel = editor.selection.nodes.clone();
-    let segs = segments(n, closed);
-    let picked: Vec<usize> = (0..segs)
+    let picked: Vec<usize> = (0..segments(n, closed))
         .filter(|&i| sel.is_empty() || (sel.contains(&i) && sel.contains(&((i + 1) % n))))
         .collect();
     if picked.is_empty() {
         editor.status = "select two neighbouring nodes to subdivide between".into();
         return;
     }
-    let sampled = match item {
-        Item::Road(r) => built.roads.get(r),
-        Item::Spline(s) => built.splines.get(s),
-        Item::Prop(_) => None,
+    let op = Op::Subdivide {
+        line: name.to_string(),
+        segments: picked.clone(),
     };
-    let mid = |i: usize| {
-        sampled
-            .filter(|s| !s.frames.is_empty())
-            .map(|s| s.frame_at(s.s_at(i as f64 + 0.5)).pos)
-            .unwrap_or_else(|| 0.5 * (nodes[i].pos + nodes[(i + 1) % n].pos))
-    };
-    // From the last segment back, so the earlier indices hold.
-    let ops: Vec<Op> = picked
-        .iter()
-        .rev()
-        .map(|&i| Op::AddNode {
-            line: name.to_string(),
-            pos: mid(i),
-            before: (i + 1 < n).then_some(i + 1),
-        })
-        .collect();
     // Where the old nodes and the new ones end up.
     let shift = |j: usize| j + picked.iter().filter(|&&i| i < j).count();
     let mut selected: Vec<usize> = sel.iter().map(|&j| shift(j)).collect();
     selected.extend(picked.iter().map(|&i| shift(i) + 1));
-    if editor.apply(ops, None) {
+    if editor.apply(vec![op], None) {
         editor.selection.item = Some(item);
         editor.selection.nodes = if sel.is_empty() { vec![] } else { selected };
     }
@@ -484,19 +465,17 @@ mod tests {
     fn subdivide_adds_a_node_between_selected_neighbours() {
         let (mut e, dir) = editor("subdivide");
         let n = e.project.roads[0].nodes.len();
-        let (a, b) = (
-            e.project.roads[0].nodes[2].pos,
-            e.project.roads[0].nodes[3].pos,
-        );
+        let road = &e.project.roads[0];
+        let mid = open_racing_track_project::curve::point(road, 2.5);
         e.selection = Selection {
             item: Some(Item::Road(0)),
             nodes: vec![2, 3],
             others: vec![],
         };
-        subdivide(&mut e, &Built::default());
+        subdivide(&mut e);
         let nodes = &e.project.roads[0].nodes;
         assert_eq!(nodes.len(), n + 1);
-        assert!((nodes[3].pos - 0.5 * (a + b)).length() < 1e-9);
+        assert!((nodes[3].pos - mid).length() < 1e-9, "on the curve");
         assert_eq!(e.selection.nodes, vec![2, 4, 3]);
         std::fs::remove_dir_all(dir).unwrap();
     }

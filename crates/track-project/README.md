@@ -29,7 +29,7 @@ trackctl guide                          # this text
 - **Driving direction.** Roads are driven in the order of their nodes.
 - **Left and right.** These are relative to the driving direction. A positive lateral offset is to the left.
 - **Spline parameter `u`.** Places along a road are given as spline parameters rather than as distances. `u = i` is node `i`, and `u = i + 0.5` is halfway to the next node. On a closed road `u` runs from 0 to the node count and wraps around.
-  - Keys and stretches keep their places when nodes move.
+  - Keys, stretches, corner parts and markers keep their places when nodes move, and when nodes are added or removed.
   - `trackctl info` prints the distance `s` at each node, so you can convert between `u` and `s`.
 - **Names.** Roads, surfaces and materials refer to each other by name. Strips, lines and barriers are named within their road.
 
@@ -171,6 +171,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `MoveNode` | `line`, `index`, `pos` | moves a node |
 | `SetNodeHandles` | `line`, `index`, `mode`, `incoming`, `outgoing` | sets both offsets; `mode` is `Auto`, `Aligned` (opposite directions, independent lengths), or `Free` |
 | `RemoveNode` | `line`, `index` | removes a node |
+| `Subdivide` | `line`, `segments` | splits each segment (segment `i` runs from node `i` to the next) at its middle, keeping the line's shape |
 | `SetNodes` | `line`, `nodes` | replaces the whole polyline, with automatic handles |
 
 **Profiles**

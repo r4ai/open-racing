@@ -366,6 +366,7 @@ pub fn fit(project: &mut Project, index: usize) {
     }
     let (smp, corners) = of_road(project, index);
     let road = &mut project.roads[index];
+    settle_merged(road, &smp, &corners);
     let renamed = |name: &str, c: &Corner| match numbered(name) {
         Some("") => format!("T{}", c.number),
         Some(rest) => format!("T{} {rest}", c.number),
@@ -436,6 +437,82 @@ pub fn fit(project: &mut Project, index: usize) {
     for (b, n) in road.barriers.iter_mut().zip(names) {
         b.name = n;
     }
+}
+
+/// Where corners ran together (the road between them was straightened), the parts each
+/// had now fall to one corner twice over. The one laid nearest its apex stays; another
+/// just like it (the same type and width) goes, and one made different is let go of the
+/// corner, staying where it is as a part of its own.
+fn settle_merged(road: &mut Road, smp: &Sampled, corners: &[Corner]) {
+    // (corner, part, barrier or not) → the nearest claim's distance.
+    let claim = |a: &Anchor| {
+        let c = owner(smp, corners, a)?;
+        let d = (smp.s_at(a.apex) - c.apex).rem_euclid(smp.length.max(1e-9));
+        Some(((c.number, a.part), d.min(smp.length - d)))
+    };
+    let mut nearest: std::collections::HashMap<(usize, CornerPart, bool), (f64, String, f64)> =
+        Default::default();
+    let strips = road.left.iter().chain(&road.right);
+    for s in strips {
+        if let Some((key, d)) = s.corner.as_ref().and_then(claim) {
+            let e =
+                nearest
+                    .entry((key.0, key.1, false))
+                    .or_insert((f64::INFINITY, String::new(), 0.0));
+            if d < e.0 {
+                *e = (d, s.style.clone().unwrap_or_default(), s.width);
+            }
+        }
+    }
+    for b in &road.barriers {
+        if let Some((key, d)) = b.corner.as_ref().and_then(claim) {
+            let e =
+                nearest
+                    .entry((key.0, key.1, true))
+                    .or_insert((f64::INFINITY, String::new(), 0.0));
+            if d < e.0 {
+                *e = (d, b.style.clone().unwrap_or_default(), b.offset);
+            }
+        }
+    }
+    // What becomes of a part: kept, gone, or let go of its corner.
+    let fate = |a: &Option<Anchor>, barrier: bool, style: &Option<String>, size: f64| {
+        let Some((key, d)) = a.as_ref().and_then(claim) else {
+            return Some(false);
+        };
+        let (best, st, sz) = &nearest[&(key.0, key.1, barrier)];
+        if d <= *best {
+            Some(false)
+        } else if style.as_deref().unwrap_or_default() == st && (size - sz).abs() < 1e-6 {
+            None
+        } else {
+            Some(true)
+        }
+    };
+    for side in [Side::Left, Side::Right] {
+        let list = std::mem::take(road.strips_mut(side));
+        *road.strips_mut(side) = list
+            .into_iter()
+            .filter_map(|mut s| {
+                let release = fate(&s.corner, false, &s.style, s.width)?;
+                if release {
+                    s.corner = None;
+                }
+                Some(s)
+            })
+            .collect();
+    }
+    let list = std::mem::take(&mut road.barriers);
+    road.barriers = list
+        .into_iter()
+        .filter_map(|mut b| {
+            let release = fate(&b.corner, true, &b.style, b.offset)?;
+            if release {
+                b.corner = None;
+            }
+            Some(b)
+        })
+        .collect();
 }
 
 /// What to lay round a corner: a strip type and width for each kerb and for what is
@@ -704,6 +781,60 @@ mod tests {
                 .any(|b| b.name == "T1 wall" && b.side == Side::Right)
         );
         assert_eq!(Kit::of(r, &smp, &corners, &corners[0]), fewer);
+    }
+
+    #[test]
+    fn corners_run_together_keep_one_of_each_part() {
+        let (mut p, smp, corners) = kerbed();
+        let kit = Kit::kerbs(&p, None, 1.5);
+        let ops = kit_ops(&p, "circuit", &smp, &corners, &corners[1], &kit);
+        apply_all(&mut p, &ops).unwrap();
+        // As if a second corner's kerbs had fallen to this one: a copy of the entry
+        // kerb just like it, and an apex kerb made wider, both laid a little off.
+        let road = &mut p.roads[0];
+        for side in [Side::Left, Side::Right] {
+            let extra: Vec<Strip> = road
+                .strips(side)
+                .iter()
+                .filter(|s| s.corner.is_some_and(|a| a.part != CornerPart::Exit))
+                .map(|s| {
+                    let mut t = s.clone();
+                    t.name = format!("{} again", s.name);
+                    let a = t.corner.as_mut().unwrap();
+                    a.apex += 0.05;
+                    if a.part == CornerPart::Apex {
+                        t.width = 3.0;
+                    }
+                    t
+                })
+                .collect();
+            road.strips_mut(side).extend(extra);
+        }
+        apply_all(
+            &mut p,
+            &[Op::FitCorners {
+                road: "circuit".into(),
+            }],
+        )
+        .unwrap();
+        let road = &p.roads[0];
+        let all: Vec<&Strip> = road.left.iter().chain(&road.right).collect();
+        let held = |part| {
+            all.iter()
+                .filter(|s| s.corner.is_some_and(|a| a.part == part))
+                .count()
+        };
+        assert_eq!(
+            held(CornerPart::Entry),
+            1,
+            "the same entry kerb twice: one goes"
+        );
+        assert_eq!(held(CornerPart::Apex), 1);
+        let wide = all
+            .iter()
+            .find(|s| s.width == 3.0)
+            .expect("the wider one stays");
+        assert!(wide.corner.is_none(), "let go of the corner");
     }
 
     #[test]

@@ -368,8 +368,19 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
     });
     ui.data_mut(|d| d.insert_temp(id, all));
 
-    for (k, kit) in corners.iter().zip(&have) {
+    for (i, (k, kit)) in corners.iter().zip(&have).enumerate() {
         let current = c.shell.corner == Some((r, k.number));
+        // The corners either side with something laid round them, to copy from: a
+        // corner split in two has it on one half only.
+        let count = corners.len();
+        let neighbours: Vec<(usize, Kit)> = [i.checked_sub(1), Some(i + 1)]
+            .into_iter()
+            .flatten()
+            .chain((smp.closed && i == 0).then(|| count - 1))
+            .map(|j| j % count)
+            .filter(|&j| j != i && !have[j].is_empty())
+            .map(|j| (corners[j].number, have[j].clone()))
+            .collect();
         let parts = [
             kit.entry.is_some(),
             kit.apex.is_some(),
@@ -402,7 +413,9 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Ctx) {
             .id_salt(("corner", r, k.number))
             .open(current.then_some(true))
             .show_background(true)
-            .show(ui, |ui| corner_ui(ui, c, r, &road, &smp, &corners, k, kit));
+            .show(ui, |ui| {
+                corner_ui(ui, c, r, &road, &smp, &corners, k, kit, &neighbours);
+            });
         if current && resp.header_response.clicked() {
             c.shell.corner = None;
         } else if resp.header_response.clicked() {
@@ -421,6 +434,7 @@ fn corner_ui(
     corners: &[Corner],
     k: &Corner,
     kit: &Kit,
+    neighbours: &[(usize, Kit)],
 ) {
     ui.horizontal(|ui| {
         if ui.small_button("🔍 Look at it").clicked() {
@@ -434,7 +448,21 @@ fn corner_ui(
         ));
     });
     let mut want = kit.clone();
-    if kit_ui(ui, ("corner", r, k.number), &mut want, &c.editor.project) {
+    if kit.is_empty() && !neighbours.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            for (n, other) in neighbours {
+                if ui
+                    .button(format!("Same as T{n}"))
+                    .on_hover_text("Lay what that corner has round this one too")
+                    .clicked()
+                {
+                    want = other.clone();
+                }
+            }
+        });
+    }
+    let copied = want != *kit;
+    if kit_ui(ui, ("corner", r, k.number), &mut want, &c.editor.project) || copied {
         let ops = kit_ops(&c.editor.project, &road.name, smp, corners, k, &want);
         c.editor
             .apply(ops, Some(&format!("corner kit {} {}", road.name, k.number)));

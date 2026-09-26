@@ -96,6 +96,13 @@ pub enum Op {
         line: String,
         index: usize,
     },
+    /// Splits each of the segments (segment `i` runs from node `i` to the next) in two
+    /// at its middle, with a node that keeps the line's shape; keys, stretches and
+    /// markers stay where they were on it.
+    Subdivide {
+        line: String,
+        segments: Vec<usize>,
+    },
     /// Replaces all of a road's or spline's nodes (automatic handles). A road's
     /// profiles and stretches keep their spline parameters.
     SetNodes {
@@ -300,20 +307,56 @@ impl Line<'_> {
         }
     }
 
-    fn insert(&mut self, index: usize, node: Node) {
+    /// Inserts a node; for a road, gives what became of its spline parameters.
+    fn insert(&mut self, index: usize, node: Node) -> Option<ParamMap> {
         match self {
-            Line::Road(r) => r.insert_node(index, node),
-            Line::Spline(s) => s.nodes.insert(index, node),
+            Line::Road(r) => Some(Box::new(r.insert_node(index, node))),
+            Line::Spline(s) => {
+                s.nodes.insert(index, node);
+                None
+            }
         }
     }
 
-    fn remove(&mut self, index: usize) {
+    fn remove(&mut self, index: usize) -> Option<ParamMap> {
         match self {
-            Line::Road(r) => r.remove_node(index),
+            Line::Road(r) => Some(Box::new(r.remove_node(index))),
             Line::Spline(s) => {
                 s.nodes.remove(index);
+                None
             }
         }
+    }
+
+    /// Splits segment `i` at its middle, keeping the shape.
+    fn split(&mut self, i: usize) -> Option<ParamMap> {
+        match self {
+            Line::Road(r) => Some(Box::new(r.split_segment(i))),
+            Line::Spline(s) => {
+                s.nodes = crate::project::split_segment(&s.nodes, s.closed, i);
+                None
+            }
+        }
+    }
+}
+
+/// What an edit of a road's nodes did to its spline parameters.
+type ParamMap = Box<dyn Fn(f64) -> f64>;
+
+/// Keeps the race markers on road `road` where they were on it after its nodes changed:
+/// the start line and sectors on the main road, the boxes on the pit lane.
+fn remap_markers(p: &mut Project, road: &str, f: Option<ParamMap>) {
+    let Some(f) = f else { return };
+    let m = &mut p.markers;
+    if p.main_road == road {
+        m.start = f(m.start);
+        m.sectors.iter_mut().for_each(|u| *u = f(*u));
+        m.sectors.sort_by(f64::total_cmp);
+    }
+    if let Some(pit) = &mut m.pit
+        && pit.road == road
+    {
+        pit.boxes.iter_mut().for_each(|u| *u = f(*u));
     }
 }
 
@@ -492,20 +535,14 @@ impl Op {
             Op::AddNode { line, pos, before } => {
                 let mut l = line_mut(p, &line)?;
                 let node = Node::new(pos);
-                match before {
-                    Some(i) => {
-                        if i > l.nodes().len() {
-                            l.node_index(&line, i)?;
-                        }
-                        l.insert(i, node)
-                    }
-                    None => {
-                        // Through `insert`, so that a closed road's keys and ranges on its
-                        // closing segment move onto the new one.
-                        let end = l.nodes().len();
-                        l.insert(end, node)
-                    }
+                // At the end through `insert` too, so that a closed road's keys and
+                // ranges on its closing segment move onto the new one.
+                let at = before.unwrap_or(l.nodes().len());
+                if at > l.nodes().len() {
+                    l.node_index(&line, at)?;
                 }
+                let map = l.insert(at, node);
+                remap_markers(p, &line, map);
             }
             Op::MoveNode { line, index, pos } => {
                 let mut l = line_mut(p, &line)?;
@@ -527,7 +564,31 @@ impl Op {
             Op::RemoveNode { line, index } => {
                 let mut l = line_mut(p, &line)?;
                 let i = l.node_index(&line, index)?;
-                l.remove(i);
+                let map = l.remove(i);
+                remap_markers(p, &line, map);
+            }
+            Op::Subdivide { line, segments } => {
+                let mut l = line_mut(p, &line)?;
+                let n = l.nodes().len();
+                let closed = match &l {
+                    Line::Road(r) => r.closed,
+                    Line::Spline(s) => s.closed,
+                };
+                let count = crate::curve::segments(n, closed);
+                let mut segments = segments;
+                segments.sort_unstable();
+                segments.dedup();
+                if let Some(&bad) = segments.iter().find(|&&i| i >= count) {
+                    return Err(Error::Invalid(format!(
+                        "\"{line}\" has no segment {bad} (it has {count})"
+                    )));
+                }
+                // From the last back, so that the earlier segments keep their numbers.
+                let maps: Vec<Option<ParamMap>> =
+                    segments.iter().rev().map(|&i| l.split(i)).collect();
+                for map in maps {
+                    remap_markers(p, &line, map);
+                }
             }
             Op::SetNodes { line, nodes } => {
                 *line_mut(p, &line)?.nodes() = nodes.into_iter().map(Node::new).collect();
@@ -824,6 +885,7 @@ impl Op {
             Op::MoveNode { .. } => "MoveNode",
             Op::SetNodeHandles { .. } => "SetNodeHandles",
             Op::RemoveNode { .. } => "RemoveNode",
+            Op::Subdivide { .. } => "Subdivide",
             Op::SetNodes { .. } => "SetNodes",
             Op::SetProfile { .. } => "SetProfile",
             Op::SetKey { .. } => "SetKey",
@@ -964,6 +1026,7 @@ mod tests {
             }],
         )
         .unwrap();
+        let before = p.roads[0].clone();
         apply_all(
             &mut p,
             &[Op::AddNode {
@@ -979,7 +1042,15 @@ mod tests {
             .iter()
             .find(|k| k.value == 0.1)
             .unwrap();
-        assert_eq!(key.u, n + 0.5, "the key stays on the closing segment");
+        // The node splits the closing segment; the key stays where it was on it.
+        assert!(
+            key.u > n - 1.0,
+            "on the closing segment's halves: {}",
+            key.u
+        );
+        let moved =
+            crate::curve::point(&before, n - 0.5).distance(crate::curve::point(&p.roads[0], key.u));
+        assert!(moved < 3.0, "moved {moved} m");
 
         // Removing node 0 joins the first segment onto the closing one.
         let mut p = Project::new("t");
@@ -996,11 +1067,107 @@ mod tests {
         apply_all(&mut p, &[key(0.5), remove]).unwrap();
         let bank = &p.roads[0].bank.keys;
         let k = bank.iter().find(|k| k.value == 0.2).unwrap();
-        assert_eq!(k.u, n - 1.5, "wrapped round, not squashed onto 0");
+        assert!(
+            k.u > n - 2.0 && k.u < n - 1.0,
+            "on the joined closing segment, not squashed onto 0: {}",
+            k.u
+        );
         assert!(
             bank.windows(2).all(|w| w[0].u <= w[1].u),
             "keys stay in order"
         );
+    }
+
+    #[test]
+    fn subdividing_keeps_the_shape_and_what_lies_on_it() {
+        let mut p = Project::new("t");
+        apply_all(
+            &mut p,
+            &[
+                Op::SetNodeHandles {
+                    line: "circuit".into(),
+                    index: 2,
+                    mode: HandleMode::Free,
+                    incoming: DVec3::new(-40.0, -10.0, 0.0),
+                    outgoing: DVec3::new(50.0, 30.0, 2.0),
+                },
+                Op::SetKey {
+                    road: "circuit".into(),
+                    curve: Curve::Bank,
+                    u: 2.75,
+                    value: 0.1,
+                },
+            ],
+        )
+        .unwrap();
+        let before = p.roads[0].clone();
+        let start = p.markers.start;
+        apply_all(
+            &mut p,
+            &[Op::Subdivide {
+                line: "circuit".into(),
+                segments: vec![2, 0],
+            }],
+        )
+        .unwrap();
+        let after = &p.roads[0];
+        assert_eq!(after.nodes.len(), before.nodes.len() + 2);
+        // Old u on segment 2 lies at new u 3 + 2 (u - 2) once segment 0 is split too.
+        for k in 0..=10 {
+            let u = 2.0 + k as f64 / 10.0;
+            let v = 3.0 + 2.0 * (u - 2.0);
+            let (a, b) = (
+                crate::curve::point(&before, u),
+                crate::curve::point(after, v),
+            );
+            assert!(a.distance(b) < 1e-9, "u {u}: {a} vs {b}");
+        }
+        let key = after.bank.keys.iter().find(|k| k.value == 0.1).unwrap();
+        assert_eq!(key.u, 4.5);
+        assert_eq!(p.markers.start, 2.0 * start, "the start line stays put");
+    }
+
+    #[test]
+    fn node_edits_keep_markers_and_corner_parts_where_they_were() {
+        let mut p = Project::new("t");
+        let (smp, cs) = crate::corners::of_road(&p, 0);
+        let kit = crate::corners::Kit::kerbs(&p, None, 1.5);
+        let ops = crate::corners::kit_ops(&p, "circuit", &smp, &cs, &cs[1], &kit);
+        apply_all(&mut p, &ops).unwrap();
+        let names = |p: &Project| -> Vec<String> {
+            let r = &p.roads[0];
+            let strips = r.left.iter().chain(&r.right).filter(|s| s.corner.is_some());
+            let mut v: Vec<String> = strips.map(|s| s.name.clone()).collect();
+            v.sort();
+            v
+        };
+        let (laid, start, sectors) = (names(&p), p.markers.start, p.markers.sectors.clone());
+        assert!(laid.iter().all(|n| n.starts_with("T2 ")), "{laid:?}");
+        // A node in the middle of the first straight: the corners stay as they were.
+        apply_all(
+            &mut p,
+            &[Op::AddNode {
+                line: "circuit".into(),
+                pos: DVec3::new(125.0, 0.0, 0.0),
+                before: Some(1),
+            }],
+        )
+        .unwrap();
+        // The start line lay where the node went in.
+        assert!((p.markers.start - 1.0).abs() < 0.01, "{}", p.markers.start);
+        assert!(start == 0.5);
+        assert_eq!(p.markers.sectors[0], sectors[0] + 1.0);
+        assert_eq!(names(&p), laid, "still round the second corner");
+        apply_all(
+            &mut p,
+            &[Op::RemoveNode {
+                line: "circuit".into(),
+                index: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(p.markers.sectors, sectors);
+        assert_eq!(names(&p), laid);
     }
 
     #[test]
