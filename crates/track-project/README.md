@@ -75,8 +75,11 @@ trackctl guide                          # this text
          shape: Band(width: 0.6, align: Center, profile: Crown(0.12),
                      surface: "kerb", material: "kerb", lift: 0.01)),
         (name: "tyre wall", closed: false, drape: true,
-         nodes: [(pos: (500, 100, 0)), (pos: (505, 160, 0))], resolution: 2,
+         nodes: [(pos: (500, 100, 0)), (pos: (505, 160, 0), radius: 1.5)], resolution: 2,
          shape: Wall(height: 1, thickness: 0.8, material: "concrete", collide: true)),
+        (name: "T1 gravel", closed: true, drape: true, resolution: 1,
+         nodes: [(pos: (430, 60, 0)), (pos: (470, 50, 0)), (pos: (480, 100, 0))],
+         shape: Area(surface: "gravel", material: "gravel", lift: 0.02)),
     ],
     markers: (
         start: 0.5,                  // start/finish line on the main road (u)
@@ -90,7 +93,20 @@ trackctl guide                          # this text
               landforms: [(name: "bank", center: (-560, -600), to: Some((-300, -520)),
                            radius: 15, falloff: 30, kind: Raise(8)),
                           (name: "paddock", center: (-750, -500), radius: 60,
-                           falloff: 40, kind: Level(-22))]),
+                           falloff: 40, kind: Level(-22))],
+              sculpt: [(brush: Raise, radius: 40, strength: 6,        // brush strokes
+                        points: [(60, 120), (160, 150)])],
+              layers: [(name: "sand", surface: "gravel", material: "gravel")],
+              paint: [(layer: Some("sand"), stroke: (brush: Paint, radius: 10,
+                        strength: 1, points: [(470, 170), (500, 130)]))],
+              paint_texel: 1),                // m per texel of the painted layers
+    scatter: [(name: "woods", models: [(model: "builtin:pine", weight: 3),
+                                       (model: "assets/models/oak.glb", weight: 1)],
+               spacing: 7, scale: (0.8, 1.25), tilt: 0.1, clearance: 3, max_slope: 35,
+               collide: false,
+               strokes: [(brush: Paint, radius: 60, strength: 1,
+                          points: [(-300, -150), (-250, -80)]),
+                         (brush: Erase, radius: 15, strength: 1, points: [(-270, -110)])])],
     surfaces: [(name: "asphalt", props: (kind: Asphalt, grip: 1.0, drag: 0.0)), ...],
     materials: [(name: "asphalt", color: (1, 1, 1), texture: Builtin(Asphalt),
                  tile: (4, 4), roughness: 0.8, reflectance: 0.5), ...,
@@ -124,6 +140,8 @@ trackctl guide                          # this text
 - `drape: true` lays it on whatever is under the line (roads, then terrain) and ignores the nodes' heights. Otherwise it follows the nodes.
 - The `Band` shape is drivable: it takes a `width` and a profile. It lies centred on the line, or to its `Left` or `Right`. `lift` raises it above what is under it.
 - The `Wall` shape stands on the line. A `thickness` of 0 gives a thin rail or fence, which wants a double-sided material. With `collide: false`, cars pass through it.
+- The `Area` shape fills a closed line (of 3 nodes or more) with a surface and material: a gravel trap, a paddock, a car park, a patch of run-off. It is cut into cells so that, draped, it follows the ground.
+- A node's `radius` (1 when left out) scales the spline there, easing to the next node's: a band's width, a wall's height. A kerb tapering to nothing at its ends has radius 0 at its end nodes.
 - `group: Some("T1 kerbs")` keeps a spline in a collection, as props may be too: the editor's outliner lists, hides, locks and selects a collection as one.
 
 **Surfaces.** A surface's `kind` is one of `Asphalt`, `Kerb`, `Runoff`, `Grass`, `Turf`, `Gravel` or `Dirt`.
@@ -144,6 +162,7 @@ trackctl guide                          # this text
 - `drape: true` stands it on the road or terrain under `pos`, ignoring the height.
 - `collide: true` makes its triangles walls for the cars. Leave it off for things out of reach, as it costs physics time.
 - Models are Y-up as glTF has them. Their own materials and textures come along; the project's materials are not used.
+- Wherever a model's path is taken (props, rows, scatters, models along walls), a built-in model may be named instead, needing no file: `builtin:pine`, `builtin:tree` (broadleaf), `builtin:poplar`, `builtin:bush`, `builtin:rock`, `builtin:grass` (a tuft) and `builtin:cone` (a traffic cone). They are low in triangles, for thousands of copies.
 - The files a project refers to, and those it does not, are listed by `trackctl assets`.
 
 **Rows.** A row repeats a glTF model beside a road: trees, cones, distance boards, lamp
@@ -163,6 +182,23 @@ posts, spectators' stands, pit garages.
 
 - `heights` is elevation data the ground away from the roads follows (a GeoTIFF, an ESRI ASCII grid or x y z points, in metres, longitudes and latitudes, or WGS 84 UTM metres), with `heights_offset` added. Within about 30 m of the roads' outer edges it eases from their edges to the data.
 - `landforms` shape the ground away from the roads: `Raise(m)` raises a hill or bank (negative digs a hollow) and `Level(m)` levels a pad at that height, round `center` or, with `to`, along the line from `center` to `to`, at full effect out to `radius` and easing to nothing over `falloff` more.
+- `sculpt` is brush strokes shaping the ground after the landforms, in order, as the editor's Sculpt Terrain tool paints them. A stroke acts fully within half its `radius` of its `points` and eases to nothing at `radius`; it acts once wherever it passes. Its `brush` is `Raise` (by `strength` m; negative lowers), `Smooth` (evens bumps, `strength` 0 to 1), `Flatten(height)` (levels towards that height, `strength` 0 to 1) or `Noise` (roughens by up to `strength` m, the same every build). Near the roads' outer edges strokes and landforms ease out, so the ground still meets the roads. A small `cell` shows finer shapes.
+- `layers` are up to three materials painted over the ground's own (dirt, gravel, sand), each with its `surface`: where a layer covers most of a cell, cars drive on it. `paint` is the strokes painting them in order (brush `Paint`, `strength` 0 to 1 of the way to all of it); `layer: None` paints the ground's own material back. `paint_texel` is the painted texels' size, m.
+
+**Scatters.** A scatter paints models over the ground: woods, bushes, rocks, long grass,
+spectators.
+
+- Copies stand on a grid `spacing` metres apart, each jittered in its cell. Its `strokes`
+  (`Paint` and `Erase`, `strength` 0 to 1, as a sculpting stroke reaches) say how much of
+  it each place has, in order: a light stroke plants some, painting again more, and
+  erasing takes them away. The same strokes give the same copies every build.
+- Each copy is one of `models`, picked in proportion to its `weight`, turned at random
+  and sized from `scale[0]` to `scale[1]` times its own; `tilt` leans it with the slope (0
+  upright, 1 square to it).
+- Copies keep `clearance` metres beyond the roads' outer edges (strips included), off
+  asphalt, kerbs, run-off and gravel (drivable splines and painted layers too), and off
+  ground steeper than `max_slope` degrees. `collide: true` makes them solid for the cars.
+- `trackctl info` counts each scatter's copies and says where they stand.
 
 ## Operations
 
@@ -203,6 +239,7 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveNode` | `line`, `index` | removes a node |
 | `Subdivide` | `line`, `segments` | splits each segment (segment `i` runs from node `i` to the next) at its middle, keeping the line's shape |
 | `SetNodes` | `line`, `nodes` | replaces the whole polyline, with automatic handles |
+| `SetNodeRadius` | `line`, `index`, `radius` | sets a spline node's radius: its band's width or wall's height there, times its own |
 
 **Profiles**
 
@@ -248,7 +285,7 @@ and grass, and concrete walls, guard rails, tyre walls and catch fences.
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence) |
+| `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence, area) |
 | `RenameSpline` | `name`, `to` | renames a spline; fails if a road or spline has that name |
 
 **Markers and terrain**
@@ -259,6 +296,11 @@ and grass, and concrete walls, guard rails, tyre walls and catch fences.
 | `SetPit` | `pit: Some((...))` or `None` | sets or removes the pit lane |
 | `SetTerrain` | `terrain` | sets the terrain |
 | `PutLandform` / `RemoveLandform` | `landform` / `name` | adds or replaces, or removes, a hill, bank, hollow or level pad of the terrain |
+| `AddStroke` | `to`, `stroke: (brush, radius, strength, points)` | adds a brush stroke: `to` is `Sculpt` (the ground's shape), `Paint(Some("sand"))` (a ground layer; `Paint(None)` the ground's own material) or `Scatter("woods")` |
+| `ClearStrokes` | `of` | removes every stroke of `Sculpt`, of one layer's painting, or of a scatter |
+| `PutGroundLayer` / `RemoveGroundLayer` | `layer: (name, surface, material)` / `name` | adds or replaces a painted ground layer, or removes it with its strokes |
+| `PutScatter` / `RemoveScatter` | `scatter` / `name` | adds, replaces or removes a scatter of models |
+| `RenameScatter` | `name`, `to` | renames a scatter |
 | `SetReference` | `reference: Some((image, center, width, rotation?, height?, opacity?, visible?))` or `None` | sets or removes the image the editor shows to trace a real circuit over; not part of the track |
 | `SetGeo` | `geo: Some((lon, lat))` or `None` | sets where the project's (0, 0) lies on the Earth |
 

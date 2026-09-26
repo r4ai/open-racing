@@ -640,6 +640,33 @@ fn print_summary(s: &inspect::Summary) {
             sp.name, sp.shape, sp.material, sp.length
         );
     }
+    if let Some(t) = &s.terrain {
+        println!(
+            "terrain: cells of {:.1} m, ground {:.1}..{:.1} m, {} sculpting strokes",
+            t.cell, t.height[0], t.height[1], t.sculpt_strokes
+        );
+        for l in &t.layers {
+            println!(
+                "  ground layer \"{}\" of {}: {} strokes, {:.0} m² painted",
+                l.name, l.surface, l.strokes, l.area
+            );
+        }
+    }
+    for sc in &s.scatter {
+        let at = sc.bounds.map_or(String::new(), |[lo, hi]| {
+            format!(
+                " over x {:.0}..{:.0}, y {:.0}..{:.0} m",
+                lo[0], hi[0], lo[1], hi[1]
+            )
+        });
+        println!(
+            "scatter \"{}\" of {}: {} strokes, {} copies{at}",
+            sc.name,
+            sc.models.join(", "),
+            sc.strokes,
+            sc.copies
+        );
+    }
     let m = &s.markers;
     println!("start at s = {:.0} m", m.start.s);
     for (i, sec) in m.sectors.iter().enumerate() {

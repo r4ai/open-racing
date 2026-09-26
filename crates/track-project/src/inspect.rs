@@ -17,11 +17,43 @@ pub struct Summary {
     pub bounds: [[f64; 2]; 2],
     pub roads: Vec<RoadSummary>,
     pub splines: Vec<SplineSummary>,
+    pub terrain: Option<TerrainSummary>,
+    pub scatter: Vec<ScatterSummary>,
     pub markers: MarkerSummary,
     pub surfaces: Vec<String>,
     pub materials: Vec<String>,
     /// Problems: an invalid project, or geometry that will not drive well.
     pub warnings: Vec<String>,
+}
+
+/// The terrain as built: its heights, sculpting and painted layers.
+#[derive(Serialize)]
+pub struct TerrainSummary {
+    /// Its grid's cell, m, and the lowest and highest ground, m.
+    pub cell: f64,
+    pub height: [f64; 2],
+    pub sculpt_strokes: usize,
+    pub layers: Vec<LayerSummary>,
+}
+
+#[derive(Serialize)]
+pub struct LayerSummary {
+    pub name: String,
+    pub surface: String,
+    pub strokes: usize,
+    /// How much of the terrain it covers, m², weighing each texel by how much of it.
+    pub area: f64,
+}
+
+/// A scatter of models: what it plants and how many copies stand.
+#[derive(Serialize)]
+pub struct ScatterSummary {
+    pub name: String,
+    pub models: Vec<String>,
+    pub strokes: usize,
+    pub copies: usize,
+    /// Where they stand: [[min x, min y], [max x, max y]], m; none without copies.
+    pub bounds: Option<[[f64; 2]; 2]>,
 }
 
 #[derive(Serialize)]
@@ -502,12 +534,91 @@ pub fn summarize(project: &Project, scene: &Scene) -> Summary {
                 .collect(),
         })
         .collect();
+    let terrain = scene.terrain.as_ref().map(|t| {
+        let g = &t.grid;
+        let height =
+            g.z.iter()
+                .fold([f64::INFINITY, f64::NEG_INFINITY], |[a, b], &z| {
+                    [a.min(z), b.max(z)]
+                });
+        let texel = t
+            .mask
+            .as_ref()
+            .map_or(0.0, |m| m.size.x * m.size.y / (m.width * m.height) as f64);
+        let layers = project
+            .terrain
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| LayerSummary {
+                name: l.name.clone(),
+                surface: l.surface.clone(),
+                strokes: project
+                    .terrain
+                    .paint
+                    .iter()
+                    .filter(|s| s.layer.as_deref() == Some(l.name.as_str()))
+                    .count(),
+                area: t.mask.as_ref().map_or(0.0, |m| {
+                    m.rgba
+                        .chunks(4)
+                        .map(|c| c[i + 1] as f64 / 255.0)
+                        .sum::<f64>()
+                        * texel
+                }),
+            })
+            .collect();
+        TerrainSummary {
+            cell: g.cell,
+            height,
+            sculpt_strokes: project.terrain.sculpt.len(),
+            layers,
+        }
+    });
+    let scatter = if project.scatter.is_empty() {
+        vec![]
+    } else {
+        let props: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
+        let ground = scene.ground.build(&props);
+        let keepout = crate::scatter::Keepout::new(&scene.roads);
+        project
+            .scatter
+            .iter()
+            .map(|s| {
+                let copies = crate::scatter::copies(s, &keepout, &ground);
+                let bounds = (!copies.is_empty()).then(|| {
+                    copies.iter().fold(
+                        [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]],
+                        |[lo, hi], c| {
+                            [
+                                [lo[0].min(c.pos.x), lo[1].min(c.pos.y)],
+                                [hi[0].max(c.pos.x), hi[1].max(c.pos.y)],
+                            ]
+                        },
+                    )
+                });
+                ScatterSummary {
+                    name: s.name.clone(),
+                    models: s
+                        .models
+                        .iter()
+                        .map(|m| m.model.to_string_lossy().into_owned())
+                        .collect(),
+                    strokes: s.strokes.len(),
+                    copies: copies.len(),
+                    bounds,
+                }
+            })
+            .collect()
+    };
     Summary {
         name: project.name.clone(),
         main_road: project.main_road.clone(),
         bounds: [lo, hi],
         roads,
         splines,
+        terrain,
+        scatter,
         markers,
         surfaces: project.surfaces.iter().map(|s| s.name.clone()).collect(),
         materials: project.materials.iter().map(|m| m.name.clone()).collect(),

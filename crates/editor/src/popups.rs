@@ -385,11 +385,40 @@ fn pie(ctx: &egui::Context, c: &mut Ctx, at: Vec2) -> (Option<Popup>, Option<Cmd
 
 const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     (
+        "Brushes (Sculpt Terrain, Paint Ground, Scatter)",
+        &[
+            ("Drag", "Paint a stroke: one step to undo"),
+            (
+                "Ctrl drag",
+                "The other way: lower, the ground's own material, wipe out",
+            ),
+            ("Shift drag", "Smooth (sculpting)"),
+            ("F / Shift F", "Radius / strength with the mouse"),
+            ("[ / ]", "Smaller / larger"),
+        ],
+    ),
+    (
+        "Draw (Shift A)",
+        &[
+            ("Click", "A point"),
+            ("Drag", "Sketch freehand, simplified to smooth nodes"),
+            ("Backspace", "Remove the last point"),
+            ("Enter / Right click", "Finish (an area closes itself)"),
+        ],
+    ),
+    (
         "View",
         &[
             ("Middle drag", "Orbit (also right drag, Alt+left drag)"),
             ("Shift+Middle drag", "Pan"),
-            ("Wheel, Ctrl+Middle drag", "Zoom"),
+            (
+                "Wheel, Ctrl+Middle drag",
+                "Zoom (the wheel towards the pointer)",
+            ),
+            (
+                "Right button + W A S D",
+                "Fly (Q / E down and up, mouse looks, wheel: speed, Shift: faster)",
+            ),
             ("Numpad 1 / 3 / 7", "Front / Right / Top (Ctrl: opposite)"),
             ("Numpad 2 4 6 8", "Orbit in 15° steps"),
             ("Numpad + / -", "Zoom in / out"),
@@ -417,6 +446,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "A / Alt+A",
                 "All / none: the line's nodes, or every item in object mode",
             ),
+            (
+                "C",
+                "Circle select: paint over nodes or items (Shift: deselect, wheel: size)",
+            ),
             ("Ctrl I", "Invert"),
             ("Ctrl Numpad + / -", "Select more / less"),
         ],
@@ -426,6 +459,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("G / R / S", "Move / Rotate / Scale"),
             ("Alt S / Ctrl T", "Road width / bank at the nodes"),
+            (
+                "Alt S (kerb or wall)",
+                "Its width or height at the nodes (radius)",
+            ),
             ("  X / Y (width)", "Left / right side only"),
             ("Drag a node, handle or marker", "Move it"),
             (

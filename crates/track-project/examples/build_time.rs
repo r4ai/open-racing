@@ -12,10 +12,11 @@ fn main() {
     let time =
         |what: &str, t: Instant| println!("{what}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
     // The first round warms up; the second is what an edit costs.
+    let mut roads = Vec::new();
     for round in 0..2 {
         println!("round {}", round + 1);
         let t = Instant::now();
-        let mut roads: Vec<_> = (0..p.roads.len()).map(|i| road::build(&p, i)).collect();
+        roads = (0..p.roads.len()).map(|i| road::build(&p, i)).collect();
         time("  roads, one at a time", t);
         let t = Instant::now();
         overlap::resolve(&mut roads);
@@ -40,4 +41,23 @@ fn main() {
     let t = Instant::now();
     let _ = bake::build_with(&p, &mut cache);
     time("whole build, roads and terrain unchanged", t);
+    // A brush stroke: the terrain's grid before sculpting is kept, the rest built again.
+    let mut stroked = p.clone();
+    let middle = (roads[0].sampled.frames[0].pos.truncate()
+        + roads[0].sampled.frames[roads[0].sampled.frames.len() / 2]
+            .pos
+            .truncate())
+        * 0.5;
+    stroked
+        .terrain
+        .sculpt
+        .push(open_racing_track_project::Stroke {
+            brush: open_racing_track_project::Brush::Raise,
+            radius: 30.0,
+            strength: 2.0,
+            points: vec![middle, middle + glam::DVec2::X * 60.0],
+        });
+    let t = Instant::now();
+    let _ = bake::build_with(&stroked, &mut cache);
+    time("whole build after a brush stroke", t);
 }
