@@ -15,6 +15,7 @@ trackctl info my-track [--json]         # roads, nodes and their distances, radi
 trackctl apply my-track ops.ron         # or ops.json, or - for stdin; all or nothing
 trackctl preview my-track               # plan view: my-track/preview.png
 trackctl import my-track a.png b.glb    # copy into my-track/assets/, print the paths to use
+trackctl model my-track assets/models/oak.glb  # triangles, size, leaves; its picture and far cards as PNG
 trackctl assets my-track [--json]       # textures and models, what uses each, unused and missing ones
 trackctl check my-track --lap           # bake in memory, check, drive a test lap
 trackctl bake my-track                  # write content/tracks/<name>/ (then: open-racing-app --track <name>)

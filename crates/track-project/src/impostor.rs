@@ -126,33 +126,38 @@ impl Canvas {
         }
     }
 
-    /// Only the pixels leaves cover (`leaves`), or only those they do not and that lie
-    /// two pixels or more from leaves: where the two meet, halved, the leaves' picture
-    /// covers the texels and the other's does not, as the cards of both lie in the same
-    /// places.
+    /// Only the pixels leaves cover (`leaves`), or only those they do not.
     fn only(&self, leaves: bool) -> Canvas {
         let mut out = self.clone();
-        let (w, h) = (self.width as i64, self.height as i64);
-        let near_leaves = |k: usize| {
-            let (x, y) = ((k % self.width) as i64, (k / self.width) as i64);
-            (-2..=2).any(|dy| {
-                (-2..=2).any(|dx| {
-                    let (u, v) = (x + dx, y + dy);
-                    u >= 0 && v >= 0 && u < w && v < h && self.leaves[(v * w + u) as usize]
-                })
-            })
-        };
-        for (k, c) in out.colour.iter_mut().enumerate() {
-            let keep = if leaves {
-                self.leaves[k]
-            } else {
-                !self.leaves[k] && !near_leaves(k)
-            };
-            if !keep {
+        for (c, l) in out.colour.iter_mut().zip(&self.leaves) {
+            if *l != leaves {
                 *c = [0.0; 4];
             }
         }
         out
+    }
+
+    /// The picture halved, as two: of the rest of the plant and of its leaves. The
+    /// cards of both lie in the same places, so no texel may show in both (they would
+    /// fight over it) and together they show what the one picture would: where both
+    /// would show, only the leaves do, and a texel half covered by each goes to the one
+    /// covering more of it, or to the leaves. Their coverage is kept well clear of the
+    /// cut-off, which block compression blurs.
+    fn split(&self) -> [Canvas; 2] {
+        let [mut wood, mut leaves] = [false, true].map(|l| self.only(l).halved());
+        for (w, l) in wood.colour.iter_mut().zip(&mut leaves.colour) {
+            let (a, b) = (w[3], l[3]);
+            if b >= 0.5 {
+                w[3] = w[3].min(0.3);
+            } else if a < 0.5 && a + b >= 0.5 {
+                if b >= a {
+                    l[3] = 0.7;
+                } else {
+                    w[3] = 0.7;
+                }
+            }
+        }
+        [wood, leaves]
     }
 
     /// Draws the model onto a region of the canvas `x0` pixels in and `w` wide.
@@ -394,13 +399,13 @@ pub fn cards(model: &Model, paints: &[Paint]) -> Model {
     let layers: Vec<bool> = [false, true].into_iter().filter(|&l| used(l)).collect();
     let mut look = VisualBuilder::new();
     let mut meshes = Vec::new();
+    let mut pictures = if layers.len() > 1 {
+        canvas.split().to_vec()
+    } else {
+        vec![canvas.halved()]
+    };
     for (i, leaves) in layers.iter().copied().enumerate() {
-        let mut picture = if layers.len() > 1 {
-            canvas.only(leaves)
-        } else {
-            canvas.clone()
-        }
-        .halved();
+        let picture = &mut pictures[i];
         picture.bleed(16);
         let texture = look.add_texture(Texture {
             data: texture::encode_with(picture.image(), Mips::AlphaTest(0.5)),
