@@ -221,3 +221,168 @@ impl Placement {
             .to_array()
     }
 }
+
+/// Copies of a model repeated along a wall's line, as meshes in the world with the
+/// model's own materials. Each stretch holds a whole number of copies, each stretched a
+/// little along the line to fit; a bent copy follows the line, a straight one stands on
+/// the chord between its ends. Copies are merged into meshes of a few dozen each, so
+/// that far ones can be culled.
+pub fn along(model: &Model, line: &crate::road::ModelLine) -> Vec<Mesh> {
+    const COPIES_PER_MESH: usize = 32;
+    let [lo, hi] = model.bounds;
+    let own = (hi.x - lo.x).max(0.05) as f64;
+    let piece = if line.run.length > 0.0 {
+        line.run.length
+    } else {
+        own
+    };
+    let mut out = Vec::new();
+    for stretch in line.stretches.iter().filter(|s| s.len() > 1) {
+        // Distance along the stretch at each point.
+        let mut at = vec![0.0];
+        for w in stretch.windows(2) {
+            at.push(at.last().unwrap() + w[0].pos.distance(w[1].pos));
+        }
+        let length = *at.last().unwrap();
+        if length < 0.1 {
+            continue;
+        }
+        let point = |s: f64| {
+            let i = at.partition_point(|&a| a <= s).clamp(1, at.len() - 1);
+            let (a, b) = (stretch[i - 1], stretch[i]);
+            let t = ((s - at[i - 1]) / (at[i] - at[i - 1]).max(1e-9)).clamp(0.0, 1.0);
+            let along = (b.pos - a.pos).normalize_or(DVec3::X);
+            let toward = a.toward.lerp(b.toward, t).normalize_or(DVec3::Y);
+            (a.pos.lerp(b.pos, t), along, toward)
+        };
+        let copies = (length / piece).round().max(1.0) as usize;
+        let each = length / copies as f64;
+        let stretch_x = each / own;
+        for first in (0..copies).step_by(COPIES_PER_MESH) {
+            let last = (first + COPIES_PER_MESH).min(copies);
+            for m in &model.meshes {
+                let mut mesh = Mesh {
+                    material: m.material,
+                    cast_shadows: m.cast_shadows,
+                    positions: vec![],
+                    normals: vec![],
+                    uvs: vec![],
+                    indices: vec![],
+                };
+                for k in first..last {
+                    let base = mesh.positions.len() as u32;
+                    let s0 = k as f64 * each;
+                    let (start, _, _) = point(s0);
+                    let (end, _, _) = point(s0 + each);
+                    let (_, _, facing) = point(s0 + 0.5 * each);
+                    let chord = (end - start).normalize_or(DVec3::X);
+                    for (p, n) in m.positions.iter().zip(&m.normals) {
+                        let x = (p[0] - lo.x) as f64 * stretch_x;
+                        let (origin, along, toward) = if line.run.bend {
+                            let (o, a, t) = point(s0 + x);
+                            (o - a * x, a, t)
+                        } else {
+                            (start, chord, facing)
+                        };
+                        // The model's +Y faces the road, level; +Z stays up.
+                        let side = (toward - along * toward.dot(along)).normalize_or(toward);
+                        let q = origin + along * x + side * p[1] as f64 + DVec3::Z * p[2] as f64;
+                        let n = along * n[0] as f64 + side * n[1] as f64 + DVec3::Z * n[2] as f64;
+                        mesh.positions.push(q.as_vec3().to_array());
+                        mesh.normals
+                            .push(n.normalize_or(DVec3::Z).as_vec3().to_array());
+                    }
+                    mesh.uvs.extend(&m.uvs);
+                    // Facing the road on a line's right mirrors the model: its
+                    // triangles then wind the other way round to keep facing out.
+                    let mirrored = chord.cross(facing).z < 0.0;
+                    for t in m.indices.as_chunks::<3>().0 {
+                        let [a, b, c] = t.map(|i| i + base);
+                        mesh.indices
+                            .extend(if mirrored { [a, c, b] } else { [a, b, c] });
+                    }
+                }
+                if !mesh.indices.is_empty() {
+                    out.push(mesh);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::ModelRun;
+    use crate::road::{LinePoint, ModelLine};
+
+    /// A unit box, a metre along +X, faces winding outwards.
+    fn cube() -> Model {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        for axis in 0..3 {
+            for sign in [-1.0f32, 1.0] {
+                let n =
+                    Vec3::from_array(std::array::from_fn(|i| if i == axis { sign } else { 0.0 }));
+                let (u, v) = (
+                    n.any_orthonormal_vector(),
+                    n.cross(n.any_orthonormal_vector()),
+                );
+                let base = positions.len() as u32;
+                for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    let p = (n + u * a + v * b) * 0.5 + Vec3::new(0.5, 0.0, 0.5);
+                    positions.push(p.to_array());
+                    normals.push(n.to_array());
+                }
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        let n = positions.len();
+        Model {
+            meshes: vec![Mesh {
+                material: 0,
+                cast_shadows: true,
+                positions,
+                normals,
+                uvs: vec![[0.0; 2]; n],
+                indices,
+            }],
+            look: VisualBuilder::new().build(),
+            triangles: 12,
+            bounds: [Vec3::new(0.0, -0.5, 0.0), Vec3::new(1.0, 0.5, 1.0)],
+        }
+    }
+
+    #[test]
+    fn copies_face_outwards_whichever_side_of_the_line_they_face() {
+        let model = cube();
+        for toward in [DVec3::Y, -DVec3::Y] {
+            let line = ModelLine {
+                run: ModelRun {
+                    model: "cube.glb".into(),
+                    length: 0.0,
+                    bend: true,
+                    flip: false,
+                },
+                stretches: vec![
+                    (0..=4)
+                        .map(|k| LinePoint {
+                            pos: DVec3::new(k as f64, 0.0, 0.0),
+                            toward,
+                        })
+                        .collect(),
+                ],
+            };
+            for m in along(&model, &line) {
+                for t in m.indices.as_chunks::<3>().0 {
+                    let p = t.map(|i| Vec3::from(m.positions[i as usize]));
+                    let face = (p[1] - p[0]).cross(p[2] - p[0]);
+                    let n = Vec3::from(m.normals[t[0] as usize]);
+                    assert!(face.dot(n) > 0.0, "toward {toward}: {face} vs {n}");
+                }
+            }
+        }
+    }
+}

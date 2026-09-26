@@ -27,6 +27,8 @@ pub struct ProfileView {
 }
 
 struct NodeDrag {
+    /// The road and node dragged.
+    road: String,
     node: usize,
     /// Started with G: follows the pointer without a button held.
     modal: bool,
@@ -35,6 +37,13 @@ struct NodeDrag {
 }
 
 impl ProfileView {
+    /// Puts back a node being dragged, when the view goes away or shows another road.
+    pub fn stop(&mut self, editor: &mut Editor) {
+        if self.drag.take().is_some() {
+            editor.cancel_drag();
+        }
+    }
+
     fn fit(&mut self, smp: &Sampled, nodes: impl Iterator<Item = f64>) {
         let (lo, hi) = smp
             .frames
@@ -45,7 +54,8 @@ impl ProfileView {
                 (a.min(z), b.max(z))
             });
         let mid = 0.5 * (lo + hi);
-        let half = (0.5 * (hi - lo) + 2.0).max(0.5 * MIN_SPAN);
+        // Room above for the nodes' numbers.
+        let half = (0.6 * (hi - lo) + 2.0).max(0.5 * MIN_SPAN);
         self.s = (0.0, smp.length.max(1.0));
         self.z = (mid - half, mid + half);
     }
@@ -57,10 +67,18 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         .road()
         .filter(|&r| r < editor.project.roads.len())
     else {
+        view.stop(editor);
         ui.label("Select a road to see its elevation.");
         return;
     };
     let road = editor.project.roads[r].clone();
+    if view
+        .drag
+        .as_ref()
+        .is_some_and(|d| d.road != road.name || d.node >= road.nodes.len())
+    {
+        view.stop(editor);
+    }
     if road.nodes.len() < 2 {
         return;
     }
@@ -73,11 +91,29 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
     let node_s: Vec<f64> = (0..road.nodes.len()).map(|i| smp.s_at(i as f64)).collect();
     let mut fit = view.road.as_deref() != Some(road.name.as_str());
 
+    let mut tool = None;
     ui.horizontal(|ui| {
         ui.strong(format!(
             "Elevation of \"{}\" ({:.0} m)",
             road.name, smp.length
         ));
+        for (label, tip, t) in [
+            (
+                "Smooth",
+                "Smooth the selected nodes' heights (all with none selected)",
+                0,
+            ),
+            ("Flatten", "Put the selected nodes at their mean height", 1),
+            (
+                "Even grade",
+                "A steady slope from the first selected node to the last",
+                2,
+            ),
+        ] {
+            if ui.small_button(label).on_hover_text(tip).clicked() {
+                tool = Some(t);
+            }
+        }
         fit |= ui
             .button("Fit")
             .on_hover_text("Home, or double-click the background")
@@ -91,6 +127,12 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
              Home or double-click the background: fit",
         );
     });
+    match tool {
+        Some(0) => crate::edit::smooth(editor, crate::edit::Smooth::Heights),
+        Some(1) => crate::edit::flatten(editor),
+        Some(2) => crate::edit::even_grade(editor),
+        _ => {}
+    }
     if fit {
         view.road = Some(road.name.clone());
         view.fit(&smp, road.nodes.iter().map(|n| n.pos.z));
@@ -98,7 +140,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
 
     let size = ui.available_size();
     let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(60.0)),
+        egui::vec2(size.x, size.y.max(40.0)),
         egui::Sense::click_and_drag(),
     );
     let rect = resp.rect.shrink(8.0);
@@ -193,6 +235,10 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         } else {
             nodes[j]
         };
+        // Only where there is room for it.
+        if end.x - nodes[i].x < 44.0 {
+            continue;
+        }
         let mid = nodes[i].lerp(end, 0.5);
         painter.text(
             mid + egui::vec2(0.0, 4.0),
@@ -202,21 +248,30 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             grade_color(grade),
         );
     }
+    let mut last_label = f32::NEG_INFINITY;
     for (i, &p) in nodes.iter().enumerate() {
         let selected = editor.selection.nodes.contains(&i);
         let color = if selected {
-            egui::Color32::from_rgb(255, 215, 30)
+            crate::theme::SELECTED_NODE_UI
         } else {
             egui::Color32::from_rgb(90, 230, 255)
         };
         painter.circle_filled(p, if selected { 6.0 } else { 4.5 }, color);
-        painter.text(
-            p + egui::vec2(0.0, -9.0),
-            egui::Align2::CENTER_BOTTOM,
-            i.to_string(),
-            egui::FontId::monospace(10.0),
-            egui::Color32::WHITE,
-        );
+        // Numbers where they have room, and always on selected nodes.
+        if selected || p.x - last_label > 22.0 {
+            last_label = p.x;
+            painter.text(
+                p + egui::vec2(0.0, -9.0),
+                egui::Align2::CENTER_BOTTOM,
+                i.to_string(),
+                egui::FontId::monospace(10.0),
+                if selected {
+                    color
+                } else {
+                    egui::Color32::WHITE
+                },
+            );
+        }
     }
 
     // Where the pointer is along the road.
@@ -263,7 +318,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
             resp.interact_pointer_pos()
                 .and_then(nearest)
                 .map(|i| (i, false))
-        } else if hovered && key(egui::Key::G) {
+        } else if hovered && !ui.ctx().egui_wants_keyboard_input() && key(egui::Key::G) {
             editor
                 .selection
                 .node()
@@ -274,6 +329,7 @@ pub fn profile(ui: &mut egui::Ui, editor: &mut Editor, view: &mut ProfileView) {
         };
         if let Some((node, modal)) = start {
             view.drag = Some(NodeDrag {
+                road: road.name.clone(),
                 node,
                 z: road.nodes[node].pos.z,
                 modal,

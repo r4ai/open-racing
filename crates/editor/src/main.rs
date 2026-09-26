@@ -7,21 +7,38 @@
 //! an agent using `open-racing-trackctl`) are loaded as they happen.
 
 mod assets;
+mod batch;
+mod brush;
+mod clipboard;
+mod commands;
+mod corners;
 mod curve_graph;
+mod edit;
 mod jobs;
+mod lay;
 mod menus;
+mod outliner;
+mod overlay;
+mod popups;
 mod presets;
 mod preview;
 mod profile;
+mod properties;
+mod reference;
+mod sidebar;
 mod state;
+mod theme;
 mod ui;
 mod viewport;
+
+#[cfg(test)]
+mod ui_tests;
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
+use bevy_egui::{EguiPlugin, EguiPreUpdateSet, EguiPrimaryContextPass};
 use clap::Parser;
 use open_racing_track_render::TrackModelPlugin;
 
@@ -41,7 +58,43 @@ struct Args {
     /// View from above.
     #[arg(long)]
     top: bool,
+    /// Start in edit mode on the focused road or spline, with these of its nodes
+    /// selected (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    edit: Option<Vec<usize>>,
+    /// Look at this corner of the focused road (or the main road), by its number.
+    #[arg(long)]
+    corner: Option<usize>,
+    /// Open this tab of the properties: track, markers, terrain, reference, library,
+    /// object, corners, strips, lines or barriers.
+    #[arg(long)]
+    tab: Option<String>,
+    /// How far the camera stands from what it looks at, m.
+    #[arg(long)]
+    distance: Option<f32>,
+    /// Look at this place, x,y in metres (on the ground there).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    at: Option<Vec<f64>>,
+    /// Start with this tool: select, move, rotate, scale, sculpt, paint or scatter.
+    #[arg(long)]
+    tool: Option<String>,
+    /// How far above the horizon the camera looks down from, degrees (90 from above).
+    #[arg(long)]
+    pitch: Option<f32>,
+    /// Which way round the camera stands, degrees anticlockwise from the east.
+    #[arg(long)]
+    yaw: Option<f32>,
+    /// Hide lines, names, stretches and markers drawn over the track.
+    #[arg(long)]
+    clean: bool,
 }
+
+/// A corner to look at once the first build has found the corners, and a properties
+/// tab to open, from the command line.
+#[derive(Resource)]
+pub struct StartCorner(pub usize);
+#[derive(Resource)]
+pub struct StartTab(pub ui::PropTab);
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -76,6 +129,22 @@ fn auto_screenshot(
         exit.write(AppExit::Success);
     }
 }
+
+/// The camera's distance from the command line, set after it has looked at a corner.
+#[derive(Resource)]
+pub struct StartDistance(pub f32);
+
+/// The place looked at from the command line is put on the ground once it is built.
+#[derive(Resource)]
+pub struct StartOnGround;
+
+/// What the command line asks the UI to do once the track is first built.
+pub type Start<'w> = (
+    Option<Res<'w, StartCorner>>,
+    Option<Res<'w, StartTab>>,
+    Option<Res<'w, StartDistance>>,
+    Option<Res<'w, StartOnGround>>,
+);
 
 fn main() {
     let args = Args::parse();
@@ -114,13 +183,85 @@ fn main() {
             }
         }
     }
+    let edit_mode = match &args.edit {
+        Some(nodes) if editor.line().is_some() => {
+            let count = editor.line().map_or(0, |(_, n, _)| n.len());
+            editor.selection.nodes = nodes.iter().copied().filter(|&n| n < count).collect();
+            true
+        }
+        _ => false,
+    };
     let mut orbit = viewport::Orbit::default();
+    let mut app_focus_ground = false;
     viewport::frame_selection(&editor, &mut orbit);
     if args.top {
-        viewport::set_view(&mut orbit, std::f32::consts::FRAC_PI_2, 1.5695);
+        viewport::look(&mut orbit, viewport::ViewDir::Top);
+    }
+    if let Some(p) = args.pitch {
+        orbit.pitch = p.to_radians().clamp(-1.5695, 1.5695);
+    }
+    if let Some(y) = args.yaw {
+        // The orbit's yaw is round Bevy's up axis from its +X (the east), towards +Z (the
+        // south).
+        orbit.yaw = -y.to_radians();
+    }
+    if let Some([x, y]) = args
+        .at
+        .as_deref()
+        .and_then(|a| <[f64; 2]>::try_from(a).ok())
+    {
+        orbit.focus = open_racing_track_render::to_bevy(glam::DVec3::new(x, y, 0.0));
+        app_focus_ground = true;
+    }
+    let mut tool = viewport::Tool::editing(edit_mode);
+    if let Some(name) = &args.tool {
+        match viewport::ToolKind::ALL.into_iter().find(|t| {
+            t.label()
+                .split(' ')
+                .next()
+                .is_some_and(|w| w.eq_ignore_ascii_case(name))
+        }) {
+            Some(t) => tool.active = t,
+            None => {
+                eprintln!("no tool \"{name}\"");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.clean {
+        tool.overlays = viewport::Overlays {
+            lines: false,
+            names: false,
+            indices: false,
+            markers: false,
+            stretches: false,
+            props: false,
+            scatter: true,
+            xray: false,
+        };
     }
 
     let mut app = App::new();
+    if let Some(n) = args.corner {
+        app.insert_resource(StartCorner(n));
+    }
+    if let Some(d) = args.distance {
+        app.insert_resource(StartDistance(d));
+    }
+    if app_focus_ground {
+        app.insert_resource(StartOnGround);
+    }
+    if let Some(name) = &args.tab {
+        match ui::PropTab::named(name) {
+            Some(tab) => {
+                app.insert_resource(StartTab(tab));
+            }
+            None => {
+                eprintln!("no properties tab \"{name}\"");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(path) = args.screenshot {
         app.insert_resource(AutoScreenshot {
             path,
@@ -131,6 +272,7 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "open-racing track editor".into(),
+            resolution: (1600, 900).into(),
             ..default()
         }),
         ..default()
@@ -139,14 +281,22 @@ fn main() {
     .insert_resource(editor)
     .insert_resource(orbit)
     .init_resource::<viewport::ViewRect>()
-    .init_resource::<viewport::Tool>()
+    .insert_resource(tool)
     .init_resource::<preview::Rebuild>()
     .init_resource::<preview::Built>()
     .init_resource::<preview::Props>()
+    .init_resource::<preview::GroundPaint>()
     .init_resource::<preview::SharedCache>()
     .init_resource::<assets::Library>()
     .init_resource::<jobs::Jobs>()
+    .init_resource::<reference::Shown>()
     .add_systems(Startup, viewport::setup)
+    .add_systems(
+        PreUpdate,
+        ui::keep_tab
+            .after(EguiPreUpdateSet::ProcessInput)
+            .before(EguiPreUpdateSet::BeginPass),
+    )
     .add_systems(EguiPrimaryContextPass, ui::ui)
     .add_systems(
         Update,
@@ -154,11 +304,16 @@ fn main() {
             state::watch_file,
             assets::watch,
             assets::dropped,
+            reference::show,
             viewport::input,
+            brush::live,
             viewport::view_input,
             preview::rebuild,
             preview::props,
+            preview::show_items,
+            preview::rows,
             jobs::poll,
+            viewport::xray,
             viewport::gizmos,
             viewport::place_camera,
             auto_screenshot,

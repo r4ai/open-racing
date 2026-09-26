@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::Error;
 use crate::ops::Op;
-use crate::project::{MaterialDef, Project, TextureSource};
+use crate::project::{MaterialDef, ModelRun, Project, Shape, TextureSource};
 
 pub const TEXTURES: &str = "assets/textures";
 pub const MODELS: &str = "assets/models";
@@ -25,7 +25,7 @@ impl Kind {
     pub fn of(path: &Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         match ext.as_str() {
-            "png" | "dds" => Some(Self::Texture),
+            "png" | "dds" | "jpg" | "jpeg" => Some(Self::Texture),
             "glb" | "gltf" => Some(Self::Model),
             _ => None,
         }
@@ -76,7 +76,59 @@ pub fn references(project: &Project) -> Vec<(PathBuf, String)> {
     for p in &project.props {
         refs.push((portable(&p.model), format!("prop {}", p.name)));
     }
+    for r in &project.roads {
+        for w in &r.rows {
+            refs.push((portable(&w.model), format!("row {} of {}", w.name, r.name)));
+        }
+    }
+    for (m, user) in run_models(project) {
+        refs.push((portable(&m.model), user));
+    }
+    for s in &project.scatter {
+        for m in &s.models {
+            refs.push((portable(&m.model), format!("scatter {}", s.name)));
+        }
+    }
+    if let Some(r) = &project.reference {
+        refs.push((portable(&r.image), "reference image".into()));
+    }
+    // Built-in models are made, not read from a file.
+    refs.retain(|(path, _)| crate::shapes::name(path).is_none());
     refs
+}
+
+/// The models repeated along walls and strips, with what uses each: wall and strip
+/// types, and barriers, strips and splines not made from one.
+pub fn run_models(project: &Project) -> Vec<(&ModelRun, String)> {
+    let mut out: Vec<(&ModelRun, String)> = project
+        .wall_styles
+        .iter()
+        .filter_map(|w| Some((w.model.as_ref()?, format!("wall type {}", w.name))))
+        .chain(
+            project
+                .strip_styles
+                .iter()
+                .filter_map(|s| Some((s.model.as_ref()?, format!("strip type {}", s.name)))),
+        )
+        .collect();
+    for r in &project.roads {
+        for b in r.barriers.iter().filter(|b| b.style.is_none()) {
+            if let Some(m) = &b.model {
+                out.push((m, format!("barrier {} of {}", b.name, r.name)));
+            }
+        }
+        for s in r.left.iter().chain(&r.right).filter(|s| s.style.is_none()) {
+            if let Some(m) = &s.model {
+                out.push((m, format!("strip {} of {}", s.name, r.name)));
+            }
+        }
+    }
+    for sp in project.splines.iter().filter(|s| s.style.is_none()) {
+        if let Shape::Wall { model: Some(m), .. } | Shape::Band { model: Some(m), .. } = &sp.shape {
+            out.push((m, format!("spline {}", sp.name)));
+        }
+    }
+    out
 }
 
 /// The asset files under `assets/`, and the files the project refers to anywhere,
@@ -174,7 +226,7 @@ fn copy(from: &Path, to: &Path) -> Result<(), Error> {
 pub fn import(dir: &Path, file: &Path) -> Result<PathBuf, Error> {
     let kind = Kind::of(file).ok_or_else(|| {
         Error::Invalid(format!(
-            "{}: not a texture (.png, .dds) or model (.glb, .gltf)",
+            "{}: not a texture (.png, .jpg, .dds) or model (.glb, .gltf)",
             file.display()
         ))
     })?;
@@ -245,6 +297,93 @@ pub fn repoint(project: &Project, from: &Path, to: &Path) -> Vec<Op> {
             p.model = to.clone();
             ops.push(Op::PutProp { prop: p });
         }
+    }
+    for r in &project.roads {
+        for w in r.rows.iter().filter(|w| portable(&w.model) == from) {
+            let mut w = w.clone();
+            w.model = to.clone();
+            ops.push(Op::PutRow {
+                road: r.name.clone(),
+                row: w,
+            });
+        }
+    }
+    let moved = |m: &Option<ModelRun>| match m {
+        Some(m) if portable(&m.model) == from => Some(Some(ModelRun {
+            model: to.clone(),
+            ..m.clone()
+        })),
+        _ => None,
+    };
+    for w in &project.wall_styles {
+        if let Some(model) = moved(&w.model) {
+            ops.push(Op::PutWallStyle {
+                style: crate::project::WallStyle { model, ..w.clone() },
+            });
+        }
+    }
+    for s in &project.strip_styles {
+        if let Some(model) = moved(&s.model) {
+            ops.push(Op::PutStripStyle {
+                style: crate::project::StripStyle { model, ..s.clone() },
+            });
+        }
+    }
+    for r in &project.roads {
+        for side in [crate::project::Side::Left, crate::project::Side::Right] {
+            for s in r.strips(side).iter().filter(|s| s.style.is_none()) {
+                if let Some(model) = moved(&s.model) {
+                    let mut s = s.clone();
+                    s.model = model;
+                    ops.push(Op::PutStrip {
+                        road: r.name.clone(),
+                        side,
+                        strip: s,
+                        at: None,
+                    });
+                }
+            }
+        }
+    }
+    for r in &project.roads {
+        for b in r.barriers.iter().filter(|b| b.style.is_none()) {
+            if let Some(model) = moved(&b.model) {
+                let mut b = b.clone();
+                b.model = model;
+                ops.push(Op::PutBarrier {
+                    road: r.name.clone(),
+                    barrier: b,
+                });
+            }
+        }
+    }
+    for sp in project.splines.iter().filter(|s| s.style.is_none()) {
+        let mut sp = sp.clone();
+        if let Shape::Wall { model, .. } | Shape::Band { model, .. } = &mut sp.shape
+            && let Some(m) = moved(model)
+        {
+            *model = m;
+            ops.push(Op::PutSpline { spline: sp });
+        }
+    }
+    for s in &project.scatter {
+        if s.models.iter().any(|m| portable(&m.model) == from) {
+            let mut s = s.clone();
+            for m in s.models.iter_mut().filter(|m| portable(&m.model) == from) {
+                m.model = to.clone();
+            }
+            ops.push(Op::PutScatter { scatter: s });
+        }
+    }
+    if let Some(r) = &project.reference
+        && portable(&r.image) == from
+    {
+        ops.push(Op::SetReference {
+            reference: Some(crate::project::Reference {
+                image: to.clone(),
+                ..r.clone()
+            }),
+        });
     }
     ops
 }

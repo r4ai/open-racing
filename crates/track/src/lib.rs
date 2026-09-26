@@ -61,7 +61,13 @@ impl std::error::Error for Error {}
 pub fn content_dir() -> PathBuf {
     std::env::var_os("OPEN_RACING_CONTENT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"))
+        .unwrap_or_else(|| {
+            // The repository's root, two folders up from this crate, without the `..`s
+            // that would show in every path built on it.
+            let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let root = crate_dir.ancestors().nth(2).unwrap_or(crate_dir);
+            root.join("content")
+        })
 }
 
 /// Where packages are looked up by name: `<content>/tracks/<name>/`.

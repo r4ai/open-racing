@@ -101,11 +101,33 @@ pub fn encode(image: Image) -> Vec<u8> {
 }
 
 /// `Ok(None)` for DDS variants that are passed through unchanged.
+/// Decodes a JPEG to RGBA.
+fn decode_jpeg(data: &[u8]) -> Result<Image, String> {
+    use zune_jpeg::zune_core::{
+        bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions,
+    };
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let pixels = decoder.decode().map_err(|e| format!("JPEG: {e:?}"))?;
+    let info = decoder.info().ok_or("JPEG: no header")?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    if pixels.len() != width * height * 4 {
+        return Err("JPEG: unexpected colour layout".into());
+    }
+    Ok(Image {
+        width,
+        height,
+        pixels,
+    })
+}
+
 fn parse(encoded: &[u8]) -> Result<Option<Source>, String> {
     if encoded.starts_with(DDS_MAGIC) {
         parse_dds(encoded)
     } else if encoded.starts_with(b"\x89PNG") {
         Ok(Some(Source::Pixels(decode_png(encoded)?)))
+    } else if encoded.starts_with(&[0xff, 0xd8, 0xff]) {
+        Ok(Some(Source::Pixels(decode_jpeg(encoded)?)))
     } else {
         Err("unknown image format".into())
     }
@@ -451,6 +473,22 @@ fn write_dds(format: Format, width: usize, height: usize, levels: &[Vec<u8>]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpegs_decode_and_prepare() {
+        let jpeg = include_bytes!("testdata/red.jpg");
+        let image = decode(jpeg).unwrap();
+        assert_eq!((image.width, image.height), (8, 4));
+        let [r, g, b, a] = image.pixels[..4] else {
+            unreachable!()
+        };
+        assert!(r > 180 && g < 60 && b < 70 && a == 255, "{r} {g} {b} {a}");
+        assert!(
+            prepare(jpeg, Mips::Complete)
+                .unwrap()
+                .starts_with(DDS_MAGIC)
+        );
+    }
 
     fn checker(size: usize, alpha: bool) -> Image {
         let pixels = (0..size * size)

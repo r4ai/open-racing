@@ -1,6 +1,6 @@
-//! A plan view of a project as an image: the ground in its materials' colours, shaded
-//! by its slope, with a 100 m grid, the nodes numbered, and the start line, sector
-//! lines, grid slots and pit boxes. Lets an agent (or a person without the editor) see
+//! A plan view of a project as an image: the ground in its materials' colours (its
+//! painted layers too), shaded by its slope, the scatters' copies as dots, with a 100 m
+//! grid, the nodes numbered, and the start line, sector lines, grid slots and pit boxes. Lets an agent (or a person without the editor) see
 //! what a project looks like.
 
 use std::collections::HashMap;
@@ -192,6 +192,35 @@ fn material_colours(project: &Project) -> Vec<[f32; 3]> {
         .collect()
 }
 
+/// How a scatter's model looks from above: its colour, linear, and its radius, m. A
+/// built-in model's are its own; a file's, a tree's.
+fn dot(model: &std::path::Path) -> ([f32; 3], f64) {
+    let Some(m) = crate::shapes::name(model).and_then(crate::shapes::model) else {
+        return ([0.03, 0.08, 0.02], 2.5);
+    };
+    // The widest part seen from above is the one on top: its colour and reach.
+    let top = m
+        .meshes
+        .iter()
+        .max_by(|a, b| {
+            let reach = |mesh: &open_racing_track::Mesh| {
+                mesh.positions
+                    .iter()
+                    .map(|p| p[0].hypot(p[1]))
+                    .fold(0.0f32, f32::max)
+            };
+            reach(a).total_cmp(&reach(b))
+        })
+        .expect("a model has meshes");
+    let c = m.look.materials[top.material as usize].base_color;
+    let r = top
+        .positions
+        .iter()
+        .map(|p| p[0].hypot(p[1]))
+        .fold(0.0f32, f32::max);
+    ([c[0] * 1.5, c[1] * 1.5, c[2] * 1.5], r as f64)
+}
+
 /// Draws the project at `size` pixels along its longer side.
 pub fn render(project: &Project, scene: &Scene, size: usize) -> Picture {
     let (mut lo, mut hi) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
@@ -231,16 +260,45 @@ pub fn render(project: &Project, scene: &Scene, size: usize) -> Picture {
             .map_or([0.3; 3], |i| colours[i])
     };
     if let Some(t) = &scene.terrain {
-        let c = colour(&project.terrain.material);
+        let own = colour(&project.terrain.material);
         for m in &t.chunks {
-            canvas.mesh(m, c);
+            canvas.mesh(m, own);
+        }
+        // The painted layers, as the mask blends them.
+        if let Some(mask) = &t.mask {
+            let layers: Vec<[f32; 3]> = std::iter::once(own)
+                .chain(project.terrain.layers.iter().map(|l| colour(&l.material)))
+                .collect();
+            let v = &canvas.view;
+            for y in 0..v.height {
+                for x in 0..v.width {
+                    let p = DVec2::new(
+                        v.lo.x + (x as f64 + 0.5) / v.scale,
+                        v.lo.y + (v.height as f64 - y as f64 - 0.5) / v.scale,
+                    );
+                    let q = (p - mask.lo) / mask.size;
+                    if !(0.0..1.0).contains(&q.x) || !(0.0..1.0).contains(&q.y) {
+                        continue;
+                    }
+                    let w = mask.weights(p);
+                    let mut c = [0.0; 3];
+                    for (layer, &wi) in layers.iter().zip(&w) {
+                        for k in 0..3 {
+                            c[k] += layer[k] * wi as f32 / 255.0;
+                        }
+                    }
+                    let px = &mut canvas.rgb[y * v.width + x];
+                    for k in 0..3 {
+                        px[k] *= c[k] / own[k].max(1e-3);
+                    }
+                }
+            }
         }
     }
-    for b in &scene.roads {
-        for part in &b.visual {
-            let c = colours.get(part.material).copied().unwrap_or([0.3; 3]);
-            canvas.mesh(&part.mesh, c);
-        }
+    let parts = scene.visual_parts();
+    for part in parts {
+        let c = colours.get(part.material).copied().unwrap_or([0.3; 3]);
+        canvas.mesh(&part.mesh, c);
     }
     // Walls as built, seen from above as lines.
     for b in &scene.roads {
@@ -251,6 +309,21 @@ pub fn render(project: &Project, scene: &Scene, size: usize) -> Picture {
                 for (x, y) in [(a, b), (b, c)] {
                     canvas.line(at(x), at(y), 2.0, [0.9, 0.1, 0.6]);
                 }
+            }
+        }
+    }
+
+    // The scatters' copies, as dots about as wide as their models.
+    if !project.scatter.is_empty() {
+        let props: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
+        let ground = scene.ground.build(&props);
+        let keepout = crate::scatter::Keepout::new(&scene.roads);
+        for s in &project.scatter {
+            let looks: Vec<([f32; 3], f64)> = s.models.iter().map(|m| dot(&m.model)).collect();
+            for c in crate::scatter::copies(s, &keepout, &ground) {
+                let (colour, r) = looks[c.model];
+                let q = canvas.view.px(c.pos);
+                canvas.disc(q, (r * c.scale * canvas.view.scale).max(1.0), colour);
             }
         }
     }

@@ -4,6 +4,7 @@
 //! the editor work on the same thing. Changes made to the file from outside are loaded
 //! as they happen.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -24,12 +25,17 @@ pub enum Item {
     Prop(usize),
 }
 
-/// The selected item and, as in Blender's edit mode, its selected nodes.
+/// The selected item and, as in Blender's edit mode, its selected nodes; in object mode,
+/// other items selected with it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
+    /// The active item: the properties show it.
     pub item: Option<Item>,
     /// Selected nodes of the item's line, the active one last.
     pub nodes: Vec<usize>,
+    /// Other items selected with the active one (Shift + click, a box), moved,
+    /// turned, scaled and deleted with it.
+    pub others: Vec<Item>,
 }
 
 impl Selection {
@@ -63,12 +69,41 @@ impl Selection {
     pub fn select(&mut self, item: Item) {
         self.item = Some(item);
         self.nodes.clear();
+        self.others.clear();
     }
 
     /// Selects one node of an item.
     pub fn select_node(&mut self, item: Item, node: usize) {
         self.item = Some(item);
         self.nodes = vec![node];
+        self.others.clear();
+    }
+
+    /// Adds an item to the selection and makes it the active one, or takes it out if
+    /// it is the active one already (Shift + click in Blender's object mode).
+    pub fn toggle_item(&mut self, item: Item) {
+        self.nodes.clear();
+        if self.item == Some(item) {
+            self.item = self.others.pop();
+        } else {
+            self.others.retain(|&o| o != item);
+            if let Some(active) = self.item.replace(item) {
+                self.others.push(active);
+            }
+        }
+    }
+
+    /// Whether an item is selected, active or not.
+    pub fn has(&self, item: Item) -> bool {
+        self.item == Some(item) || self.others.contains(&item)
+    }
+
+    /// Every selected item, the active one first.
+    pub fn items(&self) -> Vec<Item> {
+        self.item
+            .into_iter()
+            .chain(self.others.iter().copied())
+            .collect()
     }
 
     /// Adds a node to the selection, or takes it out if it is the active one already
@@ -86,23 +121,69 @@ impl Selection {
     }
 }
 
+/// An item by its kind and name, which stay the same as the lists change.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Named {
+    Road(String),
+    Spline(String),
+    Prop(String),
+}
+
+/// What the view shows, as Blender's hiding (H), the outliner's locks and local view
+/// (numpad /). Not part of the track.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shown {
+    pub hidden: HashSet<Named>,
+    /// Shown but not picked in the view.
+    pub locked: HashSet<Named>,
+    /// Local view: only these are shown.
+    pub local: Option<HashSet<Named>>,
+    /// Collections hidden, and locked.
+    pub hidden_groups: HashSet<String>,
+    pub locked_groups: HashSet<String>,
+    /// Scatters hidden, by name.
+    pub hidden_scatter: HashSet<String>,
+}
+
+/// A step of the undo history: the project to go back (or on) to, and what the step
+/// did, for the history's list.
+struct Step {
+    project: Project,
+    what: String,
+}
+
+/// What a list of operations does, in a few words.
+fn describe(ops: &[Op]) -> String {
+    let Some(first) = ops.first().map(|o| o.kind()) else {
+        return "Edit".into();
+    };
+    match ops.len() {
+        1 => first.to_string(),
+        n if ops.iter().all(|o| o.kind() == first) => format!("{first} ×{n}"),
+        n => format!("{first} and {} more", n - 1),
+    }
+}
+
 #[derive(Resource)]
 pub struct Editor {
     pub dir: PathBuf,
     pub project: Project,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
+    undo: VecDeque<Step>,
+    redo: Vec<Step>,
     /// Bumped on every change; the preview rebuilds when it moves.
     pub revision: u64,
     /// Modification time of `project.ron` when last written or read here.
     stamp: Option<SystemTime>,
     last_check: Instant,
+    /// When `project.ron` was last copied into the backups.
+    last_backup: Option<Instant>,
     /// Key and time of the last edit, for merging undo steps.
     last_edit: Option<(String, Instant)>,
     pub selection: Selection,
     /// One line about what just happened.
     pub status: String,
     pub dragging: bool,
+    pub shown: Shown,
 }
 
 fn stamp(dir: &Path) -> Option<SystemTime> {
@@ -129,17 +210,20 @@ impl Editor {
             stamp: stamp(&dir),
             dir,
             project,
-            undo: Vec::new(),
+            undo: VecDeque::new(),
             redo: Vec::new(),
             revision: 1,
             last_check: Instant::now(),
+            last_backup: None,
             last_edit: None,
             selection: Selection {
                 item: Some(Item::Road(0)),
                 nodes: Vec::new(),
+                others: vec![],
             },
             status,
             dragging: false,
+            shown: Shown::default(),
         })
     }
 
@@ -155,10 +239,13 @@ impl Editor {
         }
     }
 
-    fn push_undo(&mut self) {
-        self.undo.push(self.project.clone());
+    fn push_undo(&mut self, before: Project, what: &str) {
+        self.undo.push_back(Step {
+            project: before,
+            what: what.to_string(),
+        });
         if self.undo.len() > HISTORY {
-            self.undo.remove(0);
+            self.undo.pop_front();
         }
         self.redo.clear();
     }
@@ -173,35 +260,48 @@ impl Editor {
                 .is_some_and(|(last, t)| last == k && now - *t < COALESCE)
         });
         let before = self.project.clone();
-        match ops::apply_all(&mut self.project, &ops) {
-            Ok(()) => {
-                if !merge && !self.dragging {
-                    self.undo.push(before);
-                    if self.undo.len() > HISTORY {
-                        self.undo.remove(0);
-                    }
-                    self.redo.clear();
-                }
-                self.last_edit = key.map(|k| (k.to_string(), now));
-                self.revision += 1;
-                if !self.dragging {
-                    self.save();
-                }
-                self.clamp_selection();
-                true
-            }
-            Err(e) => {
-                self.status = e.to_string();
-                false
-            }
+        if let Err(e) = ops::apply_all(&mut self.project, &ops) {
+            self.status = e.to_string();
+            return false;
         }
+        if !merge && !self.dragging {
+            self.push_undo(before, &describe(&ops));
+        } else if self.dragging
+            && let Some(step) = self.undo.back_mut()
+        {
+            // A drag is named after what it does.
+            step.what = describe(&ops);
+        }
+        self.last_edit = key.map(|k| (k.to_string(), now));
+        self.revision += 1;
+        if !self.dragging {
+            self.save();
+        }
+        self.clamp_selection();
+        true
+    }
+
+    /// Applies operations as part of the last undo step: what follows from an edit
+    /// just made, such as the same change made to other selected items.
+    pub fn apply_along(&mut self, ops: Vec<Op>) -> bool {
+        if let Err(e) = ops::apply_all(&mut self.project, &ops) {
+            self.status = e.to_string();
+            return false;
+        }
+        self.revision += 1;
+        if !self.dragging {
+            self.save();
+        }
+        self.clamp_selection();
+        true
     }
 
     /// Starts a drag: the edits until `end_drag` undo as one step and are saved at the
     /// end.
     pub fn begin_drag(&mut self) {
         if !self.dragging {
-            self.push_undo();
+            self.push_undo(self.project.clone(), "Drag");
+            self.last_edit = None;
             self.dragging = true;
         }
     }
@@ -217,59 +317,109 @@ impl Editor {
     pub fn cancel_drag(&mut self) {
         if self.dragging {
             self.dragging = false;
-            if let Some(p) = self.undo.pop() {
-                self.project = p;
+            if let Some(step) = self.undo.pop_back() {
+                self.project = step.project;
                 self.revision += 1;
                 self.clamp_selection();
             }
         }
     }
 
+    /// Steps back; not while dragging, whose start is the step it would undo.
     pub fn undo(&mut self) {
-        if let Some(p) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.project, p));
-            self.changed("undone");
+        if !self.can_undo() {
+            return;
+        }
+        if let Some(step) = self.undo.pop_back() {
+            let now = std::mem::replace(&mut self.project, step.project);
+            self.status = format!("undone: {}", step.what);
+            self.redo.push(Step {
+                project: now,
+                what: step.what,
+            });
+            let status = std::mem::take(&mut self.status);
+            self.changed(&status);
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(p) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.project, p));
-            self.changed("redone");
+        if !self.can_redo() {
+            return;
+        }
+        if let Some(step) = self.redo.pop() {
+            let now = std::mem::replace(&mut self.project, step.project);
+            let status = format!("redone: {}", step.what);
+            self.undo.push_back(Step {
+                project: now,
+                what: step.what,
+            });
+            self.changed(&status);
+        }
+    }
+
+    /// What each step that undoes did, the oldest first, and each that redoes, the
+    /// next first.
+    pub fn history(&self) -> (Vec<&str>, Vec<&str>) {
+        (
+            self.undo.iter().map(|s| s.what.as_str()).collect(),
+            self.redo.iter().rev().map(|s| s.what.as_str()).collect(),
+        )
+    }
+
+    /// Undoes or redoes until `steps` steps are left to undo.
+    pub fn go_to(&mut self, steps: usize) {
+        while self.undo.len() > steps && self.can_undo() {
+            self.undo();
+        }
+        while self.undo.len() < steps && self.can_redo() {
+            self.redo();
         }
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        !self.dragging && !self.undo.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        !self.dragging && !self.redo.is_empty()
     }
 
     fn changed(&mut self, what: &str) {
+        // The next edit is a step of its own, whatever its key.
+        self.last_edit = None;
         self.revision += 1;
         self.save();
         self.clamp_selection();
         self.status = what.into();
     }
 
+    /// Drops from the selection what no longer exists: after an undo, a reload or a
+    /// deletion the lists may be shorter.
     fn clamp_selection(&mut self) {
-        if let Some(Item::Prop(p)) = self.selection.item {
-            if p >= self.project.props.len() {
-                self.selection = Selection::default();
-            }
-            return;
-        }
-        let count = self.line().map(|(_, nodes, _)| nodes.len());
+        let p = &self.project;
+        let exists = |item: Item| match item {
+            Item::Road(r) => r < p.roads.len(),
+            Item::Spline(s) => s < p.splines.len(),
+            Item::Prop(i) => i < p.props.len(),
+        };
         let s = &mut self.selection;
-        match count {
-            Some(n) => s.nodes.retain(|&i| i < n),
-            None => *s = Selection::default(),
+        s.others.retain(|&o| exists(o) && Some(o) != s.item);
+        s.others.dedup();
+        match s.item {
+            Some(item) if exists(item) => {}
+            Some(_) => {
+                // The active one went: the next selected takes its place.
+                s.item = s.others.pop();
+                s.nodes.clear();
+            }
+            None => s.nodes.clear(),
         }
+        let count = self.line().map_or(0, |(_, nodes, _)| nodes.len());
+        self.selection.nodes.retain(|&i| i < count);
     }
 
     pub fn save(&mut self) {
+        self.backup();
         match self.project.save(&self.dir) {
             Ok(()) => self.stamp = stamp(&self.dir),
             Err(e) => self.status = format!("not saved: {e}"),
@@ -289,8 +439,8 @@ impl Editor {
         self.stamp = now;
         match Project::load(&self.dir) {
             Ok(p) if p != self.project => {
-                self.push_undo();
-                self.project = p;
+                let before = std::mem::replace(&mut self.project, p);
+                self.push_undo(before, "Reload from disk");
                 self.changed("reloaded: project.ron changed on disk");
             }
             Ok(_) => {}
@@ -310,6 +460,282 @@ impl Editor {
     pub fn line(&self) -> Option<(&str, &[Node], bool)> {
         item_line(&self.project, self.selection.item?)
     }
+
+    /// The nodes an edit of the selected line works on: the selected ones, or all of them
+    /// with none selected.
+    pub fn picked_nodes(&self) -> Vec<usize> {
+        let count = self.line().map_or(0, |(_, nodes, _)| nodes.len());
+        if self.selection.nodes.is_empty() {
+            (0..count).collect()
+        } else {
+            let sel = self.selection.nodes.iter().copied();
+            sel.filter(|&n| n < count).collect()
+        }
+    }
+}
+
+impl Editor {
+    /// An item's kind and name.
+    pub fn named(&self, item: Item) -> Option<Named> {
+        let p = &self.project;
+        Some(match item {
+            Item::Road(r) => Named::Road(p.roads.get(r)?.name.clone()),
+            Item::Spline(s) => Named::Spline(p.splines.get(s)?.name.clone()),
+            Item::Prop(i) => Named::Prop(p.props.get(i)?.name.clone()),
+        })
+    }
+
+    /// The collection an item is kept in.
+    pub fn group(&self, item: Item) -> Option<&str> {
+        let p = &self.project;
+        match item {
+            Item::Road(_) => None,
+            Item::Spline(s) => p.splines.get(s)?.group.as_deref(),
+            Item::Prop(i) => p.props.get(i)?.group.as_deref(),
+        }
+    }
+
+    /// Whether the view shows an item: not hidden, nor its collection, and in local
+    /// view if there is one.
+    pub fn visible(&self, item: Item) -> bool {
+        let Some(n) = self.named(item) else {
+            return false;
+        };
+        !self.shown.hidden.contains(&n)
+            && self
+                .group(item)
+                .is_none_or(|g| !self.shown.hidden_groups.contains(g))
+            && self.shown.local.as_ref().is_none_or(|l| l.contains(&n))
+    }
+
+    /// Whether a click or a box in the view can select an item.
+    pub fn pickable(&self, item: Item) -> bool {
+        self.visible(item)
+            && self
+                .named(item)
+                .is_some_and(|n| !self.shown.locked.contains(&n))
+            && self
+                .group(item)
+                .is_none_or(|g| !self.shown.locked_groups.contains(g))
+    }
+
+    /// The collections splines and props are kept in, in order of name.
+    pub fn groups(&self) -> Vec<String> {
+        let p = &self.project;
+        let mut g: Vec<String> = p
+            .splines
+            .iter()
+            .filter_map(|s| s.group.clone())
+            .chain(p.props.iter().filter_map(|x| x.group.clone()))
+            .collect();
+        g.sort();
+        g.dedup();
+        g
+    }
+
+    /// Puts the selected splines and props in collection `group` (none: out of any), as
+    /// one step.
+    pub fn set_group(&mut self, group: Option<String>) {
+        let p = &self.project;
+        let mut ops = Vec::new();
+        for item in self.selection.items() {
+            match item {
+                Item::Spline(s) => {
+                    if let Some(sp) = p.splines.get(s).filter(|sp| sp.group != group) {
+                        let mut sp = sp.clone();
+                        sp.group = group.clone();
+                        ops.push(Op::PutSpline { spline: sp });
+                    }
+                }
+                Item::Prop(i) => {
+                    if let Some(x) = p.props.get(i).filter(|x| x.group != group) {
+                        let mut x = x.clone();
+                        x.group = group.clone();
+                        ops.push(Op::PutProp { prop: x });
+                    }
+                }
+                Item::Road(_) => {}
+            }
+        }
+        let n = ops.len();
+        if n > 0 && self.apply(ops, None) {
+            self.status = match &group {
+                Some(g) => format!("{n} put in \"{g}\""),
+                None => format!("{n} taken out of their collections"),
+            };
+        }
+    }
+
+    pub fn is_hidden(&self, item: Item) -> bool {
+        self.named(item)
+            .is_some_and(|n| self.shown.hidden.contains(&n))
+    }
+
+    pub fn is_locked(&self, item: Item) -> bool {
+        self.named(item)
+            .is_some_and(|n| self.shown.locked.contains(&n))
+    }
+
+    /// Every road, spline and prop.
+    pub fn all_items(&self) -> Vec<Item> {
+        let p = &self.project;
+        (0..p.roads.len())
+            .map(Item::Road)
+            .chain((0..p.splines.len()).map(Item::Spline))
+            .chain((0..p.props.len()).map(Item::Prop))
+            .collect()
+    }
+
+    /// H: hides what is selected.
+    pub fn hide_selected(&mut self) {
+        let sel = self.selection.items();
+        self.hide(&sel);
+    }
+
+    /// Shift H: hides everything but what is selected.
+    pub fn hide_unselected(&mut self) {
+        let sel = self.selection.items();
+        let others: Vec<Item> = self
+            .all_items()
+            .into_iter()
+            .filter(|i| !sel.contains(i))
+            .collect();
+        self.hide(&others);
+    }
+
+    /// Hides items, dropping them from the selection.
+    pub fn hide(&mut self, items: &[Item]) {
+        let names: Vec<Named> = items.iter().filter_map(|&i| self.named(i)).collect();
+        let n = names.len();
+        self.shown.hidden.extend(names);
+        let sel = &mut self.selection;
+        if sel.item.is_some_and(|i| items.contains(&i)) {
+            sel.item = None;
+            sel.nodes.clear();
+        }
+        sel.others.retain(|o| !items.contains(o));
+        if sel.item.is_none() {
+            sel.item = sel.others.pop();
+        }
+        self.status = format!("{n} hidden (Alt H shows them again)");
+    }
+
+    /// Hides or shows one item, as the outliner's eye.
+    pub fn toggle_hidden(&mut self, item: Item) {
+        if let Some(n) = self.named(item)
+            && !self.shown.hidden.remove(&n)
+        {
+            self.hide(&[item]);
+        }
+    }
+
+    pub fn toggle_locked(&mut self, item: Item) {
+        if let Some(n) = self.named(item)
+            && !self.shown.locked.remove(&n)
+        {
+            self.shown.locked.insert(n);
+        }
+    }
+
+    /// Shows everything hidden again, selecting it, as Blender's Alt H.
+    pub fn reveal(&mut self) {
+        let hidden = std::mem::take(&mut self.shown.hidden);
+        let items: Vec<Item> = self
+            .all_items()
+            .into_iter()
+            .filter(|&i| self.named(i).is_some_and(|n| hidden.contains(&n)))
+            .collect();
+        if !items.is_empty() {
+            let sel = &mut self.selection;
+            sel.nodes.clear();
+            for i in items.iter().copied() {
+                if sel.item.is_none() {
+                    sel.item = Some(i);
+                } else if !sel.has(i) {
+                    sel.others.push(i);
+                }
+            }
+        }
+        self.status = format!("{} shown again", items.len());
+    }
+
+    /// Local view: only the selected items, or back to everything.
+    pub fn toggle_local(&mut self) -> bool {
+        if self.shown.local.take().is_some() {
+            return false;
+        }
+        let items = self.selection.items();
+        if items.is_empty() {
+            self.status = "select what to look at on its own (numpad /)".into();
+            return false;
+        }
+        self.shown.local = Some(items.iter().filter_map(|&i| self.named(i)).collect());
+        true
+    }
+}
+
+/// Folder in a project's directory the backups are kept in.
+pub const BACKUPS: &str = ".backups";
+/// How often `project.ron` is backed up while it changes, and how many copies are kept.
+const BACKUP_EVERY: Duration = Duration::from_secs(5 * 60);
+const BACKUPS_KEPT: usize = 40;
+
+impl Editor {
+    /// Copies `project.ron` as it is into the backups, at most every few minutes, before
+    /// it is written again; the oldest copies go.
+    fn backup(&mut self) {
+        if self.last_backup.is_some_and(|t| t.elapsed() < BACKUP_EVERY) {
+            return;
+        }
+        self.last_backup = Some(Instant::now());
+        let from = self.dir.join(PROJECT_FILE);
+        if !from.is_file() {
+            return;
+        }
+        let dir = self.dir.join(BACKUPS);
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let copied = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::copy(&from, dir.join(format!("project-{secs}.ron"))));
+        if let Err(e) = copied {
+            self.status = format!("backup failed: {e}");
+            return;
+        }
+        let list = backups(&self.dir);
+        for (path, _) in list.iter().skip(BACKUPS_KEPT) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Replaces the project with a backup, as a step that undoes.
+    pub fn restore(&mut self, path: &Path) {
+        let project = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|src| ron::from_str::<Project>(&src).map_err(|e| e.to_string()))
+            .and_then(|p| p.validate().map(|()| p).map_err(|e| e.to_string()));
+        match project {
+            Ok(p) => {
+                let before = std::mem::replace(&mut self.project, p);
+                self.push_undo(before, "Restore backup");
+                self.changed("restored a backup (Ctrl Z undoes it)");
+            }
+            Err(e) => self.status = format!("{}: {e}", path.display()),
+        }
+    }
+}
+
+/// The backups of the project in `dir`, newest first, with when each was made.
+pub fn backups(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
+    let mut list: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(dir.join(BACKUPS))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "ron"))
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
+        .collect();
+    list.sort_by_key(|b| std::cmp::Reverse(b.1));
+    list
 }
 
 /// A road's or spline's name, nodes and whether it is closed.
@@ -381,6 +807,176 @@ mod tests {
                 outgoing: DVec3::X * 4.0
             }
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hiding_locking_and_local_view_follow_names() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-shown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        assert!(editor.apply(
+            vec![Op::AddRoad {
+                name: "pit".into(),
+                closed: false,
+                nodes: vec![DVec3::ZERO, DVec3::X * 50.0],
+                like: None,
+            }],
+            None
+        ));
+        editor.selection.select(Item::Road(1));
+        editor.hide(&[Item::Road(1)]);
+        assert!(!editor.visible(Item::Road(1)) && editor.visible(Item::Road(0)));
+        assert_eq!(editor.selection.item, None, "hidden, so not selected");
+        // Renaming another road does not change what is hidden.
+        assert!(editor.apply(
+            vec![Op::RenameRoad {
+                road: "circuit".into(),
+                to: "gp".into()
+            }],
+            None
+        ));
+        assert!(!editor.visible(Item::Road(1)));
+        editor.reveal();
+        assert!(editor.visible(Item::Road(1)));
+        assert_eq!(
+            editor.selection.item,
+            Some(Item::Road(1)),
+            "shown and selected"
+        );
+        editor.toggle_locked(Item::Road(0));
+        assert!(editor.visible(Item::Road(0)) && !editor.pickable(Item::Road(0)));
+        // Local view shows the selection alone.
+        assert!(editor.toggle_local());
+        assert!(editor.visible(Item::Road(1)) && !editor.visible(Item::Road(0)));
+        assert!(!editor.toggle_local());
+        assert!(editor.visible(Item::Road(0)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collections_hide_lock_and_take_the_selection() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        for (name, y) in [("a", 0.0), ("b", 10.0), ("c", 20.0)] {
+            let spline = crate::presets::named(&editor.project, "kerb")
+                .unwrap()
+                .spline(
+                    &editor.project,
+                    vec![DVec3::new(0.0, y, 0.0), DVec3::new(9.0, y, 0.0)],
+                )
+                .unwrap();
+            let spline = open_racing_track_project::project::Spline {
+                name: name.into(),
+                ..spline
+            };
+            assert!(editor.apply(vec![Op::PutSpline { spline }], None));
+        }
+        editor.selection.select(Item::Spline(0));
+        editor.selection.others = vec![Item::Spline(1), Item::Road(0)];
+        editor.set_group(Some("T1 kerbs".into()));
+        assert_eq!(editor.groups(), vec!["T1 kerbs".to_string()]);
+        assert_eq!(editor.group(Item::Spline(1)), Some("T1 kerbs"));
+        assert_eq!(editor.group(Item::Spline(2)), None);
+        editor.shown.hidden_groups.insert("T1 kerbs".into());
+        assert!(!editor.visible(Item::Spline(0)) && editor.visible(Item::Spline(2)));
+        editor.shown.hidden_groups.clear();
+        editor.shown.locked_groups.insert("T1 kerbs".into());
+        assert!(editor.visible(Item::Spline(0)) && !editor.pickable(Item::Spline(0)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_history_names_steps_and_goes_back_and_on_to_any() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let rename = |to: &str| {
+            vec![Op::SetName {
+                name: to.to_string(),
+            }]
+        };
+        assert!(editor.apply(rename("a"), None));
+        let moves = (0..3)
+            .map(|i| Op::MoveNode {
+                line: "circuit".into(),
+                index: i,
+                pos: DVec3::new(i as f64, 1.0, 0.0),
+            })
+            .collect();
+        assert!(editor.apply(moves, None));
+        assert!(editor.apply(rename("b"), None));
+        assert_eq!(
+            editor.history().0,
+            vec!["SetName", "MoveNode ×3", "SetName"]
+        );
+        editor.go_to(1);
+        assert_eq!(editor.project.name, "a");
+        assert_eq!(editor.history().1, vec!["MoveNode ×3", "SetName"]);
+        editor.go_to(3);
+        assert_eq!(editor.project.name, "b");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_keeps_a_backup_that_restores() {
+        let dir =
+            std::env::temp_dir().join(format!("open-racing-editor-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let before = editor.project.clone();
+        assert!(editor.apply(
+            vec![Op::SetName {
+                name: "renamed".into()
+            }],
+            None
+        ));
+        let list = backups(&dir);
+        assert_eq!(list.len(), 1, "the first save backs up what was there");
+        editor.restore(&list[0].0);
+        assert_eq!(editor.project, before);
+        editor.undo();
+        assert_eq!(editor.project.name, "renamed");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn undo_waits_for_a_drag_and_ends_merging() {
+        let dir = std::env::temp_dir().join(format!(
+            "open-racing-editor-undo-merge-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let crown = |c: f64| {
+            vec![Op::SetRoad {
+                road: "circuit".into(),
+                closed: None,
+                crown: Some(c),
+                surface: None,
+                material: None,
+                resolution: None,
+            }]
+        };
+        assert!(editor.apply(crown(0.1), Some("crown")));
+        editor.begin_drag();
+        assert!(!editor.can_undo(), "no undo in the middle of a drag");
+        editor.undo();
+        assert!(editor.dragging);
+        editor.end_drag();
+        editor.undo();
+
+        // An edit with the same key right after an undo is a step of its own.
+        assert!(editor.apply(crown(0.3), Some("crown")));
+        editor.undo();
+        assert!(editor.apply(crown(0.2), Some("crown")));
+        assert!(!editor.can_redo(), "the undone edit is gone");
+        editor.undo();
+        assert_eq!(editor.project.roads[0].crown, 0.1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

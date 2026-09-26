@@ -4,7 +4,9 @@
 use open_racing_sim::{Surface, SurfaceProps};
 use open_racing_track::texture::Image;
 
-use crate::project::{Alpha, BuiltinTexture, MaterialDef, NamedSurface, TextureSource};
+use crate::project::{
+    Alpha, BuiltinTexture, MaterialDef, NamedSurface, Profile, StripStyle, TextureSource, WallStyle,
+};
 
 /// Edge of the generated textures, texels.
 const SIZE: usize = 256;
@@ -24,6 +26,73 @@ pub fn surfaces() -> Vec<NamedSurface> {
         props: SurfaceProps::of(kind),
     })
     .to_vec()
+}
+
+/// Kerbs, gravel, run-off and grass to lay, from the built-in surfaces and materials.
+pub fn strip_styles() -> Vec<StripStyle> {
+    let s = |name: &str, width, profile, surface: &str, material: &str, fade| StripStyle {
+        name: name.into(),
+        width,
+        profile,
+        surface: surface.into(),
+        material: material.into(),
+        fade,
+        model: None,
+    };
+    vec![
+        s("kerb", 1.2, Profile::Crown(0.03), "kerb", "kerb", 3.0),
+        s("flat kerb", 1.5, Profile::Flat, "kerb", "kerb", 2.0),
+        s(
+            "raised kerb",
+            1.2,
+            Profile::Crown(0.08),
+            "kerb",
+            "kerb",
+            2.0,
+        ),
+        s(
+            "sausage kerb",
+            0.5,
+            Profile::Crown(0.15),
+            "kerb",
+            "kerb",
+            0.5,
+        ),
+        s(
+            "stepped kerb",
+            1.5,
+            Profile::Shape(vec![
+                [0.0, 0.0],
+                [0.05, 0.05],
+                [0.5, 0.05],
+                [0.55, 0.1],
+                [1.0, 0.1],
+            ]),
+            "kerb",
+            "kerb",
+            2.0,
+        ),
+        s("gravel", 15.0, Profile::Slope(0.3), "gravel", "gravel", 8.0),
+        s("run-off", 10.0, Profile::Flat, "runoff", "asphalt", 8.0),
+        s("grass", 12.0, Profile::Slope(0.2), "grass", "grass", 0.0),
+    ]
+}
+
+/// Walls, rails, fences and tyre stacks to put up, from the built-in materials.
+pub fn wall_styles() -> Vec<WallStyle> {
+    let w = |name: &str, height, thickness, material: &str| WallStyle {
+        name: name.into(),
+        height,
+        thickness,
+        material: material.into(),
+        model: None,
+    };
+    vec![
+        w("concrete wall", 1.0, 0.5, "concrete"),
+        w("guard rail", 0.75, 0.0, "armco"),
+        w("tyre wall", 1.0, 1.2, "tyres"),
+        w("catch fence", 4.0, 0.0, "fence"),
+    ]
 }
 
 pub fn materials() -> Vec<MaterialDef> {
@@ -54,6 +123,24 @@ pub fn materials() -> Vec<MaterialDef> {
         },
         m("tyres", T::Tyres, [1.0, 1.0], 0.9, false),
     ]
+}
+
+impl BuiltinTexture {
+    /// A number of its own, for its noise.
+    fn seed(self) -> u32 {
+        match self {
+            Self::Asphalt => 0,
+            Self::Kerb | Self::Stripes(..) => 1,
+            Self::Grass => 2,
+            Self::Gravel => 3,
+            Self::Concrete => 4,
+            Self::Armco => 5,
+            Self::Paint => 6,
+            Self::Dirt => 7,
+            Self::Fence => 8,
+            Self::Tyres => 9,
+        }
+    }
 }
 
 /// Deterministic value noise in [0, 1], tiling every `period` texels.
@@ -100,8 +187,8 @@ pub fn image(texture: BuiltinTexture) -> Image {
     let mut pixels = Vec::with_capacity(SIZE * SIZE * 4);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let n = fbm(x, y, texture as u32 * 101);
-            let grain = noise(x, y, 128, 7 + texture as u32);
+            let n = fbm(x, y, texture.seed() * 101);
+            let grain = noise(x, y, 128, 7 + texture.seed());
             let mut alpha = 1.0;
             let rgb: [f32; 3] = match texture {
                 BuiltinTexture::Asphalt => {
@@ -116,6 +203,11 @@ pub fn image(texture: BuiltinTexture) -> Image {
                     } else {
                         [0.9 * wear, 0.9 * wear, 0.88 * wear]
                     }
+                }
+                BuiltinTexture::Stripes(a, b) => {
+                    let wear = 0.9 + 0.1 * n;
+                    let c = if y < SIZE / 2 { a } else { b };
+                    c.map(|v| v as f32 / 255.0 * wear)
                 }
                 BuiltinTexture::Grass => {
                     let v = 0.7 + 0.3 * n + 0.15 * grain;

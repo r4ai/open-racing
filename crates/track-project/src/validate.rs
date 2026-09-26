@@ -12,6 +12,10 @@ pub struct Report {
     pub lines: Vec<String>,
     /// Problems that make the track unfit to drive.
     pub errors: Vec<String>,
+    /// The test lap, when one was driven.
+    pub drive: Option<Drive>,
+    /// The race-pace lap round the racing line, when the test lap got round.
+    pub pace: Option<Drive>,
 }
 
 impl Report {
@@ -33,15 +37,51 @@ impl std::fmt::Display for Report {
 }
 
 /// Result of driving round a track.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Drive {
+    /// How long a whole lap took, s, if the car got round.
+    pub lap_time: Option<f64>,
+    /// Fastest the car went, m/s.
+    pub top_speed: f64,
     /// Distance covered along the centreline, m.
     pub distance: f64,
     /// Time with every wheel off the track, s.
     pub off_track: f64,
     /// Where the car left the ground (s, m), if it did.
     pub fell_off: Option<f64>,
+    /// Where the car was, twenty times a second, to replay the lap.
+    pub path: Vec<LapSample>,
 }
+
+/// The car at a moment of a test lap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LapSample {
+    /// Seconds from the start.
+    pub t: f64,
+    pub pos: glam::DVec3,
+    /// Which way it points: forward, level.
+    pub heading: f64,
+    /// m/s.
+    pub speed: f64,
+    /// Every wheel off the track.
+    pub off: bool,
+}
+
+/// Whether a car at `p` has left the ground: more than 2 m above what is under it (the
+/// ground mesh, or without one the road's surface carried on sideways), or nothing is.
+fn airborne(track: &Track, p: glam::DVec3, s: f64, d: f64) -> bool {
+    let under = match &track.ground {
+        Some(g) => match g.raycast_down(p + glam::DVec3::Z * 2.0, 50.0) {
+            Some(h) => h.point.z,
+            None => return true,
+        },
+        None => track.pose_at(s, d).0.z,
+    };
+    (p.z - under).abs() > 2.0
+}
+
+/// Steps of the simulation between samples of the path.
+const SAMPLE_EVERY: usize = 50;
 
 /// Follows the centreline in a GT3 car at a steady `speed` for `seconds`.
 pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
@@ -52,9 +92,12 @@ pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
     let mut hint = track.nearest_index(car.state.position);
     let mut s_prev = track.query(car.state.position, hint).s;
     let mut out = Drive {
+        lap_time: None,
+        top_speed: 0.0,
         distance: 0.0,
         off_track: 0.0,
         fell_off: None,
+        path: Vec::new(),
     };
     let steps = (seconds / open_racing_sim::DT) as usize;
     for k in 0..steps {
@@ -76,16 +119,134 @@ pub fn drive(track: &Track, seconds: f64, speed: f64) -> Drive {
         car.step(track, &controls);
 
         let p = car.state.position;
-        let ground = track.pose_at(q.s, q.d).0;
-        if !p.is_finite() || (p.z - ground.z).abs() > 2.0 {
+        if !p.is_finite() || airborne(track, p, q.s, q.d) {
             out.fell_off = Some(q.s);
             break;
         }
-        if car.telemetry.wheels.iter().all(|w| w.surface.off_track()) {
+        let off = car.telemetry.wheels.iter().all(|w| w.surface.off_track());
+        if off {
             out.off_track += open_racing_sim::DT;
+        }
+        if k % SAMPLE_EVERY == 0 {
+            let forward = car.state.orientation * glam::DVec3::X;
+            out.path.push(LapSample {
+                t: k as f64 * open_racing_sim::DT,
+                pos: p,
+                heading: forward.y.atan2(forward.x),
+                speed: car.speed(),
+                off,
+            });
         }
     }
     out
+}
+
+/// Share of the racing line's speeds the race-pace lap is driven at: near a GT3's
+/// limit, with a little in hand for a simple driver.
+pub const PACE: f64 = 0.85;
+
+/// Drives a GT3 round the racing line from the start line at `pace` of the speeds it
+/// allows, for a lap: the lap time, where it went off or left the ground.
+pub fn drive_line(track: &Track, line: &open_racing_sim::RacingLine, pace: f64) -> Drive {
+    let model = Arc::new(CarModel::gt3());
+    let ratio = model.params.steering.ratio;
+    let start = track.layout.start();
+    let speed_at = |s: f64| line.at(track, s).1 * pace;
+    let mut car = Car::new(
+        model,
+        track,
+        start.s,
+        start.d,
+        speed_at(start.s).min(20.0),
+        2,
+    );
+    let mut hint = track.nearest_index(car.state.position);
+    let mut s_prev = track.query(car.state.position, hint).s;
+    let mut out = Drive {
+        lap_time: None,
+        top_speed: 0.0,
+        distance: 0.0,
+        off_track: 0.0,
+        fell_off: None,
+        path: Vec::new(),
+    };
+    let seconds = track.length / 15.0 + 30.0;
+    let steps = (seconds / open_racing_sim::DT) as usize;
+    let mut clutch = open_racing_sim::ClutchAssist::default();
+    for k in 0..steps {
+        let q = track.query(car.state.position, hint);
+        hint = q.index;
+        out.distance += track.delta_s(s_prev, q.s);
+        s_prev = q.s;
+        let t = k as f64 * open_racing_sim::DT;
+        if out.distance >= track.length {
+            out.lap_time = Some(t);
+            break;
+        }
+        let v = car.speed();
+        out.top_speed = out.top_speed.max(v);
+        // Stanley's steering: the line's own curve, the car's heading against the
+        // line's, and back towards it by how far off it the front axle is.
+        let forward = car.state.orientation * glam::DVec3::X;
+        let front = car.state.position + forward * 0.5 * WHEELBASE;
+        let qf = track.query(front, hint);
+        let on = |s: f64| track.pose_at(s, line.at(track, s).0).0;
+        let (a, b, c) = (on(qf.s - 5.0), on(qf.s), on(qf.s + 5.0));
+        let tangent = (c - a).truncate().normalize_or(glam::DVec2::X);
+        let (u, w) = ((b - a).truncate(), (c - b).truncate());
+        let curvature = 2.0 * u.perp_dot(w).atan2(u.dot(w)) / (u.length() + w.length()).max(1e-6);
+        let heading = forward.truncate().normalize_or(glam::DVec2::X);
+        let heading_error = heading.angle_to(tangent);
+        let off_line = (front - b).truncate().perp_dot(tangent);
+        let wheel = (WHEELBASE * curvature).atan()
+            + heading_error
+            + (STANLEY_GAIN * off_line / (v + 1.0)).atan();
+        // Brakes for what is coming: the slowest the line allows in the next second.
+        let target = (0..=10)
+            .map(|i| speed_at(q.s + v * 0.1 * i as f64))
+            .fold(f64::INFINITY, f64::min);
+        let mut controls = Controls {
+            steer_wheel_angle: wheel * ratio,
+            throttle: ((target - v) * 0.5).clamp(0.0, 1.0),
+            brake: ((v - target) * 0.4).clamp(0.0, 1.0),
+            shift: open_racing_sim::AutoShift.shift(&car),
+            ..Default::default()
+        };
+        clutch.apply(&car, &mut controls);
+        car.step(track, &controls);
+
+        let p = car.state.position;
+        if !p.is_finite() || airborne(track, p, q.s, q.d) {
+            out.fell_off = Some(q.s);
+            break;
+        }
+        let off = car.telemetry.wheels.iter().all(|w| w.surface.off_track());
+        if off {
+            out.off_track += open_racing_sim::DT;
+        }
+        if k % SAMPLE_EVERY == 0 {
+            let forward = car.state.orientation * glam::DVec3::X;
+            out.path.push(LapSample {
+                t,
+                pos: p,
+                heading: forward.y.atan2(forward.x),
+                speed: v,
+                off,
+            });
+        }
+    }
+    out
+}
+
+/// A GT3's wheelbase, m, for steering along a line.
+const WHEELBASE: f64 = 2.7;
+/// How hard the race-pace driver steers back towards the line, per m off it.
+const STANLEY_GAIN: f64 = 2.5;
+
+/// Minutes and seconds.
+pub fn lap_time(t: f64) -> String {
+    let m = (t / 60.0).floor();
+    format!("{m:.0}:{:06.3}", t - 60.0 * m)
 }
 
 /// Checks a package; `lap` also drives a lap, which takes a few seconds.
@@ -167,6 +328,60 @@ pub fn check(package: &TrackPackage, lap: bool) -> Report {
                 d.off_track
             ));
         }
+        let drove = r.errors.is_empty();
+        r.drive = Some(d);
+        // The track drives: now at race pace round the racing line, which finds crests
+        // that launch a car, kerbs that throw it and corners it cannot make.
+        if drove {
+            let line = open_racing_sim::RacingLine::new(&track);
+            let d = drive_line(&track, &line, PACE);
+            let time = d.lap_time.map_or("no lap".into(), lap_time);
+            r.lines.push(format!(
+                "race-pace lap ({:.0} % of a GT3 on the racing line): {time}, top {:.0} km/h, {:.1} s off track",
+                PACE * 100.0,
+                d.top_speed * 3.6,
+                d.off_track
+            ));
+            if let Some(s) = d.fell_off {
+                r.lines.push(format!(
+                    "note: at race pace the car left the ground at s = {s:.0} m: a crest or kerb too sharp?"
+                ));
+            } else if d.lap_time.is_none() {
+                r.lines
+                    .push("note: at race pace the car did not get round".into());
+            }
+            r.pace = Some(d);
+        }
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_race_pace_lap_gets_round_the_oval() {
+        let p = crate::Project::new("pace");
+        let mut cache = crate::Cache::default();
+        let package = crate::bake(&p, std::path::Path::new("."), &mut cache).unwrap();
+        let track = package.build_track().unwrap();
+        let line = open_racing_sim::RacingLine::new(&track);
+        let d = drive_line(&track, &line, PACE);
+        println!(
+            "lap {:?}, top {:.0} km/h, off {:.1} s, fell {:?}",
+            d.lap_time.map(lap_time),
+            d.top_speed * 3.6,
+            d.off_track,
+            d.fell_off
+        );
+        assert!(d.fell_off.is_none());
+        assert!(d.lap_time.is_some(), "got round");
+        assert!(d.off_track < 1.0, "{:.1} s off", d.off_track);
+        assert!(
+            d.top_speed > 40.0,
+            "at speed: {:.0} km/h",
+            d.top_speed * 3.6
+        );
+    }
 }

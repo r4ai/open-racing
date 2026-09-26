@@ -3,7 +3,7 @@
 
 use glam::DVec3;
 
-use crate::project::{Node, NodeHandles, Range, Road};
+use crate::project::{Node, NodeHandles, Range, Road, Strip};
 
 /// Subdivisions per segment for measuring arc length.
 const SUBDIVISIONS: usize = 64;
@@ -324,6 +324,41 @@ impl Sampled {
     /// How much of something limited to `ranges` is present at `s`, 0..1, easing in and
     /// out over `fade` metres at the ends of each range. Everywhere when there are no
     /// ranges.
+    /// A strip's width (m) and how much of its profile's height it has, `s` along the
+    /// road: its width all along without keys, else easing from the key before to the
+    /// key after (round the start of a loop), the first and last kept beyond them.
+    pub fn strip_shape(&self, strip: &Strip, s: f64) -> (f64, f64) {
+        let mut keys: Vec<(f64, f64, f64)> = strip
+            .keys
+            .iter()
+            .map(|k| (self.s_at(k.u), k.width, k.height))
+            .collect();
+        keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (Some(&first), Some(&last)) = (keys.first(), keys.last()) else {
+            return (strip.width, 1.0);
+        };
+        let ease = |a: (f64, f64, f64), b: (f64, f64, f64), x: f64, span: f64| {
+            let t = if span > 1e-9 {
+                (x / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t = t * t * (3.0 - 2.0 * t);
+            (a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
+        };
+        if s < first.0 || s >= last.0 {
+            if !self.closed || keys.len() < 2 {
+                let k = if s < first.0 { first } else { last };
+                return (k.1, k.2);
+            }
+            let span = first.0 + self.length - last.0;
+            return ease(last, first, (s - last.0).rem_euclid(self.length), span);
+        }
+        let i = keys.partition_point(|k| k.0 <= s);
+        let (a, b) = (keys[i - 1], keys[i]);
+        ease(a, b, s - a.0, b.0 - a.0)
+    }
+
     pub fn presence(&self, ranges: &[Range], fade: f64, s: f64) -> f64 {
         if ranges.is_empty() {
             return 1.0;
@@ -462,6 +497,30 @@ mod tests {
         let right = (c.eval(eps, 4.0, true) - c.eval(0.0, 4.0, true)) / eps;
         assert!((left + 1.0).abs() < 1e-3, "{left}");
         assert!((right - 2.0).abs() < 1e-3, "{right}");
+    }
+
+    #[test]
+    fn strips_ease_between_their_keys_and_round_a_loop() {
+        use crate::project::StripKey;
+        let road = circle(8, 100.0);
+        let smp = Sampled::new(&road, 2.0);
+        let mut strip = Project::new("t").roads[0].left[0].clone();
+        assert_eq!(smp.strip_shape(&strip, 10.0), (strip.width, 1.0));
+        let key = |u, width, height| StripKey { u, width, height };
+        strip.keys = vec![key(2.0, 1.0, 1.0), key(4.0, 3.0, 2.0)];
+        let s = |u| smp.s_at(u);
+        assert_eq!(smp.strip_shape(&strip, s(2.0)), (1.0, 1.0));
+        let (w, h) = smp.strip_shape(&strip, s(3.0));
+        assert!((w - 2.0).abs() < 0.05 && (h - 1.5).abs() < 0.03, "{w} {h}");
+        // Round the start, from the last key back to the first.
+        let (w, _) = smp.strip_shape(&strip, s(7.0));
+        assert!((w - 2.0).abs() < 0.05, "{w}");
+        // An open road keeps the end keys beyond them.
+        let mut open = road.clone();
+        open.closed = false;
+        let smp = Sampled::new(&open, 2.0);
+        assert_eq!(smp.strip_shape(&strip, smp.s_at(6.0)), (3.0, 2.0));
+        assert_eq!(smp.strip_shape(&strip, 0.0), (1.0, 1.0));
     }
 
     #[test]

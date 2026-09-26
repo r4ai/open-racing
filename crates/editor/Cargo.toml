@@ -18,6 +18,7 @@ bevy.workspace = true
 bevy_egui = "0.42"
 glam.workspace = true
 ron.workspace = true
+serde_json.workspace = true
 serde.workspace = true
 clap.workspace = true
 rfd = "0.17.2"

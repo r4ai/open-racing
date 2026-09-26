@@ -6,6 +6,7 @@ use std::process::Command;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
+use open_racing_track_project::validate::LapSample;
 use open_racing_track_project::{Cache, Project, bake, validate};
 
 pub struct Baked {
@@ -13,6 +14,7 @@ pub struct Baked {
     pub dir: PathBuf,
     pub report: String,
     pub ok: bool,
+    pub lap: Vec<LapSample>,
 }
 
 #[derive(Resource, Default)]
@@ -20,10 +22,17 @@ pub struct Jobs {
     bake: Option<(Task<Result<Baked, String>>, bool)>,
     /// Report of the last bake.
     pub report: Option<String>,
-    pub running: bool,
+    /// Whether the last bake passed its checks.
+    pub passed: Option<bool>,
+    /// The last bake's test lap, to show and replay in the view.
+    pub lap: Vec<LapSample>,
 }
 
 impl Jobs {
+    pub fn running(&self) -> bool {
+        self.bake.is_some()
+    }
+
     /// Bakes the project into `<content>/tracks/<name>/`; `play` launches the game on it
     /// if it passes.
     pub fn bake(&mut self, project: &Project, dir: &Path, play: bool) {
@@ -42,10 +51,17 @@ impl Jobs {
                 dir: out,
                 report: report.to_string(),
                 ok: report.ok(),
+                // The race-pace lap when there was one: where the car brakes, how
+                // fast it goes and where it runs wide say most about the track.
+                lap: report
+                    .pace
+                    .or(report.drive)
+                    .map(|d| d.path)
+                    .unwrap_or_default(),
             })
         });
         self.bake = Some((task, play));
-        self.running = true;
+        self.passed = None;
         self.report = Some("baking and driving a test lap…".into());
     }
 }
@@ -59,11 +75,12 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
     };
     let play = *play;
     jobs.bake = None;
-    jobs.running = false;
     match result {
         Ok(b) => {
             editor.status = format!("baked into {}", b.dir.display());
             jobs.report = Some(b.report);
+            jobs.passed = Some(b.ok);
+            jobs.lap = b.lap;
             if play && b.ok {
                 match launch(&b.name) {
                     Ok(how) => editor.status = format!("driving \"{}\" ({how})", b.name),
@@ -76,6 +93,7 @@ pub fn poll(mut jobs: ResMut<Jobs>, mut editor: ResMut<crate::state::Editor>) {
         Err(e) => {
             editor.status = format!("bake failed: {e}");
             jobs.report = Some(e);
+            jobs.passed = Some(false);
         }
     }
 }

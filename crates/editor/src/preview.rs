@@ -11,27 +11,55 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use open_racing_sim::GroundMesh;
+use open_racing_track_project::corners::{self, Corner};
 use open_racing_track_project::curve::Sampled;
+use open_racing_track_project::inspect::{self, Issue};
 use open_racing_track_project::model::{Model, Placement};
 use open_racing_track_project::project::MaterialDef;
 use open_racing_track_project::road::MeshData;
+use open_racing_track_project::terrain::{PaintMask, TerrainBuild};
 use open_racing_track_project::{Cache, Project, bake};
 use open_racing_track_render::{self as render, TrackMaterial, to_bevy};
 
 use crate::assets::Library;
-use crate::state::Editor;
+use crate::state::{Editor, Item};
 
-/// A mesh of the preview, despawned when it is rebuilt.
+/// A mesh of the preview, despawned when it is rebuilt: of a road or spline, or the
+/// terrain's.
 #[derive(Component)]
-pub struct PreviewMesh;
+pub struct PreviewMesh(Option<Item>);
 
 /// A prop of the preview: `Project::props[i]`, showing the model at this path.
 #[derive(Component)]
 pub struct PreviewProp(usize, PathBuf);
 
-/// Textures and models, shared by the builds in the background and the main thread.
+/// A copy of a model of a row beside road `.0`.
+#[derive(Component)]
+pub struct PreviewRow(usize);
+
+/// A chunk of the terrain: `TerrainBuild::chunks[.0]`. Brushes change its mesh while
+/// they are dragged.
+#[derive(Component)]
+pub struct TerrainChunk(pub usize);
+
+/// Copies of models of scatter `.0`, merged.
+#[derive(Component)]
+pub struct PreviewScatter(pub usize);
+
+/// The painted ground's mask as the renderer has it: brushes paint on it while they
+/// are dragged.
+#[derive(Resource, Default)]
+pub struct GroundPaint {
+    pub mask: Option<Handle<Image>>,
+}
+
+/// Textures and models, shared by the builds in the background and the main thread,
+/// and what the last build made, for the next to build only what changed.
 #[derive(Resource, Clone, Default)]
-pub struct SharedCache(pub Arc<Mutex<Cache>>);
+pub struct SharedCache(
+    pub Arc<Mutex<Cache>>,
+    pub Arc<Mutex<open_racing_track_project::BuildCache>>,
+);
 
 /// What the last finished build knows, for gizmos and picking.
 #[derive(Resource, Default)]
@@ -40,6 +68,14 @@ pub struct Built {
     pub splines: Vec<Sampled>,
     /// Everything solid, to find what the pointer is over.
     pub ground: Option<Arc<GroundMesh>>,
+    /// What will not drive well, as of the last build.
+    pub issues: Vec<Issue>,
+    /// Each road's corners.
+    pub corners: Vec<Vec<Corner>>,
+    /// The terrain, for brushes to shape and paint.
+    pub terrain: Option<Arc<TerrainBuild>>,
+    /// Copies of each scatter's models standing now.
+    pub scattered: Vec<usize>,
     /// Builds finished so far.
     pub count: u64,
 }
@@ -49,8 +85,20 @@ struct Meshes {
     roads: Vec<Sampled>,
     splines: Vec<Sampled>,
     ground: Option<Arc<GroundMesh>>,
-    /// (material, mesh, casts shadows)
-    meshes: Vec<(usize, Mesh, bool)>,
+    issues: Vec<Issue>,
+    corners: Vec<Vec<Corner>>,
+    /// (whose, material, mesh, casts shadows)
+    meshes: Vec<(Option<Item>, usize, Mesh, bool)>,
+    /// Walls models show: whose, the model, and its copies along them.
+    walls: Vec<(Item, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
+    terrain: Option<Arc<TerrainBuild>>,
+    /// Each scatter's models and their copies merged, and how many copies stand.
+    scatter: Vec<(usize, PathBuf, Arc<Model>, Vec<open_racing_track::Mesh>)>,
+    scattered: Vec<usize>,
+    /// Models that could not be read, and why.
+    failed: Vec<String>,
+    /// What the build could not make as asked (elevation data), and why.
+    scene_failed: Vec<String>,
 }
 
 #[derive(Resource, Default)]
@@ -62,9 +110,21 @@ pub struct Rebuild {
     materials: Vec<MaterialDef>,
     assets: u64,
     handles: Vec<Handle<TrackMaterial>>,
+    /// The materials of models walls and scatters show, made once per model and asset
+    /// revision.
+    wall_looks: HashMap<PathBuf, Vec<Handle<TrackMaterial>>>,
+    /// The painted ground's material, made again when the mask or the layers change.
+    ground: Option<GroundLook>,
 }
 
-fn to_mesh(m: MeshData) -> Mesh {
+/// The painted ground's material and what it was made of.
+struct GroundLook {
+    mask: Arc<PaintMask>,
+    layers: Vec<String>,
+    handle: Handle<TrackMaterial>,
+}
+
+pub(crate) fn to_mesh(m: MeshData) -> Mesh {
     render::to_mesh(open_racing_track::Mesh {
         material: 0,
         cast_shadows: false,
@@ -75,24 +135,113 @@ fn to_mesh(m: MeshData) -> Mesh {
     })
 }
 
-fn build(project: Project) -> Meshes {
-    let scene = bake::build(&project);
-    let terrain = project
-        .material_index(&project.terrain.material)
-        .unwrap_or(0);
-    let mut meshes: Vec<_> = scene
-        .visual_parts()
-        .map(|p| (p.material, to_mesh(p.mesh.clone()), p.cast_shadows))
-        .collect();
-    if let Some(t) = scene.terrain {
-        meshes.extend(t.chunks.into_iter().map(|m| (terrain, to_mesh(m), false)));
+fn build(project: Project, cache: SharedCache, dir: PathBuf) -> Meshes {
+    let scene = {
+        let mut built = cache.1.lock().expect("build cache");
+        built.dir = Some(dir.clone());
+        bake::build_with(&project, &mut built)
+    };
+    let cache = cache.0;
+    let (mut walls, mut failed) = (Vec::new(), Vec::new());
+    let lines = scene
+        .roads
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.models.iter().map(move |l| (Item::Road(i), l)))
+        .chain(
+            scene
+                .splines
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| b.models.iter().map(move |l| (Item::Spline(i), l))),
+        );
+    for (item, line) in lines {
+        let model = cache.lock().expect("cache").model(&dir, &line.run.model);
+        match model {
+            Ok(m) => {
+                let copies = open_racing_track_project::model::along(&m, line);
+                walls.push((item, line.run.model.clone(), m, copies));
+            }
+            Err(e) => failed.push(e.to_string()),
+        }
     }
+    let issues = inspect::issues(&project, &scene);
+    let scene_failed = scene.failed.clone();
+    let corners = project
+        .roads
+        .iter()
+        .zip(&scene.roads)
+        .map(|(road, b)| {
+            let start = if road.name == project.main_road {
+                b.sampled.s_at(project.markers.start)
+            } else {
+                0.0
+            };
+            corners::find(&b.sampled, start)
+        })
+        .collect();
+    let parts = scene
+        .roads
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.visual.iter().map(move |p| (Item::Road(i), p)))
+        .chain(
+            scene
+                .splines
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| b.visual.iter().map(move |p| (Item::Spline(i), p))),
+        );
+    let meshes: Vec<_> = parts
+        .map(|(item, p)| {
+            let mesh = to_mesh(p.mesh.clone());
+            (Some(item), p.material, mesh, p.cast_shadows)
+        })
+        .collect();
     let surfaces: Vec<_> = project.surfaces.iter().map(|s| s.props).collect();
+    let ground = Arc::new(scene.ground.build(&surfaces));
+    // The scatters' copies, on the ground as it is now.
+    let keepout = open_racing_track_project::scatter::Keepout::new(&scene.roads);
+    let (mut scatter, mut scattered) = (Vec::new(), Vec::new());
+    for (k, s) in project.scatter.iter().enumerate() {
+        let models: Result<Vec<Arc<Model>>, _> = s
+            .models
+            .iter()
+            .map(|m| cache.lock().expect("cache").model(&dir, &m.model))
+            .collect();
+        let models = match models {
+            Ok(m) => m,
+            Err(e) => {
+                failed.push(e.to_string());
+                scattered.push(0);
+                continue;
+            }
+        };
+        let copies = open_racing_track_project::scatter::copies(s, &keepout, &ground);
+        scattered.push(copies.len());
+        let mut by_model: Vec<Vec<open_racing_track::Mesh>> = vec![Vec::new(); models.len()];
+        for (m, mesh) in open_racing_track_project::scatter::meshes(&models, &copies) {
+            by_model[m].push(mesh);
+        }
+        for ((m, model), meshes) in s.models.iter().zip(models).zip(by_model) {
+            if !meshes.is_empty() {
+                scatter.push((k, m.model.clone(), model, meshes));
+            }
+        }
+    }
     Meshes {
-        ground: Some(Arc::new(scene.ground.build(&surfaces))),
+        ground: Some(ground),
+        terrain: scene.terrain.clone(),
+        scatter,
+        scattered,
         roads: scene.roads.into_iter().map(|b| b.sampled).collect(),
         splines: scene.splines.into_iter().map(|b| b.sampled).collect(),
+        issues,
+        corners,
         meshes,
+        walls,
+        failed,
+        scene_failed,
     }
 }
 
@@ -104,6 +253,7 @@ pub fn rebuild(
     cache: Res<SharedCache>,
     mut state: ResMut<Rebuild>,
     mut built: ResMut<Built>,
+    mut paint: ResMut<GroundPaint>,
     old: Query<Entity, With<PreviewMesh>>,
     formats: Option<Res<CompressedImageFormatSupport>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -130,6 +280,8 @@ pub fn rebuild(
         }
         state.materials = editor.project.materials.clone();
         state.assets = library.revision;
+        state.wall_looks.clear();
+        state.ground = None;
     }
 
     if let Some(task) = &mut state.task
@@ -140,14 +292,14 @@ pub fn rebuild(
             commands.entity(e).despawn();
         }
         let fallback = state.handles.first().cloned().unwrap_or_default();
-        for (material, mesh, shadows) in done.meshes {
+        for (item, material, mesh, shadows) in done.meshes {
             let handle = state
                 .handles
                 .get(material)
                 .cloned()
                 .unwrap_or(fallback.clone());
             let mut e = commands.spawn((
-                PreviewMesh,
+                PreviewMesh(item),
                 Mesh3d(meshes.add(mesh)),
                 MeshMaterial3d(handle),
             ));
@@ -155,17 +307,176 @@ pub fn rebuild(
                 e.insert(NotShadowCaster);
             }
         }
+        // The terrain, a chunk at a time, for brushes to change.
+        if let Some(t) = &done.terrain {
+            let p = &editor.project;
+            let handle = match &t.mask {
+                Some(mask) => {
+                    ground_look(&mut state, p, mask, &mut materials, &mut images, &mut paint)
+                }
+                None => {
+                    paint.mask = None;
+                    let own = p.material_index(&p.terrain.material).unwrap_or(0);
+                    state.handles.get(own).cloned().unwrap_or(fallback.clone())
+                }
+            };
+            for (i, chunk) in t.chunks.iter().enumerate() {
+                commands.spawn((
+                    PreviewMesh(None),
+                    TerrainChunk(i),
+                    Mesh3d(meshes.add(to_mesh(chunk.clone()))),
+                    MeshMaterial3d(handle.clone()),
+                    NotShadowCaster,
+                ));
+            }
+        }
+        // Models along walls, whose item they are, and scatters' copies.
+        let walls = done
+            .walls
+            .into_iter()
+            .map(|(item, path, model, copies)| (Some(item), None, path, model, copies));
+        let scatter = done
+            .scatter
+            .into_iter()
+            .map(|(k, path, model, copies)| (None, Some(k), path, model, copies));
+        for (item, scattered, path, model, copies) in walls.chain(scatter) {
+            let looks = state.wall_looks.entry(path).or_insert_with(|| {
+                render::add_materials(
+                    &model.look,
+                    render::formats(formats.as_deref()),
+                    16,
+                    &mut materials,
+                    &mut images,
+                )
+            });
+            for m in copies {
+                let handle = looks
+                    .get(m.material as usize)
+                    .cloned()
+                    .unwrap_or(fallback.clone());
+                let mut e = commands.spawn((
+                    PreviewMesh(item),
+                    Mesh3d(meshes.add(render::to_mesh(m))),
+                    MeshMaterial3d(handle),
+                ));
+                if let Some(k) = scattered {
+                    e.insert(PreviewScatter(k));
+                }
+            }
+        }
+        let mut issues = done.issues;
+        issues.extend(done.scene_failed.into_iter().map(|text| Issue {
+            text,
+            road: None,
+            s: None,
+        }));
+        issues.extend(done.failed.into_iter().map(|text| Issue {
+            text,
+            road: None,
+            s: None,
+        }));
         built.roads = done.roads;
         built.splines = done.splines;
         built.ground = done.ground;
+        built.issues = issues;
+        built.corners = done.corners;
+        built.terrain = done.terrain;
+        built.scattered = done.scattered;
         built.count += 1;
     }
 
     if state.task.is_none() && state.started != editor.revision {
         let (project, revision) = (editor.project.clone(), editor.revision);
+        let (cache, dir) = (cache.clone(), editor.dir.clone());
         state.started = revision;
-        state.task = Some(AsyncComputeTaskPool::get().spawn(async move { build(project) }));
+        state.task =
+            Some(AsyncComputeTaskPool::get().spawn(async move { build(project, cache, dir) }));
     }
+}
+
+/// The painted ground's material: the ground's own texture and each layer's, blended
+/// by the mask, made again only when they change. Its mask is kept for brushes.
+fn ground_look(
+    state: &mut Rebuild,
+    p: &Project,
+    mask: &Arc<PaintMask>,
+    materials: &mut Assets<TrackMaterial>,
+    images: &mut Assets<Image>,
+    paint: &mut GroundPaint,
+) -> Handle<TrackMaterial> {
+    let layers: Vec<String> = std::iter::once(p.terrain.material.clone())
+        .chain(p.terrain.layers.iter().map(|l| l.material.clone()))
+        .collect();
+    if let Some(g) = &state.ground
+        && Arc::ptr_eq(&g.mask, mask)
+        && g.layers == layers
+    {
+        return g.handle.clone();
+    }
+    let image = mask_image(mask);
+    let mask_handle = match &paint.mask {
+        // The same image, painted afresh: the material need not change.
+        Some(h) if images.get(h).is_some_and(|i| i.size() == image.size()) => {
+            if let Some(mut i) = images.get_mut(h) {
+                *i = image;
+            }
+            h.clone()
+        }
+        _ => images.add(image),
+    };
+    paint.mask = Some(mask_handle.clone());
+    let texture = |m: &str| {
+        let i = p.material_index(m)?;
+        let def = &p.materials[i];
+        let t = materials
+            .get(state.handles.get(i)?)?
+            .base
+            .base_color_texture
+            .clone()?;
+        Some((t, 1.0 / def.tile[0].max(1e-3)))
+    };
+    let mut slots: [Option<(Handle<Image>, f32)>; 4] = Default::default();
+    for (slot, m) in slots.iter_mut().zip(&layers) {
+        *slot = texture(m);
+    }
+    let own = p.material_index(&p.terrain.material);
+    let base = own
+        .and_then(|i| state.handles.get(i))
+        .and_then(|h| materials.get(h))
+        .map(|m| m.base.clone())
+        .unwrap_or_default();
+    let handle = materials.add(render::layered_material(base, mask_handle, slots));
+    state.ground = Some(GroundLook {
+        mask: mask.clone(),
+        layers,
+        handle: handle.clone(),
+    });
+    handle
+}
+
+/// The mask as an image the renderer blends by, kept on the CPU too for brushes to
+/// paint on.
+pub fn mask_image(mask: &PaintMask) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut image = Image::new(
+        Extent3d {
+            width: mask.width as u32,
+            height: mask.height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        mask.rgba.clone(),
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
 }
 
 /// A model ready to show: its meshes with their materials.
@@ -255,7 +566,11 @@ pub fn props(
     }
 
     // Models to load.
-    let wanted: HashSet<&PathBuf> = project.props.iter().map(|p| &p.model).collect();
+    let rows = project
+        .roads
+        .iter()
+        .flat_map(|r| r.rows.iter().map(|w| &w.model));
+    let wanted: HashSet<&PathBuf> = project.props.iter().map(|p| &p.model).chain(rows).collect();
     let missing: Vec<PathBuf> = wanted
         .into_iter()
         .filter(|p| !state.models.contains_key(*p) && !state.failed.contains_key(*p))
@@ -315,5 +630,104 @@ pub fn props(
                     }
                 }
             });
+    }
+}
+
+/// Hides the meshes and props of items hidden or outside local view; the terrain shows
+/// outside local view only.
+pub fn show_items(
+    editor: Res<Editor>,
+    tool: Res<crate::viewport::Tool>,
+    mut meshes: Query<
+        (&PreviewMesh, Option<&PreviewScatter>, &mut Visibility),
+        Without<PreviewProp>,
+    >,
+    mut props: Query<(&PreviewProp, &mut Visibility), Without<PreviewMesh>>,
+) {
+    let want = |shown: bool| {
+        if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    };
+    for (m, scatter, mut v) in &mut meshes {
+        let shown = match m.0 {
+            Some(item) => editor.visible(item),
+            None => editor.shown.local.is_none(),
+        } && scatter.is_none_or(|s| {
+            tool.overlays.scatter
+                && editor
+                    .project
+                    .scatter
+                    .get(s.0)
+                    .is_none_or(|x| !editor.shown.hidden_scatter.contains(&x.name))
+        });
+        v.set_if_neq(want(shown));
+    }
+    for (p, mut v) in &mut props {
+        v.set_if_neq(want(editor.visible(Item::Prop(p.0))));
+    }
+}
+
+/// Shows the copies of the rows of models beside the roads, placed again whenever the
+/// project, the build or the models loaded change.
+#[allow(clippy::too_many_arguments)]
+pub fn rows(
+    mut commands: Commands,
+    editor: Res<Editor>,
+    built: Res<Built>,
+    state: Res<Props>,
+    shown: Query<Entity, With<PreviewRow>>,
+    mut rows: Query<(&PreviewRow, &mut Visibility)>,
+    mut last: Local<(u64, u64, usize)>,
+) {
+    let key = (editor.revision, built.count, state.models.len());
+    if *last != key {
+        *last = key;
+        for e in &shown {
+            commands.entity(e).despawn();
+        }
+        let p = &editor.project;
+        for (i, (road, smp)) in p.roads.iter().zip(&built.roads).enumerate() {
+            for row in &road.rows {
+                let Some(model) = state.models.get(&row.model) else {
+                    continue;
+                };
+                for prop in open_racing_track_project::rows::copies(road, smp, row) {
+                    let at = Placement::of(&prop, built.ground.as_deref());
+                    commands
+                        .spawn((
+                            PreviewRow(i),
+                            Transform {
+                                translation: to_bevy(at.pos),
+                                rotation: Quat::from_rotation_y(at.yaw as f32),
+                                scale: Vec3::splat(at.scale as f32),
+                            },
+                            Visibility::default(),
+                        ))
+                        .with_children(|c| {
+                            for (mesh, material, shadows) in &model.parts {
+                                let mut e = c.spawn((
+                                    Mesh3d(mesh.clone()),
+                                    MeshMaterial3d(material.clone()),
+                                ));
+                                if !shadows {
+                                    e.insert(NotShadowCaster);
+                                }
+                            }
+                        });
+                }
+            }
+        }
+        return;
+    }
+    for (r, mut v) in &mut rows {
+        let shown = editor.visible(Item::Road(r.0));
+        v.set_if_neq(if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
 }

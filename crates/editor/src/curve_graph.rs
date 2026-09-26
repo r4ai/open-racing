@@ -1,4 +1,5 @@
-//! Direct editing of the selected road's width and bank profiles.
+//! Direct editing of the selected road's width and bank profiles, as Blender's graph
+//! editor: along the road left to right (its nodes marked), the value up and down.
 
 use bevy_egui::egui;
 use open_racing_track_project::Key;
@@ -58,12 +59,22 @@ pub struct CurveGraph {
     drag: Option<Drag>,
 }
 
+impl CurveGraph {
+    /// Puts back a key being dragged, when the graph goes away or shows something else.
+    pub fn stop(&mut self, editor: &mut Editor) {
+        if self.drag.take().is_some() {
+            editor.cancel_drag();
+        }
+    }
+}
+
 pub fn panel(
     ui: &mut egui::Ui,
     editor: &mut Editor,
     elevation: &mut ProfileView,
     state: &mut CurveGraph,
 ) {
+    let mut fit_clicked = false;
     ui.horizontal(|ui| {
         for (shown, label) in [
             (Shown::Elevation, "Elevation"),
@@ -72,13 +83,26 @@ pub fn panel(
             (Shown::Bank, "Bank"),
         ] {
             if ui.selectable_label(state.shown == shown, label).clicked() {
-                if state.drag.take().is_some() {
-                    editor.cancel_drag();
-                }
+                state.stop(editor);
+                elevation.stop(editor);
                 state.shown = shown;
                 state.road = None;
                 state.selected = None;
             }
+        }
+        if let Some(curve) = state.shown.curve() {
+            ui.separator();
+            fit_clicked = ui.button("Fit").clicked();
+            ui.weak("controls").on_hover_text(format!(
+                "{}, along the road left to right with its nodes marked below
+                 Double-click: add a key · drag a key or its small handles · right click a key: remove
+                 Alt S / Ctrl T in the view: width / bank at the selected nodes",
+                match curve {
+                    Curve::WidthLeft => "Road width left of the centre line",
+                    Curve::WidthRight => "Road width right of the centre line",
+                    _ => "Bank: positive raises the right edge",
+                }
+            ));
         }
     });
     let Some(curve) = state.shown.curve() else {
@@ -90,9 +114,7 @@ pub fn panel(
         .road()
         .filter(|&i| i < editor.project.roads.len())
     else {
-        if state.drag.take().is_some() {
-            editor.cancel_drag();
-        }
+        state.stop(editor);
         ui.label("Select a road to edit its width or bank.");
         return;
     };
@@ -105,12 +127,9 @@ pub fn panel(
     };
     let period = road.period();
     let scale = state.shown.scale();
-    let fit_clicked = ui.button("Fit").clicked();
     let fit = state.road.as_deref() != Some(&road.name) || fit_clicked;
     if fit {
-        if state.drag.take().is_some() {
-            editor.cancel_drag();
-        }
+        state.stop(editor);
         state.road = Some(road.name.clone());
         state.selected = None;
         let values = (0..=256)
@@ -128,38 +147,55 @@ pub fn panel(
         let pad = ((hi - lo) * 0.15).max(if curve == Curve::Bank { 1.0 } else { 0.5 });
         state.range = (lo - pad, hi + pad);
     }
-    if let Some(i) = state.selected.filter(|&i| i < c.keys.len()) {
-        ui.horizontal(|ui| {
-            let k = c.keys[i];
-            ui.label(format!(
-                "key {i}: u {:.2}, value {:.2}, before {:.2}/u, after {:.2}/u",
-                k.u,
-                k.value * scale,
-                k.slope_in * scale,
-                k.slope_out * scale
-            ));
-            if c.keys.len() > 1 && ui.small_button("Remove").clicked() {
+    let unit = if curve == Curve::Bank { "°" } else { " m" };
+    let mut remove = None;
+    ui.horizontal(|ui| match state.selected.filter(|&i| i < c.keys.len()) {
+        Some(i) => {
+            let mut k = c.keys[i];
+            ui.label(format!("Key {i}"));
+            ui.label("at node");
+            let mut changed = ui
+                .add(
+                    egui::DragValue::new(&mut k.u)
+                        .speed(0.01)
+                        .range(0.0..=period),
+                )
+                .changed();
+            let mut v = k.value * scale;
+            if ui
+                .add(egui::DragValue::new(&mut v).speed(0.05).suffix(unit))
+                .changed()
+            {
+                k.value = v / scale;
+                changed = true;
+            }
+            if changed {
                 let mut keys = c.keys.clone();
-                keys.remove(i);
+                keys[i] = k;
                 editor.apply(
                     vec![Op::SetProfile {
                         road: road.name.clone(),
                         curve,
                         keys,
                     }],
-                    None,
+                    Some(&format!("graph {} {curve:?} {i}", road.name)),
                 );
-                state.selected = None;
             }
-        });
-    }
-    ui.small("Drag a key to move it; drag either small handle to change its slope. Double-click the line to add a key.");
+            if c.keys.len() > 1 && ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+        }
+        None => {
+            ui.weak("Click a key to edit it.");
+        }
+    });
     let size = ui.available_size();
     let (resp, painter) = ui.allocate_painter(
-        egui::vec2(size.x, size.y.max(80.0)),
+        egui::vec2(size.x, size.y.max(40.0)),
         egui::Sense::click_and_drag(),
     );
     let rect = resp.rect.shrink2(egui::vec2(12.0, 10.0));
+    let rect = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 6.0));
     painter.rect_filled(resp.rect, 4.0, egui::Color32::from_gray(24));
     let pad_u = period.max(1.0) * 0.08;
     let x = |u: f64| rect.left() + ((u + pad_u) / (period + 2.0 * pad_u)) as f32 * rect.width();
@@ -185,12 +221,44 @@ pub fn panel(
         egui::Color32::GRAY,
     );
     painter.text(
-        rect.right_bottom(),
-        egui::Align2::RIGHT_BOTTOM,
-        format!("u {period:.1}"),
+        rect.right_top(),
+        egui::Align2::RIGHT_TOP,
+        format!("{} nodes", road.nodes.len()),
         egui::FontId::monospace(10.0),
         egui::Color32::GRAY,
     );
+    // The nodes along the road, the selected ones lit, numbered where there is room.
+    let mut last_label = f32::NEG_INFINITY;
+    for n in 0..=period.round() as usize {
+        let px = x(n as f64);
+        let lit = editor.selection.nodes.contains(&n)
+            || (road.closed && n as f64 >= period && editor.selection.nodes.contains(&0));
+        let color = if lit {
+            crate::theme::SELECTED_NODE_UI
+        } else {
+            egui::Color32::from_gray(60)
+        };
+        painter.line_segment(
+            [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
+            egui::Stroke::new(1.0, color),
+        );
+        let label = if road.closed && n as f64 >= period {
+            0
+        } else {
+            n
+        };
+        if !lit && px - last_label < 22.0 {
+            continue;
+        }
+        last_label = px;
+        painter.text(
+            egui::pos2(px, rect.bottom() + 1.0),
+            egui::Align2::CENTER_TOP,
+            label.to_string(),
+            egui::FontId::monospace(9.0),
+            if lit { color } else { egui::Color32::GRAY },
+        );
+    }
     let line = (0..=256)
         .map(|i| {
             let u = period * i as f64 / 256.0;
@@ -240,7 +308,7 @@ pub fn panel(
     for i in 0..c.keys.len() {
         let p = point(i, Part::Key);
         let color = if state.selected == Some(i) {
-            egui::Color32::YELLOW
+            crate::theme::SELECTED_NODE_UI
         } else {
             egui::Color32::LIGHT_BLUE
         };
@@ -277,6 +345,26 @@ pub fn panel(
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(i, part, _)| (i, part))
     };
+    if resp.secondary_clicked()
+        && c.keys.len() > 1
+        && let Some((i, _)) = resp.interact_pointer_pos().and_then(nearest)
+    {
+        remove = Some(i);
+    }
+    if let Some(i) = remove {
+        let mut keys = c.keys.clone();
+        keys.remove(i);
+        editor.apply(
+            vec![Op::SetProfile {
+                road: road.name.clone(),
+                curve,
+                keys,
+            }],
+            None,
+        );
+        state.selected = None;
+        return;
+    }
     if resp.clicked() {
         state.selected = resp
             .interact_pointer_pos()
@@ -352,11 +440,27 @@ pub fn panel(
         && nearest(p).is_none()
     {
         let u = u_at(p.x).clamp(0.0, if road.closed { period - 1e-4 } else { period });
-        if (y(c.eval(u, period, road.closed) * scale) - p.y).abs() < 10.0
-            && c.keys.iter().all(|k| (k.u - u).abs() > 1e-4)
-        {
+        // Near a node, on it.
+        let u = if (u - u.round()).abs() * (rect.width() as f64 / period.max(1.0)) < 8.0 {
+            u.round()
+                .min(if road.closed { period - 1.0 } else { period })
+        } else {
+            u
+        };
+        if c.keys.iter().all(|k| (k.u - u).abs() > 1e-4) {
+            // On the line: keep the value there; elsewhere, where it was clicked.
+            let on_line = c.eval(u, period, road.closed);
+            let value = if (y(on_line * scale) - p.y).abs() < 10.0 {
+                on_line
+            } else {
+                let v = state.range.1
+                    - (p.y - rect.top()) as f64 / rect.height() as f64
+                        * (state.range.1 - state.range.0);
+                let v = v / scale;
+                if curve == Curve::Bank { v } else { v.max(0.1) }
+            };
             let mut keys = c.keys.clone();
-            keys.push(Key::new(u, c.eval(u, period, road.closed)));
+            keys.push(Key::new(u, value));
             editor.apply(
                 vec![Op::SetProfile {
                     road: road.name.clone(),

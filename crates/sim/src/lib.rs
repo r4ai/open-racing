@@ -33,7 +33,7 @@ pub use controls::{Controls, Shift};
 pub use drivetrain::ShiftPhase;
 pub use engine::{EngineModel, EngineState};
 pub use engine_thermal::{EngineHeat, EngineWear};
-pub use evolution::{RubberMap, TrackCondition, TrackEvolution, parse_grip};
+pub use evolution::{RacingLine, RubberMap, TrackCondition, TrackEvolution, parse_grip};
 pub use ground::{GroundHit, GroundMesh, GroundMeshBuilder, SurfaceProps};
 pub use params::{
     AeroElement, AntiStall, CarModel, CarParams, CoolingParams, Drive, DualClutchControl,

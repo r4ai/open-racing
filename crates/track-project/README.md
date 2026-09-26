@@ -29,7 +29,7 @@ trackctl guide                          # this text
 - **Driving direction.** Roads are driven in the order of their nodes.
 - **Left and right.** These are relative to the driving direction. A positive lateral offset is to the left.
 - **Spline parameter `u`.** Places along a road are given as spline parameters rather than as distances. `u = i` is node `i`, and `u = i + 0.5` is halfway to the next node. On a closed road `u` runs from 0 to the node count and wraps around.
-  - Keys and stretches keep their places when nodes move.
+  - Keys, stretches, corner parts and markers keep their places when nodes move, and when nodes are added or removed.
   - `trackctl info` prints the distance `s` at each node, so you can convert between `u` and `s`.
 - **Names.** Roads, surfaces and materials refer to each other by name. Strips, lines and barriers are named within their road.
 
@@ -64,6 +64,9 @@ trackctl guide                          # this text
                  ranges: [], dash: None)],   // dash: Some((3, 9)) for 3 m on, 9 m off
         barriers: [(name: "wall", side: Left, offset: 20, height: 1, thickness: 0.5,
                     material: "concrete", ranges: [])],   // offset from the road's edge
+        rows: [(name: "trees", model: "assets/models/tree.glb", side: Left, offset: 30,
+                spacing: 15, ranges: [(from: 20, to: 60)],
+                jitter: (offset: 6, yaw: 3.14, scale: 0.3))],   // models beside it
         resolution: 2,               // m between cross-sections
     )],
     splines: [                       // kerbs, walls and fences on their own lines
@@ -72,8 +75,11 @@ trackctl guide                          # this text
          shape: Band(width: 0.6, align: Center, profile: Crown(0.12),
                      surface: "kerb", material: "kerb", lift: 0.01)),
         (name: "tyre wall", closed: false, drape: true,
-         nodes: [(pos: (500, 100, 0)), (pos: (505, 160, 0))], resolution: 2,
+         nodes: [(pos: (500, 100, 0)), (pos: (505, 160, 0), radius: 1.5)], resolution: 2,
          shape: Wall(height: 1, thickness: 0.8, material: "concrete", collide: true)),
+        (name: "T1 gravel", closed: true, drape: true, resolution: 1,
+         nodes: [(pos: (430, 60, 0)), (pos: (470, 50, 0)), (pos: (480, 100, 0))],
+         shape: Area(surface: "gravel", material: "gravel", lift: 0.02)),
     ],
     markers: (
         start: 0.5,                  // start/finish line on the main road (u)
@@ -82,7 +88,25 @@ trackctl guide                          # this text
         pit: Some((road: "pit", speed_limit: 22.2, boxes: [0.5, 0.6],
                    box_side: Right, box_offset: 4)),
     ),
-    terrain: (enabled: true, surface: "grass", material: "grass", margin: 200, cell: 8),
+    terrain: (enabled: true, surface: "grass", material: "grass", margin: 200, cell: 8,
+              heights: Some("assets/terrain/dem.tif"), heights_offset: 0.3,   // optional
+              landforms: [(name: "bank", center: (-560, -600), to: Some((-300, -520)),
+                           radius: 15, falloff: 30, kind: Raise(8)),
+                          (name: "paddock", center: (-750, -500), radius: 60,
+                           falloff: 40, kind: Level(-22))],
+              sculpt: [(brush: Raise, radius: 40, strength: 6,        // brush strokes
+                        points: [(60, 120), (160, 150)])],
+              layers: [(name: "sand", surface: "gravel", material: "gravel")],
+              paint: [(layer: Some("sand"), stroke: (brush: Paint, radius: 10,
+                        strength: 1, points: [(470, 170), (500, 130)]))],
+              paint_texel: 1),                // m per texel of the painted layers
+    scatter: [(name: "woods", models: [(model: "builtin:pine", weight: 3),
+                                       (model: "assets/models/oak.glb", weight: 1)],
+               spacing: 7, scale: (0.8, 1.25), tilt: 0.1, clearance: 3, max_slope: 35,
+               collide: false,
+               strokes: [(brush: Paint, radius: 60, strength: 1,
+                          points: [(-300, -150), (-250, -80)]),
+                         (brush: Erase, radius: 15, strength: 1, points: [(-270, -110)])])],
     surfaces: [(name: "asphalt", props: (kind: Asphalt, grip: 1.0, drag: 0.0)), ...],
     materials: [(name: "asphalt", color: (1, 1, 1), texture: Builtin(Asphalt),
                  tile: (4, 4), roughness: 0.8, reflectance: 0.5), ...,
@@ -106,6 +130,9 @@ trackctl guide                          # this text
   - `Flat` continues the plane of whatever lies inside it.
   - `Crown(h)` rises to `h` in the middle, like a kerb.
   - `Slope(d)` falls by `d` to its outer edge.
+  - `Shape([(x, height)])` is any cross-section: heights (m) at fractions across, joined by straight lines. A shape starting above 0 at `x` 0 steps straight up from the road there (a raised kerb's edge).
+- `keys: [(u, width, height)]` make a strip wider or narrower, and its profile higher or lower (`height` times), at places along the road: it eases from one key to the next and keeps to the first and last beyond them. Without keys it is `width` wide all along.
+- `model: Some((model, length?, bend?, flip?))` repeats a glTF model along it in place of its plain look (its origin at the foot of the strip's inner edge, halfway across; +X along, +Z up, +Y towards the road). Cars still drive on its profile.
 
 **Splines.** A spline is a kerb, wall or fence along its own line, placed anywhere rather than beside a road.
 
@@ -113,6 +140,9 @@ trackctl guide                          # this text
 - `drape: true` lays it on whatever is under the line (roads, then terrain) and ignores the nodes' heights. Otherwise it follows the nodes.
 - The `Band` shape is drivable: it takes a `width` and a profile. It lies centred on the line, or to its `Left` or `Right`. `lift` raises it above what is under it.
 - The `Wall` shape stands on the line. A `thickness` of 0 gives a thin rail or fence, which wants a double-sided material. With `collide: false`, cars pass through it.
+- The `Area` shape fills a closed line (of 3 nodes or more) with a surface and material: a gravel trap, a paddock, a car park, a patch of run-off. It is cut into cells so that, draped, it follows the ground.
+- A node's `radius` (1 when left out) scales the spline there, easing to the next node's: a band's width, a wall's height. A kerb tapering to nothing at its ends has radius 0 at its end nodes.
+- `group: Some("T1 kerbs")` keeps a spline in a collection, as props may be too: the editor's outliner lists, hides, locks and selects a collection as one.
 
 **Surfaces.** A surface's `kind` is one of `Asphalt`, `Kerb`, `Runoff`, `Grass`, `Turf`, `Gravel` or `Dirt`.
 
@@ -120,7 +150,7 @@ trackctl guide                          # this text
 - `drag` adds rolling resistance.
 - `Asphalt` and `Kerb` count as track. Everything else is off track.
 
-**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint`, `Dirt`, `Fence` (chain link, see-through with `alpha: Mask`) and `Tyres`. The alternative is `File("assets/textures/x.png")`, a path relative to the project; `trackctl import` puts files there.
+**Built-in textures.** These are `Asphalt`, `Kerb` (red and white blocks along the road), `Stripes((r, g, b), (r, g, b))` (blocks of any two sRGB colours, 0–255, along the road: a kerb's blue and yellow), `Grass`, `Gravel`, `Concrete`, `Armco`, `Paint`, `Dirt`, `Fence` (chain link, see-through with `alpha: Mask`) and `Tyres`. The alternative is `File("assets/textures/x.png")`, a path relative to the project; `trackctl import` puts files there.
 
 - `tile` gives the metres covered by one repetition of the texture, across the road and then along it.
 - `normal` is a tangent-space normal map, tiled like the texture.
@@ -132,11 +162,43 @@ trackctl guide                          # this text
 - `drape: true` stands it on the road or terrain under `pos`, ignoring the height.
 - `collide: true` makes its triangles walls for the cars. Leave it off for things out of reach, as it costs physics time.
 - Models are Y-up as glTF has them. Their own materials and textures come along; the project's materials are not used.
+- Wherever a model's path is taken (props, rows, scatters, models along walls), a built-in model may be named instead, needing no file: `builtin:pine`, `builtin:tree` (broadleaf), `builtin:poplar`, `builtin:bush`, `builtin:rock`, `builtin:grass` (a tuft) and `builtin:cone` (a traffic cone). They are low in triangles, for thousands of copies.
 - The files a project refers to, and those it does not, are listed by `trackctl assets`.
+
+**Rows.** A row repeats a glTF model beside a road: trees, cones, distance boards, lamp
+posts, spectators' stands, pit garages.
+
+- Each copy stands `offset` metres beyond the road's edge on `side`, facing the road: the
+  model's +X runs along the road and its +Y towards it, as a wall's models do; `yaw`
+  turns it from there.
+- Copies are `spacing` metres apart along `ranges` (everywhere when empty), or one at each
+  place of `at` (spline parameters).
+- `jitter` varies each copy's place across, turn and size by up to that much, the same way
+  every build. `drape` stands them on the ground; `collide` makes them solid.
 
 **Pit lane.** The pit lane is a separate, open road. It starts where it leaves the track and ends where it rejoins.
 
 **Terrain.** The terrain fills in around the roads. It lies just under them and meets their outer edges.
+
+- `heights` is elevation data the ground away from the roads follows (a GeoTIFF, an ESRI ASCII grid or x y z points, in metres, longitudes and latitudes, or WGS 84 UTM metres), with `heights_offset` added. Within about 30 m of the roads' outer edges it eases from their edges to the data.
+- `landforms` shape the ground away from the roads: `Raise(m)` raises a hill or bank (negative digs a hollow) and `Level(m)` levels a pad at that height, round `center` or, with `to`, along the line from `center` to `to`, at full effect out to `radius` and easing to nothing over `falloff` more.
+- `sculpt` is brush strokes shaping the ground after the landforms, in order, as the editor's Sculpt Terrain tool paints them. A stroke acts fully within half its `radius` of its `points` and eases to nothing at `radius`; it acts once wherever it passes. With `fill: true` its points are a closed outline, as a lasso: it acts fully inside it and eases to nothing `radius` outside it (a pad levelled, a patch of gravel, a wood). Its `brush` is `Raise` (by `strength` m; negative lowers), `Smooth` (evens bumps, `strength` 0 to 1), `Flatten(height)` (levels towards that height, `strength` 0 to 1) or `Noise` (roughens by up to `strength` m, the same every build). Near the roads' outer edges strokes and landforms ease out, so the ground still meets the roads. A small `cell` shows finer shapes.
+- `layers` are up to three materials painted over the ground's own (dirt, gravel, sand), each with its `surface`: where a layer covers most of a cell, cars drive on it. `paint` is the strokes painting them in order (brush `Paint`, `strength` 0 to 1 of the way to all of it); `layer: None` paints the ground's own material back. `paint_texel` is the painted texels' size, m.
+
+**Scatters.** A scatter paints models over the ground: woods, bushes, rocks, long grass,
+spectators.
+
+- Copies stand on a grid `spacing` metres apart, each jittered in its cell. Its `strokes`
+  (`Paint` and `Erase`, `strength` 0 to 1, as a sculpting stroke reaches) say how much of
+  it each place has, in order: a light stroke plants some, painting again more, and
+  erasing takes them away. The same strokes give the same copies every build.
+- Each copy is one of `models`, picked in proportion to its `weight`, turned at random
+  and sized from `scale[0]` to `scale[1]` times its own; `tilt` leans it with the slope (0
+  upright, 1 square to it).
+- Copies keep `clearance` metres beyond the roads' outer edges (strips included), off
+  asphalt, kerbs, run-off and gravel (drivable splines and painted layers too), and off
+  ground steeper than `max_slope` degrees. `collide: true` makes them solid for the cars.
+- `trackctl info` counts each scatter's copies and says where they stand.
 
 ## Operations
 
@@ -157,11 +219,15 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `AddRoad` | `name`, `closed`, `nodes: [(x, y, z)]`, `like?` | adds a road. With `like`, it copies that road's cross-section, running along the whole road. |
+| `AddRoad` | `name`, `closed`, `nodes: [(x, y, z)]`, `like?` | adds a road. With `like`, it copies that road's cross-section: widths, banking, and the strips, lines and barriers that run its whole length (not those limited to stretches). |
 | `RemoveRoad` | `road` | removes a road |
 | `RenameRoad` | `road`, `to` | renames a road and every reference to it |
 | `SetRoad` | `road`, `closed?`, `crown?`, `surface?`, `material?`, `resolution?` | sets the given properties |
-| `SetMainRoad` | `road` | makes that road the main road |
+| `SetMainRoad` | `road` | makes that road the main road; the start line moves to its first node and the sectors split it evenly |
+| `PutRoad` | `road` | adds a road as given (every field of `project.ron`'s roads), or replaces the one with the same name |
+| `SplitLine` | `line`, `at`, `to?` | cuts a road or spline at node `at`: an open line becomes two, itself up to the node and `to` from it on; a loop opens there. What lies along a road stays where it was |
+| `JoinLines` | `line`, `with` | joins open line `with` onto the end of open line `line`, turning either round so that their nearest ends meet; strips, lines and barriers of the same name run on across the join |
+| `ReverseLine` | `line` | turns a road or spline round: a road's left and right, banking, and corner entries and exits swap with it |
 
 **Nodes**
 
@@ -171,7 +237,9 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `MoveNode` | `line`, `index`, `pos` | moves a node |
 | `SetNodeHandles` | `line`, `index`, `mode`, `incoming`, `outgoing` | sets both offsets; `mode` is `Auto`, `Aligned` (opposite directions, independent lengths), or `Free` |
 | `RemoveNode` | `line`, `index` | removes a node |
+| `Subdivide` | `line`, `segments` | splits each segment (segment `i` runs from node `i` to the next) at its middle, keeping the line's shape |
 | `SetNodes` | `line`, `nodes` | replaces the whole polyline, with automatic handles |
+| `SetNodeRadius` | `line`, `index`, `radius` | sets a spline node's radius: its band's width or wall's height there, times its own |
 
 **Profiles**
 
@@ -189,12 +257,36 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `RemoveStrip` | `road`, `side`, `name` | removes a strip |
 | `PutLine` / `RemoveLine` | `road`, `line` / `name` | adds, replaces or removes a painted line |
 | `PutBarrier` / `RemoveBarrier` | `road`, `barrier` / `name` | adds, replaces or removes a barrier |
+| `PutRow` / `RemoveRow` | `road`, `row` / `name` | adds, replaces or removes a row of a model beside the road |
+| `PutMark` / `RemoveMark` | `road`, `mark: (name, at, length, from, to, material)` / `name` | paints a mark across the road (a start line, a grid slot, a pit speed limit line) |
+| `FitCorners` | `road` | puts the road's strips and barriers laid round corners back round them; every change to a road does this anyway |
+
+A strip or barrier may carry `style` (the strip or wall type it was made from) and
+`corner: (part, apex, shift)`: laid round a corner (`part` is `Entry`, `Apex`, `Exit` or
+`Outside`), it stays with that corner however the corners are renumbered, and is
+refitted round it whenever the road changes, `shift` metres beyond its usual place. A
+barrier may carry `model: (model, length?, bend?, flip?)`, a glTF model repeated along it
+in place of its plain shape (its +X along the wall, +Z up, +Y towards the road); cars
+still hit the plain wall. A strip's `profile` may be `Shape([(x, height)])`: any
+cross-section, points at fractions across; its `keys` and `model` are described under
+Strips.
+
+**Strip and wall types**
+
+| operation | fields | what it does |
+| --- | --- | --- |
+| `PutStripStyle` / `RemoveStripStyle` | `style: (name, width, profile, surface, material, fade, model?)` / `name` | adds or replaces a kind of kerb, gravel, run-off or verge; strips and splines made from it take its look and model (keeping their widths and keys) |
+| `PutWallStyle` / `RemoveWallStyle` | `style: (name, height, thickness, material, model?)` / `name` | adds or replaces a kind of wall, rail, fence or tyre stack; barriers and walls made from it take its shape and model |
+
+New projects start with kerb, flat, raised, sausage and stepped kerbs, gravel, run-off
+and grass, and concrete walls, guard rails, tyre walls and catch fences.
 
 **Splines**
 
 | operation | fields | what it does |
 | --- | --- | --- |
-| `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence) |
+| `PutSpline` / `RemoveSpline` | `spline` / `name` | adds, replaces or removes a spline (kerb, wall, fence, area) |
+| `RenameSpline` | `name`, `to` | renames a spline; fails if a road or spline has that name |
 
 **Markers and terrain**
 
@@ -203,6 +295,14 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | `SetMarkers` | `start?`, `sectors?`, `grid?` | sets the race markers |
 | `SetPit` | `pit: Some((...))` or `None` | sets or removes the pit lane |
 | `SetTerrain` | `terrain` | sets the terrain |
+| `PutLandform` / `RemoveLandform` | `landform` / `name` | adds or replaces, or removes, a hill, bank, hollow or level pad of the terrain |
+| `AddStroke` | `to`, `stroke: (brush, radius, strength, points)` | adds a brush stroke: `to` is `Sculpt` (the ground's shape), `Paint(Some("sand"))` (a ground layer; `Paint(None)` the ground's own material) or `Scatter("woods")` |
+| `ClearStrokes` | `of` | removes every stroke of `Sculpt`, of one layer's painting, or of a scatter |
+| `PutGroundLayer` / `RemoveGroundLayer` | `layer: (name, surface, material)` / `name` | adds or replaces a painted ground layer, or removes it with its strokes |
+| `PutScatter` / `RemoveScatter` | `scatter` / `name` | adds, replaces or removes a scatter of models |
+| `RenameScatter` | `name`, `to` | renames a scatter |
+| `SetReference` | `reference: Some((image, center, width, rotation?, height?, opacity?, visible?))` or `None` | sets or removes the image the editor shows to trace a real circuit over; not part of the track |
+| `SetGeo` | `geo: Some((lon, lat))` or `None` | sets where the project's (0, 0) lies on the Earth |
 
 **Surfaces and materials**
 
@@ -217,13 +317,66 @@ Fields marked `?` below are optional. The editor records its own edits as the sa
 | --- | --- | --- |
 | `PutProp` / `RemoveProp` | `prop` / `name` | places, replaces or removes a prop |
 | `MoveProp` | `name`, `pos?`, `yaw?`, `scale?` | moves, turns or resizes a prop |
+| `RenameProp` | `name`, `to` | renames a prop; fails if another prop has that name |
+
+## Real circuits
+
+`trackctl centreline <project> <file> --road <name> [--main]` lays a road along a real
+circuit's centreline from a GPS track (`.gpx`), a KML line, a GeoJSON line (as
+OpenStreetMap exports give) or a CSV of `x, y[, z]` metres or `lon, lat[, ele]` under a
+header. Longitudes and latitudes become metres east and north of the project's place on
+the Earth (the first line sets it, `SetGeo`), so later lines line up with it. The line
+is smoothed as a smoothing spline would (GPS jitter does not make wobbly roads or false
+corners) and thinned to the nodes a spline needs to stay within `--tolerance` metres of
+it. The editor does the same from File › Import Centreline, and can lay a satellite
+image or track map (PNG, JPEG, DDS) under the view to trace over, placed by a distance
+measured on it or by the longitudes and latitudes of its edges (the Reference image tab;
+`SetReference`).
+
+`trackctl dem <project> <file> [--lines a,b] [--offset m] [--terrain]` puts roads' and
+splines' nodes on the ground of elevation data: a GeoTIFF (`.tif`), an ESRI ASCII grid
+(`.asc`) or `x y z` points (`.xyz`, `.csv`), in metres, longitudes and latitudes, or
+UTM metres. With `--terrain` the file is copied into the project and the terrain away
+from the roads follows it too. The editor does the same from File › Heights from
+Elevation Data and the Terrain tab, where landforms are added and dragged in the view.
+
+`trackctl kerbs <project> [--corners 1,4] [--style kerb] [--width m] [--no-entry]
+[--no-apex] [--no-exit] [--outside gravel] [--outside-width m] [--wall "tyre wall"]
+[--wall-offset m]` lays kerbs, gravel or run-off and a wall round the road's corners, of
+the project's types. The editor's Corners tab does the same corner by corner, or on
+every corner at once.
+
+`trackctl paint <project>` paints the start/finish line and the grid slots' lines.
+
+`trackctl garages <project> <model> [--offset m]` puts a garage behind each pit box, and
+`trackctl boards <project> <model> [--distances 100,200,300] [--least deg]` distance
+boards before each corner on its outside, both as rows. The editor offers them in Race
+markers › Pit lane and the Corners tab; a road's Rows tab lays any model beside it, and
+its stretches and distance drag in the view.
+
+`trackctl pitlane <project> [--from u --to u] [--left] [--gap m] [--width m] [--boxes n]`
+lays a pit lane road beside a stretch of the main road (by default round the start line):
+it leaves the track, runs parallel to it past the boxes, and rejoins it, with white
+edge lines and speed limit lines across it. The editor offers the same in Race markers ›
+Pit lane.
 
 ## Working on a track
 
 1. Run `trackctl info` for the facts and `trackctl preview` for the picture.
 2. Change the project with `trackctl apply`, or edit `project.ron` directly.
-3. Run `trackctl check --lap` to confirm the track still drives.
+3. Run `trackctl check --lap` to confirm the track still drives. Once the steady test
+   lap gets round, a GT3 drives a lap at race pace round the racing line (85 % of the
+   speeds it allows): the report gives its lap time and top speed, and where it went off
+   or left the ground (a crest or kerb too sharp). The editor's bake shows that lap's
+   path coloured by speed, and View › Replay Test Lap replays it;
+   `cargo run -p open-racing-track-project --example pace_lap -- <project>` prints it
+   second by second.
 
-Warnings point out a radius under 10 m, a grade over 20 %, and a road crossing itself on the level.
+Warnings point out a radius under 10 m, a grade over 20 %, a road crossing itself or
+another road on the level, and roads whose surfaces overlap away from where one starts
+or ends on the other.
+
+`cargo run -p open-racing-track-project --example build_time -- <project>` shows how
+long each step of a rebuild takes, as the editor rebuilds on every edit.
 
 The editor reloads `project.ron` when it changes on disk, so an agent's edits show up live.
