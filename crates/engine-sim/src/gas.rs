@@ -54,42 +54,21 @@ const N: usize = 1001;
 
 /// A species' `cp` and sensible enthalpy on a uniform temperature grid (linear `cp`
 /// between grid points, so the enthalpy is exact and quadratic within each).
-#[derive(Clone, Debug)]
-struct Species {
-    r: f64,
-    cp: Vec<f64>,
-    h: Vec<f64>,
-}
-
-impl Species {
-    fn new(r: f64, anchor: [f64; 18]) -> Self {
-        let cp: Vec<f64> = (0..N)
-            .map(|i| cp_anchor(&anchor, T_LO + i as f64 * T_STEP))
-            .collect();
-        let mut h = vec![0.0; N];
-        for i in 1..N {
-            h[i] = h[i - 1] + 0.5 * (cp[i] + cp[i - 1]) * T_STEP;
-        }
-        let mut s = Self { r, cp, h };
-        let h_ref = s.enthalpy(T_REF);
-        for v in &mut s.h {
-            *v -= h_ref;
-        }
-        s
+fn species(anchor: [f64; 18]) -> (Vec<f64>, Vec<f64>) {
+    let cp: Vec<f64> = (0..N)
+        .map(|i| cp_anchor(&anchor, T_LO + i as f64 * T_STEP))
+        .collect();
+    let mut h = vec![0.0; N];
+    for i in 1..N {
+        h[i] = h[i - 1] + 0.5 * (cp[i] + cp[i - 1]) * T_STEP;
     }
-
-    #[inline]
-    fn enthalpy(&self, t: f64) -> f64 {
-        let (i, d) = cell(t);
-        let slope = (self.cp[i + 1] - self.cp[i]) / T_STEP;
-        self.h[i] + self.cp[i] * d + 0.5 * slope * d * d
+    let (i, d) = cell(T_REF);
+    let slope = (cp[i + 1] - cp[i]) / T_STEP;
+    let h_ref = h[i] + cp[i] * d + 0.5 * slope * d * d;
+    for v in &mut h {
+        *v -= h_ref;
     }
-
-    #[inline]
-    fn cp(&self, t: f64) -> f64 {
-        let (i, d) = cell(t);
-        self.cp[i] + d / T_STEP * (self.cp[i + 1] - self.cp[i])
-    }
+    (cp, h)
 }
 
 /// Grid interval of `t` and the distance into it (the end intervals extend outwards).
@@ -100,11 +79,21 @@ fn cell(t: f64) -> (usize, f64) {
     (i, t - (T_LO + i as f64 * T_STEP))
 }
 
+/// One grid point of both species: cp and its slope to the next point, and the enthalpy.
+#[derive(Clone, Copy, Debug, Default)]
+struct Point {
+    cp: [f64; 2],
+    slope: [f64; 2],
+    h: [f64; 2],
+}
+
 /// The gas model: fresh charge and burned gas.
 #[derive(Clone, Debug)]
 pub struct Gas {
-    air: Species,
-    burned: Species,
+    /// Both species together, so a state's properties take one lookup.
+    grid: Vec<Point>,
+    /// Sensible energy of each species at 150 K, the floor of the pipes' temperatures.
+    floor: [f64; 2],
 }
 
 impl Default for Gas {
@@ -115,22 +104,48 @@ impl Default for Gas {
 
 impl Gas {
     pub fn new() -> Self {
-        Self {
-            air: Species::new(R_AIR, CP_AIR),
-            burned: Species::new(R_BURNED, CP_BURNED),
-        }
+        let (ca, ha) = species(CP_AIR);
+        let (cb, hb) = species(CP_BURNED);
+        let grid = (0..N)
+            .map(|i| {
+                let j = (i + 1).min(N - 1);
+                Point {
+                    cp: [ca[i], cb[i]],
+                    slope: [(ca[j] - ca[i]) / T_STEP, (cb[j] - cb[i]) / T_STEP],
+                    h: [ha[i], hb[i]],
+                }
+            })
+            .collect();
+        let mut g = Self {
+            grid,
+            floor: [0.0; 2],
+        };
+        g.floor = [g.energy(150.0, 0.0), g.energy(150.0, 1.0)];
+        g
     }
 
     /// Gas constant of a mixture with burned fraction `y`, J/(kg·K).
     #[inline]
     pub fn r(&self, y: f64) -> f64 {
-        self.air.r + y * (self.burned.r - self.air.r)
+        R_AIR + y * (R_BURNED - R_AIR)
+    }
+
+    /// cp (J/(kg·K)) and sensible enthalpy (J/kg) together.
+    #[inline]
+    pub fn cp_h(&self, t: f64, y: f64) -> (f64, f64) {
+        let (i, d) = cell(t);
+        let p = &self.grid[i];
+        let cp_a = p.cp[0] + p.slope[0] * d;
+        let cp_b = p.cp[1] + p.slope[1] * d;
+        let h_a = p.h[0] + (p.cp[0] + 0.5 * p.slope[0] * d) * d;
+        let h_b = p.h[1] + (p.cp[1] + 0.5 * p.slope[1] * d) * d;
+        (cp_a + y * (cp_b - cp_a), h_a + y * (h_b - h_a))
     }
 
     /// cp, J/(kg·K).
     #[inline]
     pub fn cp(&self, t: f64, y: f64) -> f64 {
-        (1.0 - y) * self.air.cp(t) + y * self.burned.cp(t)
+        self.cp_h(t, y).0
     }
 
     /// Ratio of specific heats.
@@ -143,13 +158,19 @@ impl Gas {
     /// Sensible enthalpy, J/kg.
     #[inline]
     pub fn enthalpy(&self, t: f64, y: f64) -> f64 {
-        (1.0 - y) * self.air.enthalpy(t) + y * self.burned.enthalpy(t)
+        self.cp_h(t, y).1
     }
 
     /// Sensible internal energy, J/kg.
     #[inline]
     pub fn energy(&self, t: f64, y: f64) -> f64 {
         self.enthalpy(t, y) - self.r(y) * t
+    }
+
+    /// Sensible internal energy at 150 K, J/kg.
+    #[inline]
+    pub fn floor_energy(&self, y: f64) -> f64 {
+        self.floor[0] + y * (self.floor[1] - self.floor[0])
     }
 
     /// Temperature of the mixture whose internal energy is `u`, K.
@@ -161,18 +182,25 @@ impl Gas {
     /// the temperature a step before): `u(T)` is nearly linear, so one or two iterations do.
     #[inline]
     pub fn temperature_near(&self, u: f64, y: f64, guess: f64) -> f64 {
+        self.temperature_cp_near(u, y, guess).0
+    }
+
+    /// As `temperature_near`, with cp there (J/(kg·K), from the last iteration).
+    #[inline]
+    pub fn temperature_cp_near(&self, u: f64, y: f64, guess: f64) -> (f64, f64) {
         let r = self.r(y);
         let mut t = guess.clamp(T_LO, 5000.0);
+        let mut cp = 0.0;
         for _ in 0..8 {
-            let f = self.energy(t, y) - u;
-            let cv = self.cp(t, y) - r;
-            let dt = f / cv;
+            let (c, h) = self.cp_h(t, y);
+            cp = c;
+            let dt = (h - r * t - u) / (c - r);
             t -= dt;
             if dt.abs() < 1e-4 {
                 break;
             }
         }
-        t
+        (t, cp)
     }
 
     /// Speed of sound, m/s.

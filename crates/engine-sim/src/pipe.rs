@@ -47,13 +47,14 @@ impl State {
     pub fn of(gas: &Gas, w: Prim) -> Self {
         let r = gas.r(w.y);
         let t = w.p / (w.rho * r);
-        let gamma = gas.gamma(t, w.y);
+        let (cp, h) = gas.cp_h(t, w.y);
+        let gamma = cp / (cp - r);
         Self {
             w,
             t,
             c: (gamma * r * t).sqrt(),
             gamma,
-            e: gas.energy(t, w.y),
+            e: h - r * t,
         }
     }
 
@@ -391,7 +392,7 @@ impl Pipe {
             let dmom = (dt * tau * perimeter).min(q[1].abs());
             q[1] -= dmom * u.signum();
             // Colburn: St Pr^(2/3) = f/2; Pr ≈ 0.72. Natural convection floor.
-            let cp = gas.cp(st.t, st.w.y);
+            let cp = st.gamma / (st.gamma - 1.0) * gas.r(st.w.y);
             let h_conv = (0.5 * f * rho * u.abs() * cp * 1.25).max(10.0) * self.heat_scale;
             q[2] += dt * h_conv * perimeter * (self.wall_temperature - st.t);
             if q[0] <= 0.0 {
@@ -436,10 +437,10 @@ pub fn primitive_near(gas: &Gas, q: &[f64; 4], a: f64, t_guess: f64) -> State {
     let rho = q[0] / a;
     let u = q[1] / q[0];
     let y = (q[3] / q[0]).clamp(0.0, 1.0);
-    let e = (q[2] / q[0] - 0.5 * u * u).max(gas.energy(150.0, y));
-    let t = gas.temperature_near(e, y, t_guess);
+    let e = (q[2] / q[0] - 0.5 * u * u).max(gas.floor_energy(y));
+    let (t, cp) = gas.temperature_cp_near(e, y, t_guess);
     let r = gas.r(y);
-    let gamma = gas.gamma(t, y);
+    let gamma = cp / (cp - r);
     State {
         w: Prim {
             rho,
