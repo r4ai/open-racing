@@ -182,6 +182,8 @@ pub struct PolicyMeta {
     pub lap_position_obs: bool,
     /// The steering action spans the steering usable at the car's speed.
     pub speed_scaled_steering: bool,
+    /// The recovery aid gets the car going again after a spin.
+    pub recovery_assist: bool,
     /// Anti-lock brakes (absent in older policies).
     #[serde(default)]
     pub abs: bool,
@@ -213,6 +215,7 @@ impl PolicyMeta {
             stint_obs: self.stint_obs,
             lap_position_obs: self.lap_position_obs,
             speed_scaled_steering: self.speed_scaled_steering,
+            recovery_assist: self.recovery_assist,
             abs: self.abs,
             traction_control: self.traction_control,
             max_steer_rate: self.max_steer_rate,

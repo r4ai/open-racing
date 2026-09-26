@@ -12,10 +12,10 @@ mod rng;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use open_racing_sim::{
     AutoShift, BlipAssist, Car, CarModel, CarState, ClutchAssist, Controls, DT, GRAVITY, RubberMap,
-    Shift, Telemetry, Track, TrackEvolution, Weather,
+    Shift, Telemetry, Track, TrackEvolution, Weather, WeatherSettings,
 };
 use rayon::prelude::*;
 
@@ -107,6 +107,22 @@ pub struct EnvConfig {
     pub air_temperature: (f64, f64),
     pub road_heat: (f64, f64),
     pub wind_speed: (f64, f64),
+    /// The app's weather model instead: a sky over the track, the sun warming the
+    /// road where it is not in shade, passing clouds, started from these settings with
+    /// a seed of each episode's own. For evaluating in the conditions the app drives in.
+    pub weather_model: Option<WeatherSettings>,
+    /// Without `random_start`, start from the race layout's first grid slot instead of
+    /// the start line.
+    pub grid_start: bool,
+    /// Share of random starts in a spin: the car turned up to half a turn from the
+    /// track's direction while it slides along it, yawing, so the policy learns to
+    /// catch a spin and to get going again after one.
+    pub spin_start_fraction: f64,
+    /// Get going again after a spin as a driver aid would: when the car is nearly
+    /// stopped facing away from the track, or has stood still for a second, the brake is
+    /// let off, the throttle opened part way and the car steered towards the track
+    /// until it rolls along it again; then the policy drives on.
+    pub recovery_assist: bool,
     pub seed: u64,
 }
 
@@ -141,6 +157,10 @@ impl Default for EnvConfig {
             air_temperature: STANDARD_WEATHER.0,
             road_heat: STANDARD_WEATHER.1,
             wind_speed: STANDARD_WEATHER.2,
+            weather_model: None,
+            grid_start: false,
+            spin_start_fraction: 0.0,
+            recovery_assist: false,
             seed: 0,
         }
     }
@@ -220,6 +240,39 @@ pub struct EpisodeStats {
     pub laps: u32,
     pub last_lap_time: Option<f64>,
     pub best_lap_time: Option<f64>,
+    /// Why the episode ended early, if it did.
+    pub ending: Option<Ending>,
+}
+
+/// What ended an episode early, from the state it ended in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// A hit into a wall or barrier.
+    Wall,
+    /// All four wheels off the track for too long.
+    OffTrack,
+    /// Standing still for too long.
+    Stuck,
+    /// Facing the wrong way for too long.
+    WrongWay,
+    /// The physics produced a non-finite state.
+    Invalid,
+}
+
+impl Ending {
+    fn of(info: &StepInfo) -> Self {
+        if info.invalid {
+            Self::Invalid
+        } else if info.barrier_impact > 0.0 {
+            Self::Wall
+        } else if info.stuck_time > 0.0 {
+            Self::Stuck
+        } else if info.wrong_way_time > 0.0 {
+            Self::WrongWay
+        } else {
+            Self::OffTrack
+        }
+    }
 }
 
 pub struct Env {
@@ -290,7 +343,10 @@ impl Env {
     pub fn reset_from(&mut self, shared: &EnvShared, replay: &[Snapshot]) {
         let cfg = &shared.config;
         let track = &*shared.track;
-        if !cfg.standard_weather() {
+        if let Some(settings) = cfg.weather_model {
+            let seed = self.rng.uniform(0.0, 1.0).to_bits();
+            self.weather = Weather::new(track, None, WeatherSettings { seed, ..settings });
+        } else if !cfg.standard_weather() {
             self.weather = self.draw_weather(cfg);
         }
         if !replay.is_empty()
@@ -318,10 +374,17 @@ impl Env {
             };
             assert!(start >= 0.0 && start < end && end <= track.length);
             self.rng.uniform(start, end)
+        } else if cfg.grid_start {
+            track.layout.start().s
         } else {
             0.0
         };
-        let d = self.rng.uniform(cfg.start_offset.0, cfg.start_offset.1);
+        let grid = if !cfg.random_start && cfg.grid_start {
+            track.layout.start().d
+        } else {
+            0.0
+        };
+        let d = grid + self.rng.uniform(cfg.start_offset.0, cfg.start_offset.1);
         let top = if cfg.safe_start {
             cfg.start_speed.1.min(cornering_speed(track, s))
         } else {
@@ -333,7 +396,24 @@ impl Env {
         if cfg.worn_start_fraction > 0.0 && self.rng.uniform(0.0, 1.0) < cfg.worn_start_fraction {
             self.age_tyres(cfg.worn_start_max_wear);
         }
+        if cfg.random_start
+            && cfg.spin_start_fraction > 0.0
+            && self.rng.uniform(0.0, 1.0) < cfg.spin_start_fraction
+        {
+            self.spin();
+        }
         self.reset_episode(shared);
+    }
+
+    /// Turns the car up to half a turn about its vertical axis, keeping its velocity
+    /// along the track, and sets it yawing: the moment a spin has begun.
+    fn spin(&mut self) {
+        let yaw = self.rng.uniform(-SPIN_START_YAW, SPIN_START_YAW);
+        let rate = self.rng.uniform(-SPIN_START_RATE, SPIN_START_RATE);
+        let st = &mut self.car.state;
+        let up = st.orientation * DVec3::Z;
+        st.orientation = (DQuat::from_axis_angle(up, yaw) * st.orientation).normalize();
+        st.angular_velocity.z = rate;
     }
 
     fn draw_weather(&mut self, cfg: &EnvConfig) -> Weather {
@@ -446,7 +526,8 @@ impl Env {
         let prev_steer = self.input.steer;
         let wear_before: f64 = self.car.state.wheels.iter().map(|w| w.tire.wear).sum();
         let substeps = cfg.substeps();
-        self.actuator.decide(cfg, action);
+        self.actuator
+            .decide(cfg, &self.car, track, self.lap.hint(), action);
         let mut barrier_impact: f64 = 0.0;
         for _ in 0..substeps {
             let controls = self.actuator.controls(cfg, &self.car, action);
@@ -562,6 +643,7 @@ impl Env {
 
         let done = shared.termination.done(&info);
         if done == Some(Done::Terminated) {
+            self.stats.ending = Some(Ending::of(&info));
             self.crash_snapshot = self.state_before_crash();
         } else if done.is_none() && cfg.replay_start_fraction > 0.0 {
             self.record();
@@ -599,35 +681,159 @@ pub struct Actuator {
     shift: Shift,
     /// Works the clutch pedal: the agent drives with its two feet on throttle and brake.
     clutch: ClutchAssist,
+    /// The recovery aid's steering, throttle and brake while it drives (see
+    /// [`EnvConfig::recovery_assist`]), and how long the car has stood still, s.
+    recovery: Option<[f32; 3]>,
+    still: f64,
+    /// Which way the recovery aid turns a car pointing back down the track (+1 left,
+    /// -1 right, 0 not chosen).
+    turn: f32,
+    /// How long the recovery aid has made no headway going forward, and how long it
+    /// has been backing up (0 while going forward), s.
+    blocked: f64,
+    reversing: f64,
 }
 
 impl Actuator {
     /// Call once per agent decision, before its physics steps: the gear request of
-    /// `action` is sent on the next physics step only, like one press of a paddle.
-    pub fn decide(&mut self, cfg: &EnvConfig, action: &[f32]) {
+    /// `action` is sent on the next physics step only, like one press of a paddle, and
+    /// the recovery aid takes over or hands back.
+    pub fn decide(
+        &mut self,
+        cfg: &EnvConfig,
+        car: &Car,
+        track: &Track,
+        hint: usize,
+        action: &[f32],
+    ) {
         self.shift = match action.get(MAX_ACTION_DIM - 1) {
             Some(&a) if !cfg.auto_shift && a > SHIFT_THRESHOLD => Shift::Up,
             Some(&a) if !cfg.auto_shift && a < -SHIFT_THRESHOLD => Shift::Down,
             _ => Shift::None,
         };
+        if cfg.recovery_assist {
+            self.recover(cfg, car, track, hint);
+        }
+    }
+
+    /// The recovery aid: aims at the track [`RECOVERY_AIM`] m ahead of the car.
+    fn recover(&mut self, cfg: &EnvConfig, car: &Car, track: &Track, hint: usize) {
+        let st = &car.state;
+        let speed = car.speed();
+        self.still = if speed < RECOVERY_STILL_SPEED {
+            self.still + 1.0 / cfg.control_hz
+        } else {
+            0.0
+        };
+        let q = track.locate(st.position, hint);
+        let aim =
+            st.orientation.inverse() * (track.sample_at(q.s + RECOVERY_AIM).pos - st.position);
+        let error = aim.y.atan2(aim.x);
+        let engage = (speed < RECOVERY_ENGAGE_SPEED && error.abs() > RECOVERY_ENGAGE_ANGLE)
+            || self.still > RECOVERY_STILL_TIME;
+        let release = speed > RECOVERY_RELEASE_SPEED && error.abs() < RECOVERY_RELEASE_ANGLE;
+        if self.recovery.is_none() && !engage || self.recovery.is_some() && release {
+            self.recovery = None;
+            self.turn = 0.0;
+            self.blocked = 0.0;
+            self.reversing = 0.0;
+            return;
+        }
+        // Blocked going forward (its nose against a barrier, or too little room to turn
+        // round): back up on the opposite lock, as in a three-point turn.
+        let dt = 1.0 / cfg.control_hz;
+        if self.reversing > 0.0 {
+            self.reversing += dt;
+            if self.reversing > RECOVERY_REVERSE_TIME {
+                self.reversing = 0.0;
+                self.blocked = 0.0;
+            } else {
+                let steer = if self.turn != 0.0 {
+                    -self.turn
+                } else {
+                    -(error.signum() as f32)
+                };
+                self.recovery = Some([steer, RECOVERY_THROTTLE, 0.0]);
+                return;
+            }
+        }
+        self.blocked = if speed < RECOVERY_STILL_SPEED && st.drivetrain.gear > 0 {
+            self.blocked + dt
+        } else {
+            0.0
+        };
+        if self.blocked > RECOVERY_BLOCKED_TIME {
+            self.reversing = dt;
+            self.recovery = Some([0.0, 0.0, 1.0]);
+            return;
+        }
+        // Pointing back down the track, turn towards the side with more room: the
+        // car's left is the track's right, so from the track's left turn left. Keep
+        // that way until the car has turned round.
+        let steer = if error.abs() > RECOVERY_U_TURN_ANGLE {
+            if self.turn == 0.0 {
+                self.turn = if q.d > 0.0 { 1.0 } else { -1.0 };
+            }
+            self.turn
+        } else {
+            self.turn = 0.0;
+            (error / RECOVERY_FULL_LOCK_ANGLE).clamp(-1.0, 1.0) as f32
+        };
+        // Turn round slowly; accelerate once pointing along the track.
+        let turning = error.abs() > RECOVERY_ALIGNED_ANGLE;
+        let throttle = if turning && speed > RECOVERY_TURN_SPEED {
+            0.0
+        } else {
+            RECOVERY_THROTTLE
+        };
+        let brake = if turning && speed > RECOVERY_TURN_SPEED + 1.5 {
+            RECOVERY_BRAKE
+        } else {
+            0.0
+        };
+        self.recovery = Some([steer, throttle, brake]);
+    }
+
+    /// Whether the recovery aid drives.
+    pub fn recovering(&self) -> bool {
+        self.recovery.is_some()
+    }
+
+    /// While the recovery aid backs up: into reverse once nearly stopped, never up.
+    fn reverse_shift(car: &Car) -> Shift {
+        let dt = &car.state.drivetrain;
+        if dt.shifting() || dt.gear < 0 || car.speed() > RECOVERY_STILL_SPEED {
+            Shift::None
+        } else {
+            Shift::Down
+        }
+    }
+
+    /// `action`, or the recovery aid's while it drives.
+    fn effective<'a>(&'a self, action: &'a [f32]) -> &'a [f32] {
+        self.recovery.as_ref().map_or(action, |r| &r[..])
     }
 
     pub fn controls(&mut self, cfg: &EnvConfig, car: &Car, action: &[f32]) -> Controls {
+        let action = self.effective(action);
+        let (steer, throttle, brake) = (action[0], action[1], action[2]);
         let lock = car.model.params.steering.lock;
         let range = if cfg.speed_scaled_steering {
             steer_range(car)
         } else {
             1.0
         };
-        let target = f64::from(action[0]).clamp(-1.0, 1.0) * range * lock;
+        let target = f64::from(steer).clamp(-1.0, 1.0) * range * lock;
         let max_delta = cfg.max_steer_rate * DT;
         self.steer += (target - self.steer).clamp(-max_delta, max_delta);
         let mut controls = Controls {
             steer_wheel_angle: self.steer,
-            throttle: f64::from(action[1]).clamp(0.0, 1.0),
-            brake: self.brake(cfg, car, f64::from(action[2]).clamp(0.0, 1.0)),
+            throttle: f64::from(throttle).clamp(0.0, 1.0),
+            brake: self.brake(cfg, car, f64::from(brake).clamp(0.0, 1.0)),
             clutch: 0.0,
-            shift: if cfg.auto_shift {
+            shift: if self.reversing > 0.0 {
+                Self::reverse_shift(car)
+            } else if cfg.auto_shift {
                 AutoShift.shift(car)
             } else {
                 self.take_shift(car)
@@ -690,6 +896,7 @@ impl Actuator {
 
     /// The input actually applied, as seen by the observation.
     pub fn applied(&self, car: &Car, action: &[f32]) -> AppliedInput {
+        let action = self.effective(action);
         AppliedInput {
             steer: self.steer / car.model.params.steering.lock,
             throttle: f64::from(action[1]).clamp(0.0, 1.0),
@@ -697,6 +904,33 @@ impl Actuator {
         }
     }
 }
+
+/// The recovery aid takes over below this speed, m/s, when the track it aims at lies
+/// further than this angle, rad, from the car's heading, or when the car has stood
+/// still (below [`RECOVERY_STILL_SPEED`]) for [`RECOVERY_STILL_TIME`] s. It aims at the
+/// centreline [`RECOVERY_AIM`] m ahead, at full lock from [`RECOVERY_FULL_LOCK_ANGLE`]
+/// off, with the throttle part open, and hands back once the car is faster than
+/// [`RECOVERY_RELEASE_SPEED`] within [`RECOVERY_RELEASE_ANGLE`] of its aim.
+pub const RECOVERY_ENGAGE_SPEED: f64 = 3.0;
+pub const RECOVERY_ENGAGE_ANGLE: f64 = std::f64::consts::FRAC_PI_3;
+pub const RECOVERY_STILL_SPEED: f64 = 0.5;
+pub const RECOVERY_STILL_TIME: f64 = 1.0;
+pub const RECOVERY_AIM: f64 = 15.0;
+pub const RECOVERY_FULL_LOCK_ANGLE: f64 = 0.6;
+const RECOVERY_THROTTLE: f32 = 0.35;
+/// Beyond this angle from its aim, rad, the car points back down the track and turns
+/// round on a fixed lock; beyond [`RECOVERY_ALIGNED_ANGLE`] it turns at no more than
+/// [`RECOVERY_TURN_SPEED`] m/s, braking with [`RECOVERY_BRAKE`] if faster.
+const RECOVERY_U_TURN_ANGLE: f64 = 2.0;
+const RECOVERY_ALIGNED_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
+const RECOVERY_TURN_SPEED: f64 = 2.5;
+const RECOVERY_BRAKE: f32 = 0.3;
+/// After this long without headway going forward, s, the recovery aid backs up for
+/// [`RECOVERY_REVERSE_TIME`] s.
+const RECOVERY_BLOCKED_TIME: f64 = 1.0;
+const RECOVERY_REVERSE_TIME: f64 = 2.5;
+pub const RECOVERY_RELEASE_SPEED: f64 = 5.0;
+pub const RECOVERY_RELEASE_ANGLE: f64 = 0.35;
 
 /// Share of the steering lock the steering action spans with
 /// [`EnvConfig::speed_scaled_steering`]: the road wheel angle that turns the car at
@@ -722,6 +956,10 @@ pub const ABS_SLIP: f64 = 0.12;
 const ABS_RELEASE_RATE: f64 = 20.0;
 const ABS_APPLY_RATE: f64 = 10.0;
 const ABS_MIN_SPEED: f64 = 3.0;
+
+/// Largest heading away from the track, rad, and yaw rate, rad/s, of a spun start.
+const SPIN_START_YAW: f64 = std::f64::consts::PI;
+const SPIN_START_RATE: f64 = 2.0;
 
 /// Look-ahead distance and lateral acceleration of [`EnvConfig::safe_start`].
 pub const SAFE_START_DISTANCE: f64 = 60.0;
@@ -1092,6 +1330,109 @@ mod tests {
         }
         assert!(airs.iter().any(|&a| a < 20.0) && airs.iter().any(|&a| a > 25.0));
         assert!(EnvConfig::default().standard_weather());
+    }
+
+    #[test]
+    fn spun_starts_point_away_from_the_track() {
+        let track = Arc::new(Track::default_circuit());
+        let shared = EnvShared::new(
+            EnvConfig {
+                spin_start_fraction: 1.0,
+                start_speed: (10.0, 20.0),
+                ..EnvConfig::default()
+            },
+            track.clone(),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut env = Env::new(&shared, 9);
+        let mut backwards = 0;
+        for _ in 0..40 {
+            env.reset(&shared);
+            let st = &env.car.state;
+            let q = track.locate(st.position, track.nearest_index(st.position));
+            let forward = (st.orientation * DVec3::X).truncate().normalize();
+            let heading = q.sample.tangent.truncate().normalize().dot(forward);
+            // The car still slides along the track, whichever way it points.
+            let along = q
+                .sample
+                .tangent
+                .truncate()
+                .normalize()
+                .dot(st.velocity.truncate());
+            assert!(along > 0.9 * st.velocity.length());
+            assert!(st.angular_velocity.z.abs() <= SPIN_START_RATE);
+            backwards += (heading < 0.0) as usize;
+        }
+        assert!(
+            (5..35).contains(&backwards),
+            "{backwards} of 40 pointed backwards"
+        );
+    }
+
+    #[test]
+    fn recovery_aid_turns_a_stopped_car_back_onto_the_track() {
+        let track = Arc::new(Track::default_circuit());
+        let config = EnvConfig {
+            random_start: false,
+            start_speed: (0.0, 0.0),
+            start_offset: (0.0, 0.0),
+            recovery_assist: true,
+            max_steer_rate: 15.0,
+            control_hz: 25.0,
+            ..EnvConfig::default()
+        };
+        let shared = EnvShared::new(config, track.clone(), Arc::new(CarModel::gt3()));
+        let mut env = Env::new(&shared, 2);
+        // Stopped, pointing back down the track.
+        let st = &mut env.car.state;
+        let up = st.orientation * DVec3::Z;
+        st.orientation =
+            (DQuat::from_axis_angle(up, std::f64::consts::PI) * st.orientation).normalize();
+        let heading = |env: &Env| {
+            let st = &env.car.state;
+            let q = track.locate(st.position, track.nearest_index(st.position));
+            let forward = (st.orientation * DVec3::X).truncate().normalize();
+            q.sample.tangent.truncate().normalize().dot(forward)
+        };
+        assert!(heading(&env) < -0.9);
+        // A policy that only holds the brake.
+        let mut recovered = false;
+        for _ in 0..(25 * 20) {
+            env.step(&shared, &[0.0, 0.0, 1.0]);
+            if !env.actuator.recovering() && heading(&env) > 0.9 && env.car.speed() > 4.0 {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(
+            recovered,
+            "heading {:.2}, speed {:.1}",
+            heading(&env),
+            env.car.speed()
+        );
+    }
+
+    #[test]
+    fn grid_starts_use_the_first_grid_slot() {
+        let track = Arc::new(Track::default_circuit());
+        let shared = EnvShared::new(
+            EnvConfig {
+                random_start: false,
+                grid_start: true,
+                start_speed: (0.0, 0.0),
+                start_offset: (0.0, 0.0),
+                ..EnvConfig::default()
+            },
+            track.clone(),
+            Arc::new(CarModel::gt3()),
+        );
+        let env = Env::new(&shared, 1);
+        let q = track.locate(
+            env.car.state.position,
+            track.nearest_index(env.car.state.position),
+        );
+        let slot = track.layout.start();
+        assert!(track.delta_s(slot.s, q.s).abs() < 1.0 && (q.d - slot.d).abs() < 0.5);
     }
 
     #[test]

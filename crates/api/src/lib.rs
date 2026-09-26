@@ -14,8 +14,8 @@ use open_racing_env::{
 };
 
 pub use open_racing_env::{
-    DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, MAX_SECTORS,
-    OFF_COURSE_WHEELS, RewardFn, StepInfo, TerminationFn,
+    DefaultReward, DefaultTermination, Done, Ending, EnvConfig, EpisodeStats, LapTimer,
+    MAX_SECTORS, OFF_COURSE_WHEELS, RewardFn, StepInfo, TerminationFn,
 };
 pub use open_racing_sim::{
     Car, CarModel, Controls, RubberMap, Surface, Track, TrackCondition, TrackEvolution, parse_grip,
@@ -376,7 +376,8 @@ impl AgentDriver {
             );
             let action = &mut self.action[..self.config.action_dim()];
             policy.act(&self.obs, action);
-            self.actuator.decide(&self.config, action);
+            self.actuator
+                .decide(&self.config, car, track, self.hint, action);
             self.countdown = self.config.substeps();
         }
         self.countdown -= 1;

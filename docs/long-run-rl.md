@@ -4,7 +4,7 @@
 
 ## Abstract
 
-A reinforcement-learning policy that sets fast single laps can still fail a race stint. On a 5.8 km road circuit, a GT3 policy trained with our previous recipe lapped in 119.7 s, yet none of 32 cars driving 10 laps from a standing start got past lap 4. We trace the failure to the training distribution: episodes lasted about one lap and always began on fresh tyres, so the states of later laps (hot, worn tyres and flying-lap speeds) were never trained on. We change what the policy trains on and what it observes. Episodes run for several laps, starts are randomised over worn and hot tyres, and a share of episodes restart shortly before earlier crashes. The policy sees its tyre, brake and damage state, and the reward prices tyre degradation. With these changes, all 32 cars completed 10 laps without a crash or leaving the track, in 1208.2 s for the car driven without noise. An ablation that keeps every change except the state distribution completes no stint at all. The same holds for weather: a policy trained only in fixed standard conditions left the track on lap 1 in hot weather. After a further stage in randomised weather, it finished stints from 5 °C to 40 °C air and drove in the application's full weather model. A last stage on randomised and evolving track conditions, from a dusty track to a fully rubbered-in one, kept its wheels on the track and let it gain pace as the track rubbered in. We also report a case of reward hacking, where a policy cut a chicane, and the rule that removed it.
+A reinforcement-learning policy that sets fast single laps can still fail a race stint. On a 5.8 km road circuit, a GT3 policy trained with our previous recipe lapped in 119.7 s, yet none of 32 cars driving 10 laps from a standing start got past lap 4. We trace the failure to the training distribution: episodes lasted about one lap and always began on fresh tyres, so the states of later laps (hot, worn tyres and flying-lap speeds) were never trained on. We change what the policy trains on and what it observes. Episodes run for several laps, starts are randomised over worn and hot tyres, and a share of episodes restart shortly before earlier crashes. The policy sees its tyre, brake and damage state, and the reward prices tyre degradation. With these changes, all 32 cars completed 10 laps without a crash or leaving the track, in 1208.2 s for the car driven without noise. An ablation that keeps every change except the state distribution completes no stint at all. The same holds for weather: a policy trained only in fixed standard conditions left the track on lap 1 in hot weather. After a further stage in randomised weather, it finished stints from 5 °C to 40 °C air and drove in the application's full weather model. A last stage on randomised and evolving track conditions, from a dusty track to a fully rubbered-in one, kept its wheels on the track and let it gain pace as the track rubbered in. Finally, we report a negative result: reinforcement learning did not learn to get the car going again after a spin, and we added a recovery aid in its place. We also report a case of reward hacking, where a policy cut a chicane, and the rule that removed it.
 
 ## 1 Introduction
 
@@ -15,7 +15,8 @@ We train with PPO [4] in open-racing, a vehicle simulator with a thermal and wea
 - a diagnosis of long-run failure as a train–test mismatch in the state distribution (Section 3);
 - a training method that covers the states of a stint and prices tyre degradation (Section 4);
 - a 10-lap evaluation, an ablation and an analysis of driving technique (Section 5);
-- the same diagnosis and fix for weather and for the track's grip, which the policy must also meet outside its training (Sections 5.6 and 5.7).
+- the same diagnosis and fix for weather and for the track's grip, which the policy must also meet outside its training (Sections 5.6 and 5.7);
+- an evaluation suite that selects checkpoints automatically, and an account of recovering from spins (Sections 4.6 and 5.8).
 
 ## 2 Background
 
@@ -111,7 +112,7 @@ Training runs in five stages on one GPU (AMD RX 9070) and an 8-core CPU, at 30�
 | 4 | stage 3 | 60 min | 1.5·10⁻⁴ | 0.08 → 0.04 |
 | 5 | stage 4 | 60 min | 1.5·10⁻⁴ | 0.06 → 0.04 |
 
-Stage 3 enables the off-course mask, stage 4 the weather, and stage 5 the track condition and the higher price for wheels off the track. The other settings of Sections 4.2–4.5 are the same in all stages. Most of the wall time goes to simulation rather than to network updates. We select checkpoints by the evaluation of Section 5.1, as GT Sophy selected its policies [1]. Stage 3 was stopped after 20 minutes of a 55-minute schedule because that checkpoint was 2 s faster over 10 laps than the last one. Stages 4 and 5 were each stopped after 60 minutes of a 90-minute schedule, for the reasons given in Sections 5.6 and 5.7.
+Stage 3 enables the off-course mask, stage 4 the weather, and stage 5 the track condition and the higher price for wheels off the track. The other settings of Sections 4.2–4.5 are the same in all stages. Most of the wall time goes to simulation rather than to network updates. We select checkpoints by evaluation, as GT Sophy selected its policies [1]. Training keeps a checkpoint every 15 minutes, and a fixed suite drives each of them: 10-lap stints in the standard conditions and on drawn tracks in drawn weather; 3-lap runs in the application's weather model on a hot afternoon, a cold morning on a dusty track, and an overcast day on a green one; and one lap after a spin. The best checkpoint has the fewest cars that failed to finish, then no track-limit violations, then the fastest stints in the standard conditions. Stage 3 was stopped after 20 minutes of a 55-minute schedule because that checkpoint was 2 s faster over 10 laps than the last one. Stages 4 and 5 were each stopped after 60 minutes of a 90-minute schedule, for the reasons given in Sections 5.6 and 5.7.
 
 ## 5 Experiments
 
@@ -206,6 +207,30 @@ To see whether the policy uses the grip the track gains, we start it on a dusty 
 
 These are means over 8 cars. Without rubbering in, the laps slow down as the tyres wear. As the track rubbers in, the policy gains pace, which more than makes up for the wear. It also leaves the track less often (from 3.6 to 1.6 steps per lap).
 
+### 5.8 Recovering from spins
+
+A spun car must stop sliding, turn round and drive back onto the track. We start cars in a spin: turned up to half a turn from the track's direction, yawing at up to 2 rad/s, and sliding along the track at 10–40 m/s. A car recovers if it then completes a lap. The episode ends if the car hits a wall faster than 3 m/s, stays fully off the track for 10 s, stands still for 6 s, or faces the wrong way for 10 s.
+
+Of 32 spun cars driven by the stage-5 policy, 13 recovered. Three hit a wall while still sliding, 0.4–2.6 s into the spin, which no driver could avoid. The other 16 came to a stop and held the brake until the standstill limit ended the run. The physics allows recovery: with the same start, scripted inputs (brake off, throttle, full lock) got the car moving again.
+
+The policy had never met these states, because its training episodes ended 1 s after it faced the wrong way. We tried to teach recovery with reinforcement learning, in 90-minute fine-tunes from stage 5:
+
+- spun starts on 15 % (later 30 %) of resets, with the limits above;
+- in addition, exploration noise 8 or 25 times larger while the car moves slower than 3 m/s, entered into PPO's likelihood ratio so that the update stays exact;
+- in addition, a spin set off in the middle of an episode about every 100 s, so that recovery states made up a real share of the data (spun starts alone happen only at the rare resets of 1400 s episodes);
+- in addition, potential-based shaping [15] that pays for turning the car towards the track's direction.
+
+None of these raised recovery above 9 of 16 cars. With the shaping, the stopped car learned to turn the wheel to full lock, but it still held the brake. Holding the brake is a local optimum: to get going, the policy must release the brake, open the throttle and hold full lock for several seconds, all together. Until all of that happens, no action does better than any other, so the gradient gives no direction.
+
+We therefore added a recovery aid, in the same layer as the ABS and traction control, so that it acts the same in training, evaluation and the application. It takes over when the car is below 3 m/s and points more than 60° away from the track 15 m ahead, or has stood still for a second. It releases the brake and turns the car round at walking pace, towards the side of the track with more room. If the car makes no headway, for example with its nose against a barrier, it backs up on the opposite lock (a three-point turn). It hands back to the policy once the car rolls along the track above 5 m/s.
+
+| policy | recovered, of 32 | failed |
+| --- | --- | --- |
+| stage 5 | 13 | 16 stood still, 3 hit a wall while sliding |
+| stage 5 with the recovery aid | 26 | 3 hit a wall while sliding, 1 beached in gravel, 2 out of time |
+
+The aid never took over in the other conditions of the suite. There, the results with and without it were identical.
+
 ## 6 Discussion and limitations
 
 - **What matters most.** The main lesson is that what a policy trains on matters more than how. Algorithm settings did not cause the long-run failures. They came from states that the training never produced. Worn starts and crash replay are cheap ways to produce such states, and long episodes let them arise naturally.
@@ -214,7 +239,8 @@ These are means over 8 cars. Without rubbering in, the laps slow down as the tyr
 - **One car and one track.** We trained on one car and one track. The method has no track-specific parts, but we have not tested how it transfers.
 - **Tyre model.** The tyre model is simplified: it has no graining or blistering, and its wear curve is linear.
 - **Weather in training.** Training weather is uniform over the track, while the application's road temperature varies with sun and shade. This gap is why the checkpoint had to be chosen in the application's weather. Drawing a varying road temperature in training should close it. The policy also does not observe the air and road temperatures, which simulators report and which could make adapting easier.
-- **Checkpoint selection.** In stages 4 and 5 the last checkpoint was not the most robust one. We choose by evaluation, but the evaluation takes several minutes per checkpoint and uses a fixed set of conditions.
+- **Checkpoint selection.** In stages 4 and 5 the last checkpoint was not the most robust one. The suite now selects checkpoints automatically, but it takes 10–20 minutes per checkpoint and covers a fixed set of conditions.
+- **Recovery is not learned.** The recovery aid is a hand-written rule, not a learned skill. Learning it may need demonstrations of recovery (for example, cloning the aid's actions into the policy), or an algorithm that explores in time rather than step by step.
 - **Future work.** A policy that adapts from a history of observations [14], rather than from direct telemetry of its tyres, could transfer to simulators that report less.
 
 ## 7 Conclusion
@@ -237,3 +263,4 @@ Racing policies trained on short episodes and fresh cars fail over a stint becau
 12. J. Schulman, P. Moritz, S. Levine, M. Jordan, P. Abbeel. High-dimensional continuous control using generalized advantage estimation. *ICLR*, 2016.
 13. N. Rudin, D. Hoeller, P. Reist, M. Hutter. Learning to walk in minutes using massively parallel deep reinforcement learning. *CoRL*, 2022.
 14. A. Kumar, Z. Fu, D. Pathak, J. Malik. RMA: Rapid motor adaptation for legged robots. *RSS*, 2021.
+15. A. Y. Ng, D. Harada, S. Russell. Policy invariance under reward transformations: Theory and application to reward shaping. *ICML*, 1999.

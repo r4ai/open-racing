@@ -13,6 +13,7 @@ use open_racing_train_burn::reference::ReferenceConfig;
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
 mod longrun;
+mod suite;
 
 #[derive(Parser)]
 #[command(about = "Train and evaluate racing agents with PPO on Burn")]
@@ -160,6 +161,25 @@ enum Command {
         /// Wind speed at 10 m, m/s, from any direction: a value or a range.
         #[arg(long, value_parser = parse_range, default_value = "0")]
         wind: (f64, f64),
+        /// Share of random starts in a spin (turned up to half a turn, yawing).
+        #[arg(long, default_value_t = 0.0)]
+        spin_start_fraction: f64,
+        /// Let the recovery aid get the car going again after a spin.
+        #[arg(long)]
+        recovery_assist: bool,
+        /// Longest time with all four wheels off the track before an episode ends, s.
+        #[arg(long, default_value_t = DefaultTermination::default().max_off_track_time)]
+        max_off_track_seconds: f64,
+        /// Longest time facing the wrong way while moving before an episode ends, s.
+        #[arg(long, default_value_t = DefaultTermination::default().max_wrong_way_time)]
+        max_wrong_way_seconds: f64,
+        /// Longest time standing still before an episode ends, s.
+        #[arg(long, default_value_t = DefaultTermination::default().max_stuck_time)]
+        max_stuck_seconds: f64,
+        /// Also keep the policy every this many minutes in `<out>/checkpoints/`, for
+        /// `select` to choose from.
+        #[arg(long)]
+        checkpoint_minutes: Option<f64>,
         /// Reward lost per unit of tread worn (summed over the four tyres).
         #[arg(long, default_value_t = DefaultReward::default().wear_weight)]
         wear_penalty: f64,
@@ -242,6 +262,29 @@ enum Command {
         /// The car whose stint `--trace` writes (0 drives without noise).
         #[arg(long, default_value_t = 0)]
         trace_car: usize,
+        /// Drive the evaluation suite (see `select`) instead of one stint.
+        #[arg(long)]
+        suite: bool,
+        /// Start every car in a spin somewhere on the track (as the suite's recovery).
+        #[arg(long)]
+        spin: bool,
+        /// Switch the recovery aid on, whatever the policy trained with.
+        #[arg(long)]
+        recovery_assist: bool,
+    },
+    /// Drive every checkpoint of a run in the evaluation suite and copy the best to
+    /// `<run>/best`. The suite: 10-lap stints from a standing start in the training
+    /// conditions and on drawn tracks in drawn weather; 3 laps with half the cars in the
+    /// app's weather model from the grid (a hot afternoon, a cold morning on a dusty
+    /// track, an overcast day on a green one); then a lap after a spin.
+    Select {
+        /// A training run's output directory.
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        laps: u32,
+        #[arg(long, default_value_t = 16)]
+        cars: usize,
     },
     /// Run a trained policy and report lap times.
     Eval {
@@ -345,6 +388,7 @@ fn main() {
                 stint_obs: config.stint_obs,
                 lap_position_obs: config.lap_position_obs,
                 speed_scaled_steering: config.speed_scaled_steering,
+                recovery_assist: config.recovery_assist,
                 abs: config.abs,
                 traction_control: config.traction_control,
                 max_steer_rate: config.max_steer_rate,
@@ -410,6 +454,12 @@ fn main() {
             air_temperature,
             road_heat,
             wind,
+            spin_start_fraction,
+            recovery_assist,
+            max_off_track_seconds,
+            max_wrong_way_seconds,
+            max_stuck_seconds,
+            checkpoint_minutes,
             safe_start,
             start_speed_max,
             start_offset_meters,
@@ -445,6 +495,8 @@ fn main() {
                 air_temperature,
                 road_heat,
                 wind_speed: wind,
+                spin_start_fraction,
+                recovery_assist,
                 safe_start,
                 start_speed: (0.0, start_speed_max),
                 start_offset: (-start_offset_meters, start_offset_meters),
@@ -471,6 +523,9 @@ fn main() {
             });
             spec.termination = Arc::new(DefaultTermination {
                 max_time: max_episode_seconds,
+                max_off_track_time: max_off_track_seconds,
+                max_wrong_way_time: max_wrong_way_seconds,
+                max_stuck_time: max_stuck_seconds,
                 ..DefaultTermination::default()
             });
             let mut env = spec.make_vec_env(envs);
@@ -491,6 +546,7 @@ fn main() {
                 stint_obs: config.stint_obs,
                 lap_position_obs: config.lap_position_obs,
                 speed_scaled_steering: config.speed_scaled_steering,
+                recovery_assist: config.recovery_assist,
                 abs: config.abs,
                 traction_control: config.traction_control,
                 max_steer_rate: config.max_steer_rate,
@@ -515,6 +571,7 @@ fn main() {
                 seed,
                 out_dir: out,
                 init,
+                checkpoint_every_seconds: checkpoint_minutes.map(|m| m * 60.0),
                 ..Default::default()
             };
             println!(
@@ -537,27 +594,42 @@ fn main() {
             grip_gain,
             trace,
             trace_car,
+            suite,
+            spin,
+            recovery_assist,
         } => {
             let mut policy = BurnPolicy::load(&model)
                 .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
+            policy.meta.recovery_assist |= recovery_assist;
+            if suite {
+                println!("per condition: finished/cars, steps per lap with a wheel off, mean time");
+                suite::print_header();
+                let results = suite::evaluate(&mut policy, laps, cars);
+                suite::print_row(&model.display().to_string(), &results);
+                return;
+            }
             let conditions = open_racing_api::EnvConfig {
                 air_temperature,
                 road_heat,
                 wind_speed: wind,
-                track_grip,
+                track_grip: track_grip.or(policy.meta.track_grip),
                 grip_gain_per_lap: grip_gain,
                 ..Default::default()
             };
-            longrun::run(
-                &mut policy,
-                laps,
-                cars,
+            let setup = longrun::Setup {
                 noise,
-                &conditions,
-                trace.as_deref(),
-                trace_car,
-            );
+                trace: trace.map(|path| (path, trace_car)),
+                verbose: true,
+                ..longrun::Setup::standing_start(&policy, laps, cars, &conditions)
+            };
+            let setup = if spin {
+                suite::after_spin(setup)
+            } else {
+                setup
+            };
+            longrun::run(&mut policy, &setup);
         }
+        Command::Select { run, laps, cars } => suite::select(&run, laps, cars),
         Command::Eval {
             model,
             seconds,

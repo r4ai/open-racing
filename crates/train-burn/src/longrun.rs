@@ -1,20 +1,30 @@
 //! Stint evaluation: can a policy drive lap after lap as its tyres wear and heat up?
 
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use open_racing_api::{
-    Car, DefaultTermination, EnvConfig, EnvSpec, OFF_COURSE_WHEELS, Policy, Track, VecEnv,
+    Car, DefaultTermination, Ending, EnvConfig, EnvSpec, OFF_COURSE_WHEELS, Policy, Track, VecEnv,
 };
 use open_racing_train_burn::BurnPolicy;
+
+/// Where, when and why a car's stint ended early.
+#[derive(Clone, Copy)]
+struct Crash {
+    lap: usize,
+    /// Distance along the lap, m, and time since the start, s.
+    s: f64,
+    time: f64,
+    ending: Option<Ending>,
+}
 
 /// One car's stint so far.
 #[derive(Clone, Default)]
 struct Stint {
     laps: Vec<Lap>,
     /// Lap and distance along the lap where the car crashed.
-    crash: Option<(usize, f64)>,
+    crash: Option<Crash>,
     /// Time when the last lap was completed, s.
     finished: Option<f64>,
     current: LapAccumulator,
@@ -85,33 +95,104 @@ impl LapAccumulator {
     }
 }
 
-pub fn run(
-    policy: &mut BurnPolicy,
-    laps: u32,
-    cars: usize,
-    noise: f32,
-    conditions: &EnvConfig,
-    trace: Option<&Path>,
-    trace_car: usize,
-) {
+/// How a stint is driven and measured.
+pub struct Setup {
+    pub laps: u32,
+    pub cars: usize,
+    /// Standard deviation of the noise added to every car's actions but the first.
+    pub noise: f32,
+    /// The environment, including where and in what conditions the cars start.
+    pub config: EnvConfig,
+    /// What ends a stint early; its time limit is set from the laps.
+    pub termination: DefaultTermination,
+    /// Write this car's stint step by step to this CSV file.
+    pub trace: Option<(PathBuf, usize)>,
+    /// Print each lap and crash, not only return the summary.
+    pub verbose: bool,
+}
+
+impl Setup {
+    /// A stint of `laps` from a standing start on the start line, in the policy's
+    /// own environment with the track and weather of `conditions` (without a
+    /// `track_grip`, the same grip everywhere).
+    pub fn standing_start(
+        policy: &BurnPolicy,
+        laps: u32,
+        cars: usize,
+        conditions: &EnvConfig,
+    ) -> Self {
+        Self {
+            laps,
+            cars,
+            noise: 0.02,
+            config: EnvConfig {
+                random_start: false,
+                start_speed: (0.0, 0.0),
+                start_offset: (-0.3, 0.3),
+                track_grip: conditions.track_grip,
+                grip_gain_per_lap: conditions.grip_gain_per_lap,
+                air_temperature: conditions.air_temperature,
+                road_heat: conditions.road_heat,
+                wind_speed: conditions.wind_speed,
+                weather_model: conditions.weather_model,
+                grid_start: conditions.grid_start,
+                ..policy.meta.env_config()
+            },
+            termination: DefaultTermination::default(),
+            trace: None,
+            verbose: false,
+        }
+    }
+}
+
+/// What a stint's cars achieved.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Summary {
+    pub cars: usize,
+    pub finished: usize,
+    pub crashes: usize,
+    /// Laps completed by all cars.
+    pub laps: usize,
+    /// Steps per lap with a wheel off the track, and with three or more.
+    pub off_per_lap: f64,
+    pub off_course_per_lap: f64,
+    /// Mean and best time of the cars that finished, s.
+    pub mean_time: Option<f64>,
+    pub best_time: Option<f64>,
+}
+
+impl Summary {
+    fn of(stints: &[Stint]) -> Self {
+        let finishers: Vec<f64> = stints.iter().filter_map(|s| s.finished).collect();
+        let laps: usize = stints.iter().map(|s| s.laps.len()).sum();
+        let per_lap = |f: fn(&Lap) -> usize| {
+            stints.iter().flat_map(|s| &s.laps).map(f).sum::<usize>() as f64 / laps.max(1) as f64
+        };
+        Self {
+            cars: stints.len(),
+            finished: finishers.len(),
+            crashes: stints.iter().filter(|s| s.crash.is_some()).count(),
+            laps,
+            off_per_lap: per_lap(|l| l.off_steps),
+            off_course_per_lap: per_lap(|l| l.off_course_steps),
+            mean_time: mean(&finishers),
+            best_time: finishers.iter().copied().reduce(f64::min),
+        }
+    }
+}
+
+pub fn run(policy: &mut BurnPolicy, setup: &Setup) -> Summary {
+    let (laps, cars, noise) = (setup.laps, setup.cars, setup.noise);
+    let trace_car = setup.trace.as_ref().map_or(0, |(_, car)| *car);
     assert!(cars > 0 && laps > 0 && trace_car < cars);
-    let config = EnvConfig {
-        random_start: false,
-        start_speed: (0.0, 0.0),
-        start_offset: (-0.3, 0.3),
-        track_grip: conditions.track_grip.or(policy.meta.track_grip),
-        grip_gain_per_lap: conditions.grip_gain_per_lap,
-        air_temperature: conditions.air_temperature,
-        road_heat: conditions.road_heat,
-        wind_speed: conditions.wind_speed,
-        ..policy.meta.env_config()
-    };
+    let config = setup.config.clone();
     let mut spec = EnvSpec::from_names(&policy.meta.track, &policy.meta.car, config.clone())
         .unwrap_or_else(|e| panic!("{e}"));
-    let max_time = 200.0 * f64::from(laps);
+    // Room to reach the start line first, from a grid slot or a spun start.
+    let max_time = 200.0 * f64::from(laps) + 150.0;
     spec.termination = Arc::new(DefaultTermination {
         max_time,
-        ..DefaultTermination::default()
+        ..setup.termination.clone()
     });
     let mut env = spec.make_vec_env(cars);
     policy
@@ -134,7 +215,7 @@ pub fn run(
         let (u1, u2) = (u(), u());
         ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
     };
-    let mut trace = trace.map(|path| {
+    let mut trace = setup.trace.as_ref().map(|(path, _)| {
         let mut file = std::io::BufWriter::new(
             std::fs::File::create(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
         );
@@ -170,7 +251,13 @@ pub fn run(
                 done[e] = true;
                 if terminated[e] {
                     let q = track.locate(before[e], track.nearest_index(before[e]));
-                    stint.crash = Some((stint.laps.len() + 1, q.s));
+                    let stats = finished.iter().find(|(i, _)| *i == e).map(|(_, s)| s);
+                    stint.crash = Some(Crash {
+                        lap: stint.laps.len() + 1,
+                        s: q.s,
+                        time: stats.map_or(0.0, |s| s.time),
+                        ending: stats.and_then(|s| s.ending),
+                    });
                 }
                 // The episode's final lap, if the last step completed one.
                 if let Some((_, stats)) = finished.iter().find(|(i, _)| *i == e)
@@ -215,7 +302,10 @@ pub fn run(
             break;
         }
     }
-    report(&stints, laps, track);
+    if setup.verbose {
+        report(&stints, laps, track);
+    }
+    Summary::of(&stints)
 }
 
 fn write_trace(
@@ -293,36 +383,29 @@ fn report(stints: &[Stint], laps: u32, track: &Track) {
     }
     match (first.finished, first.crash) {
         (Some(t), _) => println!("  finished {laps} laps in {t:.3} s"),
-        (_, Some((lap, s))) => println!("  crashed on lap {lap} at {s:.0} m"),
+        (_, Some(c)) => println!(
+            "  crashed on lap {} at {:.0} m ({:?})",
+            c.lap, c.s, c.ending
+        ),
         _ => println!("  ran out of time after {} laps", first.laps.len()),
     }
-    let finishers: Vec<f64> = stints.iter().filter_map(|s| s.finished).collect();
-    let n = stints.len();
-    let completed_laps: usize = stints.iter().map(|s| s.laps.len()).sum();
-    let crashes: Vec<(usize, f64)> = stints.iter().filter_map(|s| s.crash).collect();
-    let off: usize = stints
-        .iter()
-        .flat_map(|s| &s.laps)
-        .map(|l| l.off_steps)
-        .sum();
-    let off_course: usize = stints
-        .iter()
-        .flat_map(|s| &s.laps)
-        .map(|l| l.off_course_steps)
-        .sum();
+    let sum = Summary::of(stints);
+    let n = sum.cars;
     println!(
-        "all {n} cars: {}/{n} finished {laps} laps, {} crashes in {completed_laps} laps, {:.2} steps per lap with a wheel off, {:.2} off course, total time mean {} best {}",
-        finishers.len(),
-        crashes.len(),
-        off as f64 / completed_laps.max(1) as f64,
-        off_course as f64 / completed_laps.max(1) as f64,
-        mean(&finishers).map_or("-".into(), |t| format!("{t:.2}s")),
-        finishers
-            .iter()
-            .copied()
-            .reduce(f64::min)
-            .map_or("-".into(), |t| format!("{t:.2}s")),
+        "all {n} cars: {}/{n} finished {laps} laps, {} crashes in {} laps, {:.2} steps per lap with a wheel off, {:.2} off course, total time mean {} best {}",
+        sum.finished,
+        sum.crashes,
+        sum.laps,
+        sum.off_per_lap,
+        sum.off_course_per_lap,
+        sum.mean_time.map_or("-".into(), |t| format!("{t:.2}s")),
+        sum.best_time.map_or("-".into(), |t| format!("{t:.2}s")),
     );
+    let crashes: Vec<(usize, Crash)> = stints
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.crash.map(|c| (i, c)))
+        .collect();
     for k in 0..laps as usize {
         let times: Vec<f64> = stints
             .iter()
@@ -345,9 +428,22 @@ fn report(stints: &[Stint], laps: u32, track: &Track) {
         );
     }
     let mut crashes = crashes;
-    crashes.sort_by(|a, b| a.1.total_cmp(&b.1));
-    for (lap, s) in crashes {
-        println!("  crash on lap {lap} at {s:.0} m of {:.0}", track.length);
+    crashes.sort_by(|a, b| a.1.s.total_cmp(&b.1.s));
+    for (
+        car,
+        Crash {
+            lap,
+            s,
+            time,
+            ending,
+        },
+    ) in crashes
+    {
+        let why = ending.map_or(String::new(), |e| format!(" ({e:?})"));
+        println!(
+            "  crash on lap {lap} at {s:.0} m of {:.0}{why}, car {car} after {time:.1} s",
+            track.length
+        );
     }
 }
 

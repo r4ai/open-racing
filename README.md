@@ -377,10 +377,10 @@ A policy that laps well can still fail a race stint. Trained with the recipe abo
 # Cars from the start line for 10 laps: the first as the policy drives, the others with a little action noise.
 # Per lap: time, hottest tread, grip left by the tyres' condition, wear, hot pressure, damage, steps off track
 # and off course (3+ wheels off); then how many cars finished, where the others crashed, and the total times.
-cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-5 --laps 10 --cars 32 --trace stint.csv
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-6 --laps 10 --cars 32 --trace stint.csv
 # The same on drawn tracks and in drawn weather: each car starts on its own track condition, from dusty to
 # rubbered in, which rubbers in further as it drives, in its own air and road temperature and wind.
-cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-5 --laps 10 --cars 32 \
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-6 --laps 10 --cars 32 \
   --track-grip dusty..optimum --air-temperature 5..40 --road-heat 0..30 --wind 0..9
 ```
 
@@ -453,6 +453,34 @@ On drawn tracks in drawn weather (a condition from dusty to rubbered in; the wea
 Stage 5 uses the grip the track gains. From a dusty start it laps 0.3 s faster on lap 10 than on lap 2 when the track rubbers in at 0.004 per lap, against 0.7 s slower on a track that does not rubber in, where only the tyres wear.
 
 Stage 3 laps in 119.5 s on lap 2 and 120.8 s on lap 10 as the tread wears, with the treads at 103–105 °C. Stage 4 gives up 15 s over 10 laps in the standard conditions for driving in any of the others, and it drives in the app's own weather (road temperatures that vary with sun and shade, passing clouds) from cold mornings to hot afternoons. Stage 1 with the old states (180 s episodes, fresh tyres, no replays) lapped in 114.4 s by cutting a chicane, and none of 16 cars finished 10 laps. [docs/long-run-rl.md](docs/long-run-rl.md) describes the method and the experiments in full.
+
+#### Choosing a checkpoint
+
+The last checkpoint of a run is often not the most robust one. `--checkpoint-minutes` keeps the policy every so many minutes in `<out>/checkpoints/`, and `select` drives each of them, and the final policy, in a fixed suite of conditions and copies the best to `<out>/best`: fewest cars that did not finish, then no track-limit violations, then the fastest stints in the training conditions.
+
+```bash
+cargo run --release -p open-racing-train-burn -- $T ... --checkpoint-minutes 15 --out runs/next
+cargo run --release -p open-racing-train-burn -- select --run runs/next
+# The same suite for one policy
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-6 --suite
+```
+
+The suite: 10-lap stints from a standing start in the training conditions and on drawn tracks in drawn weather; 3 laps from the grid with half the cars in the app's weather model (a hot afternoon, a cold morning on a dusty track, an overcast day on a green one), whose road temperature varies with sun and shade; then a lap after a spin. Per condition it prints the cars that finished, the steps per lap with a wheel off, and the mean time; `longrun` also prints why each car's run ended (a wall, too long off the track, standing still, facing the wrong way).
+
+#### After a spin
+
+`longrun --spin` starts every car in a spin (turned up to half a turn, yawing, sliding along the track at 10 to 40 m/s) and counts the cars that get going again and complete a lap. With the usual limits an episode ended 1 s after facing the wrong way or 0.5 s after going fully off, so no policy had learned what to do after a spin: 13 of 32 cars recovered, and the others stopped and held the brake until they were counted as stuck.
+
+Training on the states after a spin did not teach it. Spun starts, mid-episode spins, limits relaxed to 10 s, exploration noise 25 times larger while the car is nearly stopped, and a reward for turning towards the track's direction left the policy holding the brake, or turning the wheel but still holding it: getting going again takes the brake off, the throttle on and full lock for seconds at a time, and until all of that happens together no action does better than another.
+
+`--recovery-assist` gets the car going again as a driver aid, in the same layer as the ABS and traction control, and so the same in training, evaluation and the app. It takes over when the car is below 3 m/s and points more than 60° away from the track 15 m ahead, or has stood still for a second. It lets the brake off, turns the car round at walking pace towards the side of the track with more room, backing up on the opposite lock if it makes no headway (a three-point turn), and hands back once the car rolls along the track above 5 m/s. `runs/longrun-6` is stage 5 with the aid on:
+
+| | recovered, of 32 | ended by |
+| --- | --- | --- |
+| stage 5 | 13 | 16 cars stopped and stood still; 3 walls hit while sliding, 0.4–2.6 s into the spin |
+| stage 5 with the recovery aid (`runs/longrun-6`) | 26 | 3 walls hit while sliding, 0.4–2.6 s into the spin; 1 car beached in gravel; 2 out of time |
+
+The aid never took over in the other conditions of the suite, whose results did not change.
 
 ## License
 
