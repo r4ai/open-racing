@@ -15,7 +15,9 @@ trackctl info my-track [--json]         # roads, nodes and their distances, radi
 trackctl apply my-track ops.ron         # or ops.json, or - for stdin; all or nothing
 trackctl preview my-track               # plan view: my-track/preview.png
 trackctl import my-track a.png b.glb    # copy into my-track/assets/, print the paths to use
-trackctl model my-track assets/models/oak.glb  # triangles, size, leaves; its picture and far cards as PNG
+trackctl model my-track assets/models/oak.glb  # triangles, levels, leaves; its picture and far pictures as PNG
+trackctl polyhaven search fir --category trees  # Poly Haven's CC0 models (--textures: textures)
+trackctl polyhaven import my-track fir_sapling  # download, prepare, copy in; print a scatter of it (--add applies it)
 trackctl assets my-track [--json]       # textures and models, what uses each, unused and missing ones
 trackctl check my-track --lap           # bake in memory, check, drive a test lap
 trackctl bake my-track                  # write content/tracks/<name>/ (then: open-racing-app --track <name>)
@@ -218,12 +220,15 @@ spectators.
   on the ground at `pos` (x, y) turned by `yaw` and sized by `scale`, wherever it is put
   but on a road or kerb. `seed` (drawn from the name when 0) is where the painted copies'
   places come from; a rename keeps it, so the copies stay where they are.
-- Levels of detail: copies show their models in full out to `detail` metres from the
-  camera, then a lighter far model out to `draw` metres (0: however far), crossfading.
-  A model's far model is its `far` file, or else pictures of it drawn from three sides
-  onto crossed cards when the project is built, so a wood of thousands of trees costs a
-  few triangles a tree in the distance. With `draw` no more than `detail` the models
-  are shown in full and nothing beyond.
+- Levels of detail: copies show their models in full near the camera, then the
+  model's lighter levels (nodes of its glTF named `<name>_LOD1`, `_LOD2`, …, each
+  taking over at twice the distance of the one before), out to `detail` metres, then a
+  far model out to `draw` metres (0: however far), crossfading. A model's far model is
+  its `far` file, or else pictures of it drawn from 8 × 8 sides over the half of a
+  sphere above it when the project is built (an octahedral impostor), which the game
+  shows on a quad turned to the viewer: a wood of thousands of trees costs two
+  triangles a tree in the distance. With `draw` no more than `detail` the models are
+  shown and nothing beyond.
 - The package keeps each model once, with a list of where each copy stands (32 bytes a
   copy), and the game draws the copies by instancing: a wood of tens of thousands of
   trees adds little to the file and the memory. The far models' copies are merged by
@@ -422,6 +427,23 @@ lays a pit lane road beside a stretch of the main road (by default round the sta
 it leaves the track, runs parallel to it past the boxes, and rejoins it, with white
 edge lines and speed limit lines across it. The editor offers the same in Race markers ›
 Pit lane.
+
+## Poly Haven
+
+[Poly Haven](https://polyhaven.com)'s models and textures are free (CC0). Its models are
+photoscans of up to millions of triangles, often several variants side by side in one
+file, their leaves' alpha in maps of their own: `trackctl polyhaven get <id>` downloads
+one into a cache shared by all projects (`%LOCALAPPDATA%/open-racing/polyhaven`, or
+`$OPEN_RACING_POLYHAVEN`) and prepares it once: each variant a `.glb` of its own
+standing where it was made, its leaves cut out by their alpha, reduced to a budget of
+triangles for its kind of plant in three levels of detail. `trackctl polyhaven import
+<project> <id>` copies the prepared files into the project's `assets/models/` and prints
+a `PutScatter` of its variants spaced for their size and kind (`--add` applies it), so
+the project bakes without the network. A texture comes in as a `PutMaterial` of its
+colour (with its alpha, if it has one) and normal maps, tiled at the size it was taken
+at. `search [words] [--textures] [--category c]` and `info <id> [--json]` find them;
+HDRIs are not used, as tracks are lit by their sky. The editor offers the same in the
+Assets panel (Poly Haven) and first on the scatter palette's shelves.
 
 ## Working on a track
 

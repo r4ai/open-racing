@@ -488,6 +488,33 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_of_models_elsewhere_brings_them_into_the_project() {
+        // As Poly Haven's are: prepared in a cache outside any project.
+        let (dir, cache) = (temp("elsewhere"), temp("cache"));
+        std::fs::create_dir_all(&cache).unwrap();
+        let model = cache.join("fir_sapling_a.glb");
+        std::fs::write(&model, b"glb bytes").unwrap();
+        let mut editor = Editor::open(dir.clone()).unwrap();
+        let mut kind = builtin().remove(1);
+        kind.scatter.models = vec![ScatterModel::new(model, 1.0)];
+        let name = add(&mut editor, &kind, None).unwrap();
+        let s = editor
+            .project
+            .scatter
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap();
+        assert_eq!(
+            s.models[0].model,
+            PathBuf::from("assets/models/fir_sapling_a.glb")
+        );
+        assert!(dir.join("assets/models/fir_sapling_a.glb").is_file());
+        for d in [dir, cache] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
     fn a_saved_kind_takes_its_model_and_materials_to_another_project() {
         let (a, b, library) = (temp("a"), temp("b"), temp("library"));
         let mut one = Editor::open(a.clone()).unwrap();

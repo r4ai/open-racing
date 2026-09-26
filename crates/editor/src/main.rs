@@ -22,6 +22,7 @@ mod outliner;
 mod overlay;
 mod palette;
 mod plants;
+mod polyhaven;
 mod popups;
 mod presets;
 mod preview;
@@ -102,6 +103,14 @@ struct Args {
     /// Hide lines, names, stretches and markers drawn over the track.
     #[arg(long)]
     clean: bool,
+    /// With the Scatter tool, show this shelf of the palette: project, trees, bushes,
+    /// grass, rocks, spectators, other or mine.
+    #[arg(long)]
+    shelf: Option<String>,
+    /// Open the Assets panel on the project's files (project) or Poly Haven's
+    /// (polyhaven).
+    #[arg(long)]
+    assets: Option<String>,
 }
 
 /// A corner to look at once the first build has found the corners, and a properties
@@ -113,6 +122,13 @@ pub struct StartTab(pub ui::PropTab);
 /// The graph the Curves area shows, from the command line.
 #[derive(Resource)]
 pub struct StartCurves(pub curve_graph::Shown);
+/// The palette's shelf, and the Assets panel (on Poly Haven's or not), from the command
+/// line.
+#[derive(Resource)]
+pub struct StartPanels {
+    pub shelf: Option<palette::Shelf>,
+    pub polyhaven: Option<bool>,
+}
 
 /// Where `--screenshot` saves, and the frames left before it is taken or the app quits.
 #[derive(Resource)]
@@ -166,6 +182,7 @@ pub type Start<'w> = (
     Option<Res<'w, StartCurves>>,
     Option<Res<'w, StartDistance>>,
     Option<Res<'w, StartOnGround>>,
+    Option<Res<'w, StartPanels>>,
 );
 
 fn main() {
@@ -276,6 +293,33 @@ fn main() {
             }
         }
     }
+    let shelf = match args.shelf.as_deref().map(str::to_lowercase).as_deref() {
+        None => None,
+        Some("project") => Some(palette::Shelf::Project),
+        Some("mine") => Some(palette::Shelf::Mine),
+        Some(name) => match vegetation::Category::ALL
+            .into_iter()
+            .find(|c| c.label().eq_ignore_ascii_case(name))
+        {
+            Some(c) => Some(palette::Shelf::Kind(c)),
+            None => {
+                eprintln!("no shelf \"{name}\"");
+                std::process::exit(1);
+            }
+        },
+    };
+    if shelf.is_some() {
+        tool.active = viewport::ToolKind::Scatter;
+    }
+    let polyhaven = match args.assets.as_deref() {
+        None => None,
+        Some("project") => Some(false),
+        Some("polyhaven") => Some(true),
+        Some(other) => {
+            eprintln!("no assets \"{other}\": project or polyhaven");
+            std::process::exit(1);
+        }
+    };
     if args.clean {
         tool.overlays = viewport::Overlays {
             lines: false,
@@ -296,6 +340,9 @@ fn main() {
     }
     if let Some(d) = args.distance {
         app.insert_resource(StartDistance(d));
+    }
+    if shelf.is_some() || polyhaven.is_some() {
+        app.insert_resource(StartPanels { shelf, polyhaven });
     }
     if app_focus_ground {
         app.insert_resource(StartOnGround);

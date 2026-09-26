@@ -54,6 +54,8 @@ pub struct Palette {
     cache: SharedCache,
     /// The asset files' revision the pictures of project files were made at.
     assets: u64,
+    /// Poly Haven's plants on the shelves, and the Assets panel's browser.
+    pub polyhaven: crate::polyhaven::PolyHaven,
 }
 
 impl FromWorld for Palette {
@@ -64,6 +66,7 @@ impl FromWorld for Palette {
             pictures: Pictures::default(),
             cache: world.resource::<SharedCache>().clone(),
             assets: 0,
+            polyhaven: Default::default(),
         }
     }
 }
@@ -139,7 +142,7 @@ impl Palette {
 }
 
 /// A tile of the palette: the picture, the name under it. Returns its response.
-fn tile(
+pub(crate) fn tile(
     ui: &mut egui::Ui,
     picture: Option<egui::TextureHandle>,
     name: &str,
@@ -240,6 +243,8 @@ pub fn show(root: &mut egui::Ui, c: &mut Ctx, palette: &mut Palette) {
                             .as_ref()
                             .map(|m| m.iter().filter(|k| k.category == category).cloned().collect())
                             .unwrap_or_default();
+                        crate::polyhaven::shelf(ui, c, &mut palette.polyhaven, category);
+                        ui.separator();
                         kinds_shelf(ui, c, palette, &kinds, None);
                         if !mine.is_empty() {
                             ui.separator();

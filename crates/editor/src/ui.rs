@@ -265,7 +265,18 @@ pub fn ui(
         shell,
         pointer,
     };
-    let (start_corner, start_tab, start_curves, start_distance, on_ground) = start;
+    let (start_corner, start_tab, start_curves, start_distance, on_ground, panels) = start;
+    if let Some(p) = panels {
+        if let Some(shelf) = p.shelf {
+            palette.shelf = shelf;
+        }
+        if let Some(on) = p.polyhaven {
+            c.shell.bottom = BottomTab::Assets;
+            c.shell.bottom_open = true;
+            asset_panel.polyhaven = on;
+        }
+        cmds.remove_resource::<crate::StartPanels>();
+    }
     if c.built.count > 0 {
         if let Some(n) = start_corner {
             crate::corners::step_to(&mut c, n.0);
@@ -371,6 +382,7 @@ pub fn ui(
     menus::header(&mut root, &mut c);
     menus::tool_settings(&mut root, &mut c);
     palette.assets_changed(library.revision);
+    palette.polyhaven.finish(&mut c);
     if !c.shell.maximized {
         crate::palette::show(&mut root, &mut c, &mut palette);
     }

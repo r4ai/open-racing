@@ -201,6 +201,8 @@ pub struct Panel {
     deleting: Option<PathBuf>,
     /// A model to paint as a scatter, asked for with its Scatter button.
     pub scatter: Option<PathBuf>,
+    /// Shows Poly Haven's assets rather than the project's.
+    pub polyhaven: bool,
 }
 
 fn size(bytes: Option<u64>) -> String {
@@ -220,7 +222,16 @@ pub fn panel(
     state: &mut Panel,
     palette: &mut crate::palette::Palette,
 ) {
-    ui.heading("Assets");
+    ui.horizontal(|ui| {
+        ui.heading("Assets");
+        ui.selectable_value(&mut state.polyhaven, false, "In this project");
+        ui.selectable_value(&mut state.polyhaven, true, "Poly Haven")
+            .on_hover_text("Poly Haven's free (CC0) models and textures, downloaded when used");
+    });
+    if state.polyhaven {
+        crate::polyhaven::browser(ui, &mut palette.polyhaven, &mut editor.status);
+        return;
+    }
     ui.horizontal(|ui| {
         if ui.button("Import…").clicked()
             && let Some(files) = rfd::FileDialog::new()
