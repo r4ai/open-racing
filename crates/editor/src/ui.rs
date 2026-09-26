@@ -367,6 +367,7 @@ pub fn ui(
     }
 
     menus::header(&mut root, &mut c);
+    menus::tool_settings(&mut root, &mut c);
     let mut open = c.shell.sidebar;
     egui::Panel::right("sidebar")
         .resizable(true)

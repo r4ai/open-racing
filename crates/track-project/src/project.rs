@@ -1627,7 +1627,7 @@ impl Project {
                 surface: s("grass"),
                 material: m("grass"),
                 margin: 200.0,
-                cell: 8.0,
+                cell: 4.0,
                 heights: None,
                 heights_offset: 0.0,
                 landforms: vec![],

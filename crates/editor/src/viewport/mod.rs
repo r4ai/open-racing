@@ -1419,6 +1419,48 @@ mod tests {
     }
 
     #[test]
+    fn a_sketch_keeps_the_nodes_its_shape_needs() {
+        // A straight run, a corner, and a straight run on: wobbles under the tolerance
+        // go, the corner stays.
+        let mut points: Vec<DVec3> = (0..=20)
+            .map(|i| DVec3::new(i as f64, 0.02 * (i % 2) as f64, 0.0))
+            .collect();
+        points.extend((1..=20).map(|i| DVec3::new(20.0, i as f64, 0.0)));
+        let kept = simplify(&points, 0.1);
+        assert_eq!(
+            kept,
+            vec![
+                DVec3::ZERO,
+                DVec3::new(20.0, 0.0, 0.0),
+                DVec3::new(20.0, 20.0, 0.0)
+            ]
+        );
+        assert_eq!(simplify(&points[..2], 0.1), points[..2].to_vec());
+    }
+
+    #[test]
+    fn a_circle_selects_what_it_paints_over_and_shift_takes_it_out() {
+        let (mut editor, _, camera, t, dir) = top_down("circle", DVec3::new(250.0, 0.0, 0.0));
+        let built = built_of(&editor);
+        let view = View {
+            cam: &camera,
+            t: &t,
+        };
+        editor.selection = Default::default();
+        let at = view.screen(DVec3::new(250.0, 0.0, 0.0)).unwrap();
+        circle_select(&mut editor, &built, view, at, 30.0, false, false);
+        assert_eq!(editor.selection.item, Some(Item::Road(0)));
+        // In edit mode, the nodes within it.
+        circle_select(&mut editor, &built, view, at, 30.0, false, true);
+        assert_eq!(editor.selection.nodes, vec![1]);
+        circle_select(&mut editor, &built, view, at, 30.0, true, true);
+        assert!(editor.selection.nodes.is_empty());
+        circle_select(&mut editor, &built, view, at, 30.0, true, false);
+        assert_eq!(editor.selection.item, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_selects_every_node_in_edit_mode_and_every_item_in_object_mode() {
         let (mut editor, _, _, _, dir) = top_down("select all", DVec3::ZERO);
         let spline = crate::presets::named(&editor.project, "concrete wall")

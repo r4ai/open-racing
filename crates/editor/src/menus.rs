@@ -14,6 +14,21 @@ use crate::viewport::{
     Hit, KeyRef, Marker, Menu, PartValue, RangeEnd, ToolKind, ViewDir, add_node_at,
 };
 
+/// The active brush's settings on a strip of their own under the view's header, as
+/// Blender's tool settings.
+pub fn tool_settings(root: &mut egui::Ui, c: &mut Ctx) {
+    if !c.tool.active.is_brush() {
+        return;
+    }
+    egui::Panel::top("tool settings").show(root, |ui| {
+        ui.horizontal(|ui| {
+            ui.strong(c.tool.active.label());
+            ui.separator();
+            crate::brush::settings_ui(ui, c, true);
+        });
+    });
+}
+
 /// The strip above the 3D view: its menus, what a transform is doing, snapping, the
 /// projection and the overlays.
 pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
@@ -52,11 +67,6 @@ pub fn header(root: &mut egui::Ui, c: &mut Ctx) {
                 })
                 .response
                 .on_hover_text("The tool a click or drag in the view uses (toolbar: T)");
-            // A brush's settings, as Blender's tool settings in the header.
-            if c.tool.active.is_brush() {
-                ui.separator();
-                crate::brush::settings_ui(ui, c, true);
-            }
             ui.separator();
             ui.menu_button("View", |ui| view_menu(ui, c));
             ui.menu_button("Select", |ui| {
