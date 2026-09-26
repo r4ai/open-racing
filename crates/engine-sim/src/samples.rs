@@ -112,8 +112,9 @@ pub fn i4() -> EngineSpec {
             limiter_rpm: 7000.0,
             stall_rpm: 350.0,
             limiter_hysteresis_rpm: 150.0,
-            idle_authority: 0.06,
-            idle_gain: 0.0004,
+            idle_opening: 0.009,
+            idle_authority: 0.04,
+            idle_gain: 0.00005,
             overrun_cut_rpm: Some(1500.0),
             spark_deg: Map2 {
                 rpm: vec![1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0],
@@ -421,8 +422,9 @@ pub fn v8() -> EngineSpec {
             limiter_rpm: 9000.0,
             stall_rpm: 500.0,
             limiter_hysteresis_rpm: 200.0,
-            idle_authority: 0.05,
-            idle_gain: 0.0004,
+            idle_opening: 0.01,
+            idle_authority: 0.04,
+            idle_gain: 0.00005,
             overrun_cut_rpm: Some(2000.0),
             spark_deg: Map2 {
                 rpm: vec![1000.0, 3000.0, 5000.0, 7000.0, 9000.0],

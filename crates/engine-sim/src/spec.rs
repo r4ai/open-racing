@@ -260,10 +260,15 @@ pub struct Ecu {
     /// Fuel is cut above the limiter until the speed falls this far below it, rpm.
     #[serde(default = "default_hysteresis")]
     pub limiter_hysteresis_rpm: f64,
-    /// Most throttle the idle control opens, 0..1.
+    /// Throttle opening that holds the idle speed with the pedal up (the idle air), 0..1;
+    /// the idle control trims round it.
+    #[serde(default = "default_idle_opening")]
+    pub idle_opening: f64,
+    /// Most the idle control opens beyond `idle_opening`, 0..1.
     #[serde(default = "default_idle_authority")]
     pub idle_authority: f64,
-    /// Throttle the idle control opens per rpm below `idle_rpm`, per second (integral).
+    /// Throttle the idle control opens per rpm below `idle_rpm`, per second (its integral
+    /// part; the proportional part is half a second of it).
     #[serde(default = "default_idle_gain")]
     pub idle_gain: f64,
     /// Fuel is cut with the throttle shut above this speed (overrun), rpm.
@@ -279,11 +284,14 @@ pub struct Ecu {
 fn default_hysteresis() -> f64 {
     150.0
 }
+fn default_idle_opening() -> f64 {
+    0.01
+}
 fn default_idle_authority() -> f64 {
-    0.06
+    0.04
 }
 fn default_idle_gain() -> f64 {
-    0.0004
+    0.00005
 }
 
 /// A table over rpm and load: `values[i][j]` at `rpm[i]`, `load[j]`; bilinear between and
@@ -445,17 +453,30 @@ pub struct Orifice {
     pub restriction: Restriction,
 }
 
-/// Throttle open area over the bore area at a pedal opening 0..1: the plate turns from
-/// its closed angle to 90° (Heywood, eq. 7.14, without the shaft).
+/// Open area of a butterfly throttle at a pedal opening 0..1, m²: the plate turns from
+/// its closed angle to 90°. Heywood, *Internal Combustion Engine Fundamentals*, eq. 7.14,
+/// with the shaft (diameter `shaft`); once the plate's edge clears the shaft's shadow,
+/// the bore less the shaft's section.
 pub fn throttle_area(bore: f64, shaft: f64, closed_angle_deg: f64, opening: f64) -> f64 {
-    let bore_area = std::f64::consts::PI * 0.25 * bore * bore;
-    let phi0 = closed_angle_deg.to_radians();
-    let phi = phi0 + opening.clamp(0.0, 1.0) * (std::f64::consts::FRAC_PI_2 - phi0);
-    let open = bore_area * (1.0 - phi.cos() / phi0.cos());
-    // Leakage past a shut plate, and the shaft's blockage when open.
-    let leak = 0.002 * bore_area;
-    let shaft_block = shaft * bore * phi.sin();
-    (open - shaft_block).max(0.0) + leak
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let bore_area = PI * 0.25 * bore * bore;
+    let psi0 = closed_angle_deg.to_radians();
+    let psi = psi0 + opening.clamp(0.0, 1.0) * (FRAC_PI_2 - psi0);
+    let a = (shaft / bore).clamp(0.0, 0.5);
+    let (c, c0) = (psi.cos(), psi0.cos());
+    let open = if c > a * c0 {
+        bore_area * (1.0 - c / c0)
+            + 0.5
+                * bore
+                * bore
+                * (a / c * (c * c - a * a * c0 * c0).sqrt() + c / c0 * (a * c0 / c).asin()
+                    - a * (1.0 - a * a).sqrt()
+                    - a.asin())
+    } else {
+        bore_area - shaft * bore
+    };
+    // Leakage past a shut plate.
+    open.max(0.0) + 0.002 * bore_area
 }
 
 #[cfg(test)]
@@ -481,6 +502,15 @@ mod tests {
         let a1 = throttle_area(0.06, 0.0, 7.0, 1.0);
         assert!(a0 < 0.01 * bore_area);
         assert!((a1 - bore_area).abs() / bore_area < 0.01);
+        // With a shaft: opening grows from nothing, and the shaft blocks some when wide open.
+        let mut last = 0.0;
+        for k in 0..=20 {
+            let a = throttle_area(0.06, 0.008, 7.0, k as f64 / 20.0);
+            assert!(a >= last - 1e-12, "{k}: {a} < {last}");
+            last = a;
+        }
+        assert!(throttle_area(0.06, 0.008, 7.0, 0.15) > 0.03 * bore_area);
+        assert!((last - (bore_area - 0.008 * 0.06) - 0.002 * bore_area).abs() < 0.02 * bore_area);
         assert!(throttle_area(0.06, 0.0, 7.0, 0.2) < 0.25 * bore_area);
     }
 }

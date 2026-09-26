@@ -7194,7 +7194,13 @@ dependencies = [
 name = "open-racing-machine-editor"
 version = "0.1.0"
 dependencies = [
+ "bevy",
+ "bevy_egui",
+ "clap",
+ "glam 0.33.8",
+ "open-racing-engine-sim",
  "open-racing-machine-project",
+ "serde_json",
 ]
 
 [[package]]

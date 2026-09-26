@@ -398,7 +398,10 @@ impl Model {
             load_torque: 0.0,
             split_steps: 0,
             fault: None,
-            ecu: EcuState::default(),
+            ecu: EcuState {
+                idle: 0.0,
+                limiter_cut: false,
+            },
             peak_pressure: 50e5,
         };
         for (i, f) in firing.into_iter().enumerate() {
@@ -526,10 +529,14 @@ impl Model {
     fn control(&mut self, c: &Controls) {
         let e = &self.spec.ecu;
         let rpm = self.rpm();
-        // Idle speed control: an integral controller on the throttle.
+        // Idle speed control: a PI controller on the throttle, its proportional part half a
+        // second of the integral's rate.
         let err = e.idle_rpm - rpm;
-        self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(0.0, e.idle_authority);
-        self.throttle = c.pedal.clamp(0.0, 1.0).max(self.ecu.idle);
+        // Never below half the idle air: a shut plate would starve the manifold and stall.
+        let (lo, hi) = (-0.5 * e.idle_opening, e.idle_authority);
+        self.ecu.idle = (self.ecu.idle + e.idle_gain * err * self.dt).clamp(lo, hi);
+        let idle = e.idle_opening + (self.ecu.idle + 0.5 * e.idle_gain * err).clamp(lo, hi);
+        self.throttle = c.pedal.clamp(0.0, 1.0).max(idle);
         if rpm > e.limiter_rpm {
             self.ecu.limiter_cut = true;
         } else if rpm < e.limiter_rpm - e.limiter_hysteresis_rpm {

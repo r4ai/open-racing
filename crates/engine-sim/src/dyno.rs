@@ -310,6 +310,41 @@ mod tests {
         assert!(p.power > 280e3 && p.power < 420e3, "power {}", p.power);
     }
 
+    /// Left alone with the pedal up, the engine settles at its idle speed.
+    #[test]
+    fn idles() {
+        let (e, i, x) = (samples::i4(), samples::i4_intake(), samples::i4_exhaust());
+        let b = Build::new(&e)
+            .system("intake", &i)
+            .system("exhaust", &x)
+            .quality(Quality::Draft);
+        let (mut m, _) = b.build().unwrap();
+        m.set_crank(0.0, e.ecu.idle_rpm);
+        // Held at idle for the first cycles, as a starter would turn it, then let go.
+        let hold = Controls {
+            load: Load::Speed(e.ecu.idle_rpm),
+            ..Default::default()
+        };
+        while m.time < 0.5 {
+            m.step(&hold);
+        }
+        let c = Controls::default();
+        let mut avg = 0.0;
+        let mut n = 0.0;
+        while m.time < 4.5 {
+            m.step(&c);
+            if m.time > 3.0 {
+                avg += m.rpm();
+                n += 1.0;
+            }
+        }
+        let rpm = avg / n;
+        assert!(
+            (rpm - e.ecu.idle_rpm).abs() < 0.12 * e.ecu.idle_rpm,
+            "idles at {rpm:.0} rpm"
+        );
+    }
+
     #[test]
     fn motoring_takes_torque() {
         let (e, i, x) = (samples::i4(), samples::i4_intake(), samples::i4_exhaust());

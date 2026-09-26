@@ -146,6 +146,18 @@ pub fn render(
 
 /// Runs a script on a model and records it.
 pub fn record(m: &mut Model, script: &Script, sound: SoundSettings) -> Result<Recording, String> {
+    record_streaming(m, script, sound, |_, _| true)
+}
+
+/// As `record`, handing each new stretch of 48 kHz samples (per microphone, Pa) and the
+/// share of the script done to `progress` as it goes (for a preview that plays while it
+/// renders); `progress` returning false stops the run there.
+pub fn record_streaming(
+    m: &mut Model,
+    script: &Script,
+    sound: SoundSettings,
+    mut progress: impl FnMut(&[Vec<f32>], f64) -> bool,
+) -> Result<Recording, String> {
     if script.duration.is_nan() || script.duration <= 0.0 {
         return Err("the script needs a duration".into());
     }
@@ -166,6 +178,7 @@ pub fn record(m: &mut Model, script: &Script, sound: SoundSettings) -> Result<Re
     let start = m.time;
     let mut next_tel = 0.0;
     let mut buf = vec![Vec::new(); ac.mic_count()];
+    let mut sent = 0;
     while m.time - start < script.duration {
         let t = m.time - start;
         let c = script.controls(t);
@@ -181,7 +194,20 @@ pub fn record(m: &mut Model, script: &Script, sound: SoundSettings) -> Result<Re
             telemetry.push((t, m.rpm(), c.pedal, m.gas_torque - m.friction_torque));
             next_tel += 0.01;
         }
+        // Every 20 ms of sound.
+        if !channels.is_empty() && channels[0].len() >= sent + 960 {
+            let new: Vec<Vec<f32>> = channels.iter().map(|c| c[sent..].to_vec()).collect();
+            sent = channels[0].len();
+            if !progress(&new, t / script.duration) {
+                break;
+            }
+        }
     }
+    let new: Vec<Vec<f32>> = channels
+        .iter()
+        .map(|c| c[sent.min(c.len())..].to_vec())
+        .collect();
+    progress(&new, 1.0);
     Ok(Recording {
         rate: OUTPUT_RATE,
         mics,
