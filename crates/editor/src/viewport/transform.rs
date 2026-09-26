@@ -306,6 +306,7 @@ pub fn start_modal(
         by_drag,
         both: false,
         snapped: Default::default(),
+        last: Vec::new(),
     });
 }
 
@@ -417,8 +418,9 @@ pub(super) fn modal(
             format!(" [{}]", m.typed)
         }
     );
-    if !ops.is_empty() {
-        editor.apply(ops, None);
+    if !ops.is_empty() && ops != m.last {
+        editor.apply(ops.clone(), None);
+        m.last = ops;
     }
     if cancel {
         tool.modal = None;

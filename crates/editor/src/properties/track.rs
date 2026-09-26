@@ -576,9 +576,10 @@ pub(super) fn terrain_tab(ui: &mut egui::Ui, c: &mut Ctx) {
             ))
             .id_salt(("landform", i))
             .show(ui, |ui| {
-                changed |= row(ui, "Name", |ui| {
-                    ui.text_edit_singleline(&mut l.name).lost_focus()
-                });
+                if let Some(name) = rename_field(ui, ("landform name", i), &l.name) {
+                    l.name = name;
+                    changed = true;
+                }
                 let (mut level, mut h) = match l.kind {
                     LandformKind::Raise(h) => (false, h),
                     LandformKind::Level(h) => (true, h),

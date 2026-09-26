@@ -440,14 +440,11 @@ fn menu_items(ui: &mut egui::Ui, c: &mut Ctx, menu: &Menu) -> bool {
                 .landforms
                 .get(i)
                 .map_or(String::new(), |l| l.name.clone());
-            ui.label(egui::RichText::new(format!("Landform {name}")).strong());
-            if ui.button("Remove Landform").clicked() {
-                let mut terrain = c.editor.project.terrain.clone();
-                if i < terrain.landforms.len() {
-                    terrain.landforms.remove(i);
-                    c.editor.apply(vec![Op::SetTerrain { terrain }], None);
-                }
-                ui.close();
+            ui.strong(format!("Landform {name}"));
+            ui.separator();
+            if item(ui, "Remove landform", "") {
+                used = true;
+                c.editor.apply(vec![Op::RemoveLandform { name }], None);
             }
         }
         Some(Hit::Line(r, i)) => used |= line_menu(ui, c, r, i),

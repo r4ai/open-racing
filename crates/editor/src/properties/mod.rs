@@ -347,6 +347,29 @@ fn name_row(ui: &mut egui::Ui, c: &mut Ctx, state: &mut State, item: Item) {
     }
 }
 
+/// A name field for something the panel edits a copy of each frame: what is typed is
+/// kept until the field loses focus, and then given back if it is a new name.
+pub fn rename_field(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    name: &str,
+) -> Option<String> {
+    let id = ui.make_persistent_id(id);
+    let mut text: String = ui
+        .data(|d| d.get_temp(id))
+        .unwrap_or_else(|| name.to_string());
+    let resp = row(ui, "Name", |ui| {
+        ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
+    });
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+        return None;
+    }
+    ui.data_mut(|d| d.remove::<String>(id));
+    let typed = text.trim();
+    (resp.lost_focus() && !typed.is_empty() && typed != name).then(|| typed.to_string())
+}
+
 /// The stretch the selected nodes span (a node's length round one alone), or the whole
 /// road without any. On an open road it stops at the ends; on a closed one it may run
 /// across the start.

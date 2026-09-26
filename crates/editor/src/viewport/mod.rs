@@ -323,6 +323,9 @@ pub struct Modal {
     pub both: bool,
     /// What the grabbed node or end has caught on, to show it.
     pub snapped: std::sync::Mutex<Option<DVec3>>,
+    /// The operations applied last: the same again (the pointer resting) changes
+    /// nothing and starts no rebuild.
+    last: Vec<Op>,
 }
 
 impl Modal {

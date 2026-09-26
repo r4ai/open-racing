@@ -354,10 +354,18 @@ pub fn join(editor: &mut Editor) {
     let Some(name) = item_name(&editor.project, item).map(str::to_string) else {
         return;
     };
+    // Roads join roads and splines splines; props and the other kind are left out.
+    let same_kind = |o: &Item| {
+        matches!(
+            (item, o),
+            (Item::Road(_), Item::Road(_)) | (Item::Spline(_), Item::Spline(_))
+        )
+    };
     let ops: Vec<Op> = editor
         .selection
         .others
         .iter()
+        .filter(|o| same_kind(o))
         .filter_map(|&o| item_name(&editor.project, o))
         .map(|with| Op::JoinLines {
             line: name.clone(),
@@ -365,6 +373,10 @@ pub fn join(editor: &mut Editor) {
         })
         .collect();
     let n = ops.len();
+    if n == 0 {
+        editor.status = "select another road (or spline) to join onto the active one".into();
+        return;
+    }
     if editor.apply(ops, None) {
         // The joined lines are gone: find the active one again by its name.
         let p = &editor.project;
