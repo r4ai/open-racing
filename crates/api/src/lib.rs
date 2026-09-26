@@ -15,7 +15,7 @@ use open_racing_env::{
 
 pub use open_racing_env::{
     DefaultReward, DefaultTermination, Done, EnvConfig, EpisodeStats, LapTimer, MAX_SECTORS,
-    RewardFn, StepInfo, TerminationFn,
+    OFF_COURSE_WHEELS, RewardFn, StepInfo, TerminationFn,
 };
 pub use open_racing_sim::{
     Car, CarModel, Controls, RubberMap, Surface, Track, TrackCondition, TrackEvolution, parse_grip,

@@ -12,6 +12,8 @@ use open_racing_train_burn::ppo::{self, PpoConfig, TrainContext};
 use open_racing_train_burn::reference::ReferenceConfig;
 use open_racing_train_burn::{BurnPolicy, Normalizer, PolicyMeta, TrainBackend};
 
+mod longrun;
+
 #[derive(Parser)]
 #[command(about = "Train and evaluate racing agents with PPO on Burn")]
 struct Cli {
@@ -122,6 +124,36 @@ enum Command {
         /// Include the track widths at the lookahead points in the observation.
         #[arg(long)]
         edge_obs: bool,
+        /// Include tyre wear, carcass and brake temperatures and damage in the observation.
+        #[arg(long)]
+        stint_obs: bool,
+        /// Include the position around the lap in the observation.
+        #[arg(long)]
+        lap_position_obs: bool,
+        /// Scale the steering action to the steering usable at the car's speed.
+        #[arg(long)]
+        speed_scaled_steering: bool,
+        /// Number of lookahead points along the track.
+        #[arg(long, default_value_t = EnvConfig::default().lookahead_points)]
+        lookahead_points: usize,
+        /// Distance to the first lookahead point, m.
+        #[arg(long, default_value_t = EnvConfig::default().lookahead_spacing)]
+        lookahead_spacing: f64,
+        /// Each gap between lookahead points is this many times the one before.
+        #[arg(long, default_value_t = EnvConfig::default().lookahead_growth)]
+        lookahead_growth: f64,
+        /// Share of random starts on tyres as a stint leaves them (worn and hot).
+        #[arg(long, default_value_t = 0.0)]
+        worn_start_fraction: f64,
+        /// Most tread worn at those starts (1 = worn out).
+        #[arg(long, default_value_t = 0.3)]
+        worn_start_max_wear: f64,
+        /// Share of resets from states shortly before earlier crashes.
+        #[arg(long, default_value_t = 0.0)]
+        replay_start_fraction: f64,
+        /// Reward lost per unit of tread worn (summed over the four tyres).
+        #[arg(long, default_value_t = DefaultReward::default().wear_weight)]
+        wear_penalty: f64,
         /// Start episodes no faster than the corners just ahead allow.
         #[arg(long)]
         safe_start: bool,
@@ -166,6 +198,25 @@ enum Command {
         /// Continue from a trained policy (weights and observation normaliser).
         #[arg(long)]
         init: Option<PathBuf>,
+    },
+    /// Drive a stint from a standing start: several cars, the first as the policy
+    /// drives, the others with small perturbations; lap times, tyres and crashes.
+    Longrun {
+        #[arg(long, default_value = "runs/ppo")]
+        model: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        laps: u32,
+        #[arg(long, default_value_t = 16)]
+        cars: usize,
+        /// Standard deviation of the noise added to every car's actions but the first.
+        #[arg(long, default_value_t = 0.02)]
+        noise: f32,
+        /// Write one car's stint step by step to this CSV file.
+        #[arg(long)]
+        trace: Option<PathBuf>,
+        /// The car whose stint `--trace` writes (0 drives without noise).
+        #[arg(long, default_value_t = 0)]
+        trace_car: usize,
     },
     /// Run a trained policy and report lap times.
     Eval {
@@ -262,9 +313,13 @@ fn main() {
                 control_hz: config.control_hz,
                 lookahead_points: config.lookahead_points,
                 lookahead_spacing: config.lookahead_spacing,
+                lookahead_growth: config.lookahead_growth,
                 privileged_obs: config.privileged_obs,
                 tyre_obs: config.tyre_obs,
                 edge_obs: config.edge_obs,
+                stint_obs: config.stint_obs,
+                lap_position_obs: config.lap_position_obs,
+                speed_scaled_steering: config.speed_scaled_steering,
                 abs: config.abs,
                 traction_control: config.traction_control,
                 max_steer_rate: config.max_steer_rate,
@@ -317,6 +372,16 @@ fn main() {
             privileged,
             tyre_obs,
             edge_obs,
+            stint_obs,
+            lap_position_obs,
+            speed_scaled_steering,
+            lookahead_points,
+            lookahead_spacing,
+            lookahead_growth,
+            worn_start_fraction,
+            worn_start_max_wear,
+            replay_start_fraction,
+            wear_penalty,
             safe_start,
             start_speed_max,
             start_offset_meters,
@@ -340,6 +405,15 @@ fn main() {
                 privileged_obs: privileged,
                 tyre_obs,
                 edge_obs,
+                stint_obs,
+                lap_position_obs,
+                speed_scaled_steering,
+                lookahead_points,
+                lookahead_spacing,
+                lookahead_growth,
+                worn_start_fraction,
+                worn_start_max_wear,
+                replay_start_fraction,
                 safe_start,
                 start_speed: (0.0, start_speed_max),
                 start_offset: (-start_offset_meters, start_offset_meters),
@@ -358,6 +432,7 @@ fn main() {
             spec.reward = Arc::new(DefaultReward {
                 termination_penalty: crash_penalty,
                 grip_loss_weight: grip_loss_penalty,
+                wear_weight: wear_penalty,
                 steer_change_weight: steer_change_penalty,
                 off_track_weight: off_track_penalty,
                 edge_weight: edge_penalty,
@@ -378,9 +453,13 @@ fn main() {
                 control_hz: config.control_hz,
                 lookahead_points: config.lookahead_points,
                 lookahead_spacing: config.lookahead_spacing,
+                lookahead_growth: config.lookahead_growth,
                 privileged_obs: config.privileged_obs,
                 tyre_obs: config.tyre_obs,
                 edge_obs: config.edge_obs,
+                stint_obs: config.stint_obs,
+                lap_position_obs: config.lap_position_obs,
+                speed_scaled_steering: config.speed_scaled_steering,
                 abs: config.abs,
                 traction_control: config.traction_control,
                 max_steer_rate: config.max_steer_rate,
@@ -414,6 +493,18 @@ fn main() {
                 config.substeps()
             );
             ppo::train::<TrainBackend>(&mut env, &cfg, TrainContext { meta }, &Default::default());
+        }
+        Command::Longrun {
+            model,
+            laps,
+            cars,
+            noise,
+            trace,
+            trace_car,
+        } => {
+            let mut policy = BurnPolicy::load(&model)
+                .unwrap_or_else(|e| panic!("loading {}: {e}", model.display()));
+            longrun::run(&mut policy, laps, cars, noise, trace.as_deref(), trace_car);
         }
         Command::Eval {
             model,

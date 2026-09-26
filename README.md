@@ -341,24 +341,68 @@ A rebuild after editing the app takes about 5 s this way (Windows, 16 threads), 
 `train --envs 512 --iterations 400` (13M agent steps, ~12 min on an M5, wgpu): mean distance per episode rose from ~50 m to ~3–8 km, best lap 75.9 s on Lakeside (~4 km). This is still short; more training should make it more stable.
 Training throughput is ~18k agent steps/s, and the bottleneck is the NN update, not the simulation.
 
-Tsukuba (2.08 km) on an RX 9070 (wgpu, ~90k agent steps/s at 50 Hz, ~57k at 25 Hz with 2048 envs), in three stages of about 16, 20 and 65 minutes:
+A 2.1 km circuit with two hairpins, on an RX 9070 (wgpu, ~90k agent steps/s at 50 Hz, ~57k at 25 Hz with 2048 envs), in three stages of about 16, 20 and 65 minutes:
 
 ```bash
-T="train --track tsukuba --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --gamma 0.995 --crash-penalty 50 --steer-change-penalty 0.5"
-cargo run --release -p open-racing-train-burn -- $T --iterations 400 --entropy 0.002 --final-std 0.15 --out runs/tsukuba-1
+T="train --track <track> --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --gamma 0.995 --crash-penalty 50 --steer-change-penalty 0.5"
+cargo run --release -p open-racing-train-burn -- $T --iterations 400 --entropy 0.002 --final-std 0.15 --out runs/technical-1
 cargo run --release -p open-racing-train-burn -- $T --iterations 640 --lr 1.5e-4 --entropy 0 --init-std 0.15 --final-std 0.05 \
-  --off-track-penalty 0.06 --init runs/tsukuba-1 --out runs/tsukuba-2
+  --off-track-penalty 0.06 --init runs/technical-1 --out runs/technical-2
 cargo run --release -p open-racing-train-burn -- $T --iterations 1800 --abs --lr 1.5e-4 --entropy 0 --init-std 0.11 --final-std 0.05 \
-  --off-track-penalty 0.06 --init runs/tsukuba-2 --out runs/tsukuba-3
+  --off-track-penalty 0.06 --init runs/technical-2 --out runs/technical-3
 ```
 
 (The second stage was stopped at iteration 640 of a 2300-iteration schedule.) The result laps in 55.2 s on the second lap from a standing start (best 54.8 s), with one crash in 141 laps from random starts. What mattered, from single-seed runs of 400 iterations:
 
-- `--edge-obs`: without the track widths ahead the policy cannot tell where the road ends, and did not get past Tsukuba's first hairpin; with them it lapped in 57.9 s after 10 minutes.
+- `--edge-obs`: without the track widths ahead the policy cannot tell where the road ends, and did not get past the first hairpin; with them it lapped in 57.9 s after 10 minutes.
 - `--control-hz 25`: half as many decisions per second halves the steering jitter the exploration noise adds, and the same discount looks twice as far ahead. The policy then used the apexes (0.7–1.9 m from the inside edge instead of 3.3–5 m).
 - `--final-std`: with actions clipped to their range, a policy trained with large noise behaves differently when run deterministically; several runs lapped cleanly with noise and crashed without it. Shrinking the noise over training removed that, and with `--steer-change-penalty` the steering stopped sawing between full left and full right every step.
 - `--abs`: without it the GT3 locks its wheels at 80 % pedal, so policies braked at about half pedal and still overheated the front tyre that went light over bumps.
 - Hitting a wall ends the episode; before, policies braked for the hairpin by bouncing off the outside wall.
+
+### Long runs
+
+A policy that laps well can still fail a race stint. Trained with the recipe above on a 5.8 km road circuit, the GT3 lapped in 119.7 s, but none of 32 cars driving 10 laps from a standing start got past lap 4. Its episodes ended at 180 s, about a lap and a half, and all began on fresh tyres: the policy never drove a second lap, a warm tyre or a worn one, and could not see its tyres anyway. `longrun` measures this:
+
+```bash
+# Cars from the start line for 10 laps: the first as the policy drives, the others with a little action noise.
+# Per lap: time, hottest tread, grip left by the tyres' condition, wear, hot pressure, damage, steps off track
+# and off course (3+ wheels off); then how many cars finished, where the others crashed, and the total times.
+cargo run --release -p open-racing-train-burn -- longrun --model runs/longrun-3 --laps 10 --cars 32 --trace stint.csv
+```
+
+A policy holds up over a stint when it trains on the states a stint goes through and can see them:
+
+- `--max-episode-seconds 600` (then 1400) with random starts: episodes run for several laps, so tyres warm and wear as in a stint.
+- `--worn-start-fraction 0.5 --worn-start-max-wear 0.35`: half the random starts put the car on tyres as a stint leaves them (worn by up to 0.35, carcasses between 60 and 105 °C with the treads a little either side).
+- `--replay-start-fraction 0.25`: a quarter of the episodes restart from the state 3 s before an earlier crash, so training dwells on where the policy fails.
+- `--tyre-obs --stint-obs --privileged`: tread temperatures and pressures, wear, carcass and brake temperatures, damage, slip angles and ratios and loads, all of which sims report in their telemetry.
+- `--grip-loss-penalty 0.4 --wear-penalty 200`: a price on the grip the tyres lose to heat, pressure and wear, and on the tread worn. Overheating costs lap time for minutes, far beyond the discount horizon.
+- `--speed-scaled-steering`: the steering action spans what the car can use at its speed (full lock at walking pace, about 5° at the wheels at top speed), so the same resolution serves a hairpin and a fast sweeper.
+- `--lookahead-points 24 --lookahead-spacing 6 --lookahead-growth 1.1`: lookahead points 6 m apart near the car, each gap 10 % longer than the one before, out to 530 m, where braking from top speed begins.
+- `--lap-position-obs`, `--abs --traction-control` (as GT3 cars have), `--gamma 0.997`.
+- Progress earns nothing while three or more wheels are off the track. Without this, a policy learned to drive straight across a chicane with all four wheels on the grass.
+
+In three stages of 150, 85 and 20 minutes on an RX 9070:
+
+```bash
+T="train --track <track> --envs 2048 --minibatch 16384 --control-hz 25 --edge-obs --tyre-obs --privileged --stint-obs   --lap-position-obs --speed-scaled-steering --lookahead-points 24 --lookahead-spacing 6 --lookahead-growth 1.1   --abs --traction-control --gamma 0.997 --crash-penalty 50 --steer-change-penalty 0.5 --grip-loss-penalty 0.4   --wear-penalty 200 --replay-start-fraction 0.25 --start-speed-max 60 --safe-start --iterations 100000"
+cargo run --release -p open-racing-train-burn -- $T --hidden 512,512 --entropy 0.002 --final-std 0.08 --worn-start-fraction 0.5   --max-episode-seconds 600 --duration-seconds 9000 --seed 1 --out runs/longrun-1
+cargo run --release -p open-racing-train-burn -- $T --lr 1.5e-4 --entropy 0 --init-std 0.08 --final-std 0.05 --worn-start-fraction 0.4   --max-episode-seconds 1400 --duration-seconds 5100 --seed 3 --init runs/longrun-1 --out runs/longrun-2
+# Stopped after 20 of 55 minutes: that checkpoint drove 10 laps 2 s faster than the last.
+cargo run --release -p open-racing-train-burn -- $T --lr 1e-4 --entropy 0 --init-std 0.05 --final-std 0.04 --worn-start-fraction 0.4   --max-episode-seconds 1400 --duration-seconds 3300 --seed 5 --init runs/longrun-2 --out runs/longrun-3
+```
+
+10 laps from a standing start, 32 cars each:
+
+| policy | finished | crashes | off course, steps per lap | 10 laps, first car | mean |
+| --- | --- | --- | --- | --- | --- |
+| recipe above (50 min) | 0 / 32 | 32 in 73 laps | 3.9 | – | – |
+| stage 1 | 32 / 32 | 0 in 320 laps | 0.00 | 1223.4 s | 1228.9 s |
+| stage 2 | 32 / 32 | 0 in 320 laps | 0.08 | 1213.5 s | 1218.4 s |
+| stage 3 | 32 / 32 | 0 in 320 laps | 0.00 | 1208.2 s | 1213.1 s |
+
+Stage 3 laps in 119.5 s on lap 2 and 120.8 s on lap 10 as the tread wears, with the treads at 103–105 °C. Stage 1 with the old states (180 s episodes, fresh tyres, no replays) lapped in 114.4 s by cutting a chicane, and none of 16 cars finished 10 laps. [docs/long-run-rl.md](docs/long-run-rl.md) describes the method and the experiments in full.
 
 ## License
 

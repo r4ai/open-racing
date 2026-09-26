@@ -14,14 +14,16 @@ use std::sync::Arc;
 
 use glam::DVec3;
 use open_racing_sim::{
-    AutoShift, BlipAssist, Car, CarModel, ClutchAssist, Controls, DT, GRAVITY, RubberMap, Shift,
-    Track, TrackEvolution,
+    AutoShift, BlipAssist, Car, CarModel, CarState, ClutchAssist, Controls, DT, GRAVITY, RubberMap,
+    Shift, Telemetry, Track, TrackEvolution,
 };
 use rayon::prelude::*;
 
 pub use lap::{LapTimer, MAX_SECTORS};
 pub use obs::{AppliedInput, ObsLayout, ObsSpec};
-pub use reward::{DefaultReward, DefaultTermination, Done, RewardFn, StepInfo, TerminationFn};
+pub use reward::{
+    DefaultReward, DefaultTermination, Done, OFF_COURSE_WHEELS, RewardFn, StepInfo, TerminationFn,
+};
 pub use rng::Rng;
 
 /// Action dimensions: steering (−1..1 of full lock), throttle (0..1), brake (0..1) and,
@@ -70,13 +72,34 @@ pub struct EnvConfig {
     /// grid of the whole track per environment.
     pub grip_gain_per_lap: f64,
     pub lookahead_points: usize,
+    /// Distance from the car to the first lookahead point and between the first two, m.
     pub lookahead_spacing: f64,
+    /// Each gap between lookahead points is this many times the one before, so a few
+    /// points reach far ahead (braking from top speed) while the near ones stay dense.
+    /// 1 spaces them evenly.
+    pub lookahead_growth: f64,
     /// Append ground-truth tyre state to the observation.
     pub privileged_obs: bool,
     /// Append tread temperatures and pressures, as sims report them in telemetry.
     pub tyre_obs: bool,
     /// Append the track widths left and right of each lookahead point.
     pub edge_obs: bool,
+    /// Append what changes over a stint, as sims report it in telemetry: tyre wear and
+    /// carcass temperatures, brake disc temperatures and body damage.
+    pub stint_obs: bool,
+    /// Append the position around the lap (sine and cosine of its share).
+    pub lap_position_obs: bool,
+    /// The steering action spans the steering a car can use at its speed rather than
+    /// the full lock: from the lock at walking pace to a few degrees at the wheels at
+    /// top speed, so the same action resolution serves a hairpin and a fast sweeper.
+    pub speed_scaled_steering: bool,
+    /// Share of random starts on tyres as a stint leaves them: tread worn by up to
+    /// `worn_start_max_wear`, treads and carcasses anywhere in their working range.
+    pub worn_start_fraction: f64,
+    pub worn_start_max_wear: f64,
+    /// Share of resets from states recorded [`REPLAY_LEAD`] s before an earlier episode
+    /// crashed (once any were recorded), so training dwells on the places it fails.
+    pub replay_start_fraction: f64,
     pub seed: u64,
 }
 
@@ -98,9 +121,16 @@ impl Default for EnvConfig {
             grip_gain_per_lap: 0.0,
             lookahead_points: 20,
             lookahead_spacing: 10.0,
+            lookahead_growth: 1.0,
             privileged_obs: false,
             tyre_obs: false,
             edge_obs: false,
+            stint_obs: false,
+            lap_position_obs: false,
+            speed_scaled_steering: false,
+            worn_start_fraction: 0.0,
+            worn_start_max_wear: 0.0,
+            replay_start_fraction: 0.0,
             seed: 0,
         }
     }
@@ -124,9 +154,12 @@ impl EnvConfig {
         ObsLayout {
             lookahead_points: self.lookahead_points,
             lookahead_spacing: self.lookahead_spacing,
+            lookahead_growth: self.lookahead_growth,
             privileged: self.privileged_obs,
             tyres: self.tyre_obs,
             edges: self.edge_obs,
+            stint: self.stint_obs,
+            lap_position: self.lap_position_obs,
         }
     }
 }
@@ -180,7 +213,29 @@ pub struct Env {
     pub stats: EpisodeStats,
     /// Stats of the previous episode (valid right after an automatic reset).
     pub last_episode: EpisodeStats,
+    /// Recent states, one every [`SNAPSHOT_INTERVAL`] s, oldest overwritten first.
+    history: [Option<Snapshot>; HISTORY_LEN],
+    next_snapshot: f64,
+    /// The state [`REPLAY_LEAD`] s before the last crash, until the batch collects it.
+    crash_snapshot: Option<Snapshot>,
 }
+
+/// Everything that makes a car's situation, to restart an episode from.
+#[derive(Clone, Copy, Debug)]
+pub struct Snapshot {
+    state: CarState,
+    telemetry: Telemetry,
+    actuator: Actuator,
+    input: AppliedInput,
+}
+
+/// How often a car's state is recorded, and how far before a crash it is replayed
+/// from, s.
+pub const SNAPSHOT_INTERVAL: f64 = 0.5;
+pub const REPLAY_LEAD: f64 = 3.0;
+const HISTORY_LEN: usize = (REPLAY_LEAD / SNAPSHOT_INTERVAL) as usize + 2;
+/// Crash states kept for [`EnvConfig::replay_start_fraction`].
+const REPLAY_CAPACITY: usize = 4096;
 
 impl Env {
     pub fn new(shared: &EnvShared, seed: u64) -> Self {
@@ -195,14 +250,39 @@ impl Env {
             info: StepInfo::default(),
             stats: EpisodeStats::default(),
             last_episode: EpisodeStats::default(),
+            history: [None; HISTORY_LEN],
+            next_snapshot: 0.0,
+            crash_snapshot: None,
         };
         env.reset(shared);
         env
     }
 
     pub fn reset(&mut self, shared: &EnvShared) {
+        self.reset_from(shared, &[]);
+    }
+
+    /// Resets, restarting from one of `replay` with [`EnvConfig::replay_start_fraction`].
+    pub fn reset_from(&mut self, shared: &EnvShared, replay: &[Snapshot]) {
         let cfg = &shared.config;
         let track = &*shared.track;
+        if !replay.is_empty()
+            && cfg.replay_start_fraction > 0.0
+            && self.rng.uniform(0.0, 1.0) < cfg.replay_start_fraction
+        {
+            let k = (self.rng.uniform(0.0, replay.len() as f64) as usize).min(replay.len() - 1);
+            let snap = replay[k];
+            self.car.state = CarState {
+                time: 0.0,
+                steps: 0,
+                ..snap.state
+            };
+            self.car.telemetry = snap.telemetry;
+            self.reset_episode(shared);
+            self.actuator = snap.actuator;
+            self.input = snap.input;
+            return;
+        }
         let s = if cfg.random_start {
             assert!((0.0..=1.0).contains(&cfg.start_s_focus_fraction));
             let (start, end) = match cfg.start_s_range {
@@ -223,6 +303,31 @@ impl Env {
         let speed = self.rng.uniform(cfg.start_speed.0.min(top), top);
         let gear = gear_for_speed(&shared.car, speed);
         self.car.reset(track, s, d, speed, gear);
+        if cfg.worn_start_fraction > 0.0 && self.rng.uniform(0.0, 1.0) < cfg.worn_start_fraction {
+            self.age_tyres(cfg.worn_start_max_wear);
+        }
+        self.reset_episode(shared);
+    }
+
+    /// Tyres as a stint leaves them: worn alike (within ±30 %) and at a common heat,
+    /// each tread zone a little off its carcass.
+    fn age_tyres(&mut self, max_wear: f64) {
+        let wear = self.rng.uniform(0.0, max_wear);
+        let heat = self.rng.uniform(65.0, 100.0);
+        for w in &mut self.car.state.wheels {
+            let t = &mut w.tire;
+            t.wear = (wear * self.rng.uniform(0.7, 1.3)).min(1.0);
+            t.core_temperature = heat + self.rng.uniform(-5.0, 5.0);
+            for zone in &mut t.tread_temperature {
+                *zone = t.core_temperature + self.rng.uniform(-10.0, 15.0);
+            }
+        }
+    }
+
+    /// Starts timing, rewards and the track's rubber afresh for the car where it is.
+    fn reset_episode(&mut self, shared: &EnvShared) {
+        let cfg = &shared.config;
+        let track = &*shared.track;
         if let (Some((lo, hi)), Some(map)) = (cfg.track_grip, &shared.rubber) {
             // Only draw when randomised, so fixed-grip runs keep their start sequence.
             let grip = if hi > lo {
@@ -242,6 +347,38 @@ impl Env {
         self.info = StepInfo::default();
         self.last_episode = self.stats;
         self.stats = EpisodeStats::default();
+        self.history = [None; HISTORY_LEN];
+        self.next_snapshot = 0.0;
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            state: self.car.state,
+            telemetry: self.car.telemetry,
+            actuator: self.actuator,
+            input: self.input,
+        }
+    }
+
+    /// Records the state every [`SNAPSHOT_INTERVAL`] s.
+    fn record(&mut self) {
+        let time = self.car.state.time;
+        if time >= self.next_snapshot {
+            let slot = (time / SNAPSHOT_INTERVAL) as usize % HISTORY_LEN;
+            self.history[slot] = Some(self.snapshot());
+            self.next_snapshot = time + SNAPSHOT_INTERVAL;
+        }
+    }
+
+    /// The latest recorded state at least [`REPLAY_LEAD`] s before now.
+    fn state_before_crash(&self) -> Option<Snapshot> {
+        let now = self.car.state.time;
+        self.history
+            .iter()
+            .flatten()
+            .filter(|h| h.state.time <= now - REPLAY_LEAD)
+            .max_by(|a, b| a.state.time.total_cmp(&b.state.time))
+            .copied()
     }
 
     pub fn observe(&self, shared: &EnvShared, out: &mut [f32]) {
@@ -263,6 +400,7 @@ impl Env {
         let cfg = &shared.config;
         let track = &*shared.track;
         let prev_steer = self.input.steer;
+        let wear_before: f64 = self.car.state.wheels.iter().map(|w| w.tire.wear).sum();
         let substeps = cfg.substeps();
         self.actuator.decide(cfg, action);
         let mut barrier_impact: f64 = 0.0;
@@ -286,6 +424,14 @@ impl Env {
             barrier_impact = barrier_impact.max(self.car.telemetry.barrier_impact);
         }
         self.input = self.actuator.applied(&self.car, action);
+        let wear = self
+            .car
+            .state
+            .wheels
+            .iter()
+            .map(|w| w.tire.wear)
+            .sum::<f64>()
+            - wear_before;
 
         let dt = substeps as f64 * DT;
         let st = &self.car.state;
@@ -333,6 +479,7 @@ impl Env {
             offset: q.d / half_width,
             wheels_off,
             grip_loss,
+            wear,
             barrier_impact,
             heading_cos,
             steer_change: self.input.steer - prev_steer,
@@ -369,8 +516,13 @@ impl Env {
         self.info = info;
 
         let done = shared.termination.done(&info);
+        if done == Some(Done::Terminated) {
+            self.crash_snapshot = self.state_before_crash();
+        } else if done.is_none() && cfg.replay_start_fraction > 0.0 {
+            self.record();
+        }
         let reward = shared.reward.reward(&info, done);
-        self.stats.time = st.time;
+        self.stats.time = info.time;
         self.stats.progress = info.total_progress;
         self.stats.return_ += reward;
         (reward, done)
@@ -417,7 +569,12 @@ impl Actuator {
 
     pub fn controls(&mut self, cfg: &EnvConfig, car: &Car, action: &[f32]) -> Controls {
         let lock = car.model.params.steering.lock;
-        let target = f64::from(action[0]).clamp(-1.0, 1.0) * lock;
+        let range = if cfg.speed_scaled_steering {
+            steer_range(car)
+        } else {
+            1.0
+        };
+        let target = f64::from(action[0]).clamp(-1.0, 1.0) * range * lock;
         let max_delta = cfg.max_steer_rate * DT;
         self.steer += (target - self.steer).clamp(-max_delta, max_delta);
         let mut controls = Controls {
@@ -496,6 +653,22 @@ impl Actuator {
     }
 }
 
+/// Share of the steering lock the steering action spans with
+/// [`EnvConfig::speed_scaled_steering`]: the road wheel angle that turns the car at
+/// [`STEER_RANGE_ACCEL`] (kinematically, wheelbase × acceleration / speed²) plus
+/// [`STEER_RANGE_SLIP`] for the tyres' slip angles and for catching slides.
+pub fn steer_range(car: &Car) -> f64 {
+    let p = &car.model.params;
+    let v = car.speed().max(1.0);
+    let road = p.wheelbase * STEER_RANGE_ACCEL / (v * v) + STEER_RANGE_SLIP;
+    (road * p.steering.ratio / p.steering.lock).clamp(STEER_RANGE_MIN, 1.0)
+}
+/// Lateral acceleration, m/s², and road wheel angle, rad, of [`steer_range`], and the
+/// least share of the lock it spans.
+pub const STEER_RANGE_ACCEL: f64 = 25.0;
+pub const STEER_RANGE_SLIP: f64 = 0.07;
+const STEER_RANGE_MIN: f64 = 0.2;
+
 /// Braking slip ratio beyond which the anti-lock system releases the brakes; the tyres
 /// peak around 0.1.
 pub const ABS_SLIP: f64 = 0.12;
@@ -545,6 +718,9 @@ pub struct BatchEnv {
     truncated: Vec<u8>,
     /// Stats of episodes that finished during the last `step`.
     finished: Vec<(usize, EpisodeStats)>,
+    /// States shortly before crashes, to restart from; the oldest are overwritten.
+    replay: Vec<Snapshot>,
+    replay_next: usize,
 }
 
 /// Borrowed view of the result of a batch step. All slices are indexed by env.
@@ -582,6 +758,8 @@ impl BatchEnv {
             terminated: vec![0; num_envs],
             truncated: vec![0; num_envs],
             finished: Vec::with_capacity(num_envs),
+            replay: Vec::new(),
+            replay_next: 0,
             shared,
         };
         batch.write_all_obs();
@@ -631,6 +809,7 @@ impl BatchEnv {
     /// Finished episodes are reset automatically.
     pub fn step(&mut self, actions: &[f32]) -> BatchStep<'_> {
         let shared = &self.shared;
+        let replay = &self.replay[..];
         let action_dim = shared.config.action_dim();
         assert_eq!(
             actions.len(),
@@ -684,7 +863,7 @@ impl BatchEnv {
                             final_obs.fill(0.0);
                         }
                     }
-                    env.reset(shared);
+                    env.reset_from(shared, replay);
                     observe_finite(env, shared, obs);
                 } else {
                     env.observe(shared, obs);
@@ -702,9 +881,17 @@ impl BatchEnv {
             });
 
         self.finished.clear();
-        for (i, env) in self.envs.iter().enumerate() {
+        for (i, env) in self.envs.iter_mut().enumerate() {
             if self.terminated[i] != 0 || self.truncated[i] != 0 {
                 self.finished.push((i, env.last_episode));
+            }
+            if let Some(snap) = env.crash_snapshot.take() {
+                if self.replay.len() < REPLAY_CAPACITY {
+                    self.replay.push(snap);
+                } else {
+                    self.replay[self.replay_next] = snap;
+                }
+                self.replay_next = (self.replay_next + 1) % REPLAY_CAPACITY;
             }
         }
         BatchStep {
@@ -758,6 +945,96 @@ mod tests {
             );
             assert!((99.0..=201.0).contains(&q.s), "spawn s={}", q.s);
         }
+    }
+
+    #[test]
+    fn steering_range_narrows_with_speed() {
+        let track = Track::default_circuit();
+        let model = Arc::new(CarModel::gt3());
+        let range = |speed| steer_range(&Car::new(model.clone(), &track, 0.0, 0.0, speed, 1));
+        assert_eq!(range(3.0), 1.0);
+        assert!(range(20.0) > range(40.0) && range(40.0) > range(70.0));
+        // A few degrees at the road wheels at top speed.
+        let p = &model.params;
+        let road = range(75.0) * p.steering.lock / p.steering.ratio;
+        assert!((0.05..0.12).contains(&road), "{road}");
+    }
+
+    #[test]
+    fn worn_starts_age_the_tyres() {
+        let shared = EnvShared::new(
+            EnvConfig {
+                worn_start_fraction: 1.0,
+                worn_start_max_wear: 0.4,
+                ..EnvConfig::default()
+            },
+            Arc::new(Track::default_circuit()),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut env = Env::new(&shared, 3);
+        let mut worn = 0;
+        for _ in 0..20 {
+            env.reset(&shared);
+            for w in &env.car.state.wheels {
+                assert!(w.tire.wear <= 0.4 * 1.3 + 1e-9);
+                assert!((60.0..=120.0).contains(&w.tire.core_temperature));
+            }
+            worn += env.car.state.wheels.iter().any(|w| w.tire.wear > 0.0) as usize;
+        }
+        assert!(worn > 15);
+    }
+
+    #[test]
+    fn crashes_are_replayed_from_seconds_before() {
+        let shared = EnvShared::new(
+            EnvConfig {
+                random_start: false,
+                start_speed: (10.0, 10.0),
+                start_offset: (0.0, 0.0),
+                replay_start_fraction: 1.0,
+                ..EnvConfig::default()
+            },
+            Arc::new(Track::default_circuit()),
+            Arc::new(CarModel::gt3()),
+        );
+        let mut batch = BatchEnv::new(shared, 1);
+        // Steering slightly left leaves the road within seconds.
+        let mut crash_time = None;
+        for _ in 0..2000 {
+            let r = batch.step(&[0.1, 0.5, 0.0]);
+            if r.terminated[0] != 0 {
+                crash_time = Some(batch.finished()[0].1.time);
+                break;
+            }
+        }
+        let crash_time = crash_time.expect("the car crashes");
+        assert!(crash_time > REPLAY_LEAD, "crashed after {crash_time} s");
+        assert_eq!(batch.replay.len(), 1);
+        // The next reset restarts from the recorded state.
+        let (shared, replay) = (&batch.shared, &batch.replay[..]);
+        batch.envs[0].reset_from(shared, replay);
+        let restarted = batch.envs[0].car.state;
+        assert_eq!(restarted.time, 0.0);
+        assert_eq!(restarted.position, batch.replay[0].state.position);
+        assert!(batch.replay[0].state.time <= crash_time - REPLAY_LEAD);
+        assert!(batch.replay[0].state.time > crash_time - REPLAY_LEAD - 2.0 * SNAPSHOT_INTERVAL);
+    }
+
+    #[test]
+    fn growing_lookahead_reaches_further() {
+        let layout = ObsLayout {
+            lookahead_growth: 1.1,
+            lookahead_spacing: 6.0,
+            lookahead_points: 24,
+            ..EnvConfig::default().obs_layout()
+        };
+        assert!((layout.lookahead_distance(1) - 6.0).abs() < 1e-9);
+        assert!((layout.lookahead_distance(2) - 12.6).abs() < 1e-9);
+        assert!(layout.lookahead_distance(24) > 500.0);
+        assert_eq!(
+            EnvConfig::default().obs_layout().lookahead_distance(3),
+            30.0
+        );
     }
 
     #[test]

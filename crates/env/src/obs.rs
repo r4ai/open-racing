@@ -28,17 +28,32 @@ const DISTANCE_SCALE: f64 = 100.0;
 const LOAD_SCALE: f64 = 5000.0;
 const TEMPERATURE_SCALE: f64 = 100.0;
 const WIDTH_SCALE: f64 = 10.0;
+const BRAKE_TEMPERATURE_SCALE: f64 = 1000.0;
+const DAMAGE_SCALE: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ObsLayout {
     pub lookahead_points: usize,
     pub lookahead_spacing: f64,
+    pub lookahead_growth: f64,
     pub privileged: bool,
     pub tyres: bool,
     pub edges: bool,
+    pub stint: bool,
+    pub lap_position: bool,
 }
 
 impl ObsLayout {
+    /// Distance along the centreline from the car to lookahead point `k` (1-based), m.
+    pub fn lookahead_distance(&self, k: usize) -> f64 {
+        let g = self.lookahead_growth;
+        if g == 1.0 {
+            k as f64 * self.lookahead_spacing
+        } else {
+            self.lookahead_spacing * (g.powi(k as i32) - 1.0) / (g - 1.0)
+        }
+    }
+
     pub fn spec(&self) -> ObsSpec {
         let mut names: Vec<String> = [
             "vel_long",
@@ -83,6 +98,18 @@ impl ObsLayout {
                 names.push(format!("slip_ratio_{w}"));
                 names.push(format!("load_{w}"));
             }
+        }
+        if self.stint {
+            for w in ["fl", "fr", "rl", "rr"] {
+                names.push(format!("wear_{w}"));
+                names.push(format!("core_temp_{w}"));
+                names.push(format!("brake_temp_{w}"));
+            }
+            names.push("damage".into());
+        }
+        if self.lap_position {
+            names.push("lap_sin".into());
+            names.push("lap_cos".into());
         }
         ObsSpec { names }
     }
@@ -142,7 +169,7 @@ pub fn encode(
     // Widths follow every lookahead coordinate in the existing observation layout.
     let edge_start = o.i + 2 * layout.lookahead_points;
     for k in 1..=layout.lookahead_points {
-        let smp = track.sample_at(q.s + k as f64 * layout.lookahead_spacing);
+        let smp = track.sample_at(q.s + layout.lookahead_distance(k));
         let rel = inv * (smp.pos - st.position);
         o.push(rel.x / DISTANCE_SCALE);
         o.push(rel.y / DISTANCE_SCALE);
@@ -167,6 +194,19 @@ pub fn encode(
             o.push(w.slip_ratio);
             o.push(w.load / LOAD_SCALE);
         }
+    }
+    if layout.stint {
+        for w in &st.wheels {
+            o.push(w.tire.wear);
+            o.push(w.tire.core_temperature / TEMPERATURE_SCALE);
+            o.push(w.brake.disc / BRAKE_TEMPERATURE_SCALE);
+        }
+        o.push(st.damage.iter().sum::<f64>() / DAMAGE_SCALE);
+    }
+    if layout.lap_position {
+        let angle = std::f64::consts::TAU * q.s / track.length;
+        o.push(angle.sin());
+        o.push(angle.cos());
     }
     debug_assert_eq!(o.i, o.out.len());
 }
