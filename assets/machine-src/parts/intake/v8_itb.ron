@@ -1,0 +1,216 @@
+(
+    description: "Carbon air box over eight trumpets with individual throttles.",
+    physical: (
+        shapes: [
+            (
+                name: "air box",
+                kind: Box(
+                    size: (0.55, 0.5, 0.18),
+                ),
+                at: (0.0, 0.0, 0.12),
+                mass: 7.0,
+                colour: (0.12, 0.12, 0.13),
+            ),
+            (
+                name: "trumpets",
+                kind: Box(
+                    size: (0.4, 0.5, 0.1),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 3.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Intake((
+        network: (
+            volumes: [
+                (
+                    name: "airbox",
+                    volume: 0.012,
+                    wall_temperature: 320.0,
+                ),
+            ],
+            pipes: [
+                (
+                    name: "snorkel",
+                    length: 0.25,
+                    diameter: [
+                        (0.0, 0.1),
+                    ],
+                    wall_temperature: 300.0,
+                    roughness: 0.0001,
+                    a: Ambient(
+                        at: (0.25, 0.0, 0.3),
+                    ),
+                    b: Volume(
+                        name: "airbox",
+                    ),
+                ),
+                (
+                    name: "trumpet.1",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.1"),
+                ),
+                (
+                    name: "trumpet.2",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.2"),
+                ),
+                (
+                    name: "trumpet.3",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.3"),
+                ),
+                (
+                    name: "trumpet.4",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.4"),
+                ),
+                (
+                    name: "trumpet.5",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.5"),
+                ),
+                (
+                    name: "trumpet.6",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.6"),
+                ),
+                (
+                    name: "trumpet.7",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.7"),
+                ),
+                (
+                    name: "trumpet.8",
+                    length: 0.2,
+                    diameter: [
+                        (0.0, 0.056),
+                        (0.4, 0.048),
+                        (1.0, 0.046),
+                    ],
+                    wall_temperature: 320.0,
+                    roughness: 0.0001,
+                    a: Volume(
+                        name: "airbox",
+                        restriction: Some(Throttle(
+                            bore: 0.048,
+                            shaft: 0.006,
+                            closed_angle_deg: 6.0,
+                        )),
+                    ),
+                    b: Terminal("intake.8"),
+                ),
+            ],
+            orifices: [],
+        ),
+        throttle: DriveByWire,
+    )),
+)

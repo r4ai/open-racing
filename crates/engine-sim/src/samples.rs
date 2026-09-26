@@ -223,7 +223,7 @@ pub fn i4_intake() -> Network {
 }
 
 /// A road-car 4-2-1 exhaust: 700 mm primaries paired 1-4 and 2-3, secondaries, a
-/// catalyst, a two-chamber silencer and a tailpipe.
+/// catalyst, two expansion-chamber silencers and a tailpipe.
 pub fn i4_exhaust() -> Network {
     let mut n = Network {
         volumes: vec![
@@ -232,8 +232,6 @@ pub fn i4_exhaust() -> Network {
             volume("merge", 0.3),
             volume("cat.in", 0.8),
             volume("cat.out", 0.8),
-            volume("silencer.1", 6.0),
-            volume("silencer.2", 8.0),
         ],
         pipes: vec![],
         orifices: vec![],
@@ -263,6 +261,7 @@ pub fn i4_exhaust() -> Network {
             vol("merge"),
         ));
     }
+    let join = |j: &str| End::Join(j.into());
     n.pipes.push(pipe(
         "downpipe",
         1.0,
@@ -287,26 +286,244 @@ pub fn i4_exhaust() -> Network {
         &[(0.0, 0.050)],
         550.0,
         vol("cat.out"),
-        vol("silencer.1"),
+        join("resonator.in"),
     ));
     n.pipes.push(pipe(
-        "silencer.pipe",
-        0.25,
-        &[(0.0, 0.045)],
-        450.0,
-        vol("silencer.1"),
-        vol("silencer.2"),
+        "resonator",
+        0.35,
+        &[(0.0, 0.120)],
+        500.0,
+        join("resonator.in"),
+        join("resonator.out"),
     ));
+    n.pipes.push(pipe(
+        "link",
+        0.9,
+        &[(0.0, 0.050)],
+        450.0,
+        join("resonator.out"),
+        join("silencer.in"),
+    ));
+    let mut silencer = pipe(
+        "silencer",
+        0.45,
+        &[(0.0, 0.160)],
+        420.0,
+        join("silencer.in"),
+        join("silencer.out"),
+    );
+    silencer.friction = 3.0;
+    n.pipes.push(silencer);
     n.pipes.push(pipe(
         "tailpipe",
-        0.50,
+        0.35,
         &[(0.0, 0.050)],
         400.0,
-        vol("silencer.2"),
+        join("silencer.out"),
         End::Ambient {
             at: [-4.2, 0.4, 0.3],
             restriction: None,
         },
     ));
+    n
+}
+
+/// 4.0 l flat-plane V8: 94 × 72 mm, 90° banks, crank throws 0/180/180/0, 12.5:1, firing
+/// alternately from bank to bank.
+pub fn v8() -> EngineSpec {
+    let cylinders = (0..8)
+        .map(|i| CylinderPlace {
+            bank: if i < 4 { "A".into() } else { "B".into() },
+            throw: i % 4,
+        })
+        .collect();
+    EngineSpec {
+        bore: 0.094,
+        stroke: 0.072,
+        rod: 0.138,
+        compression_ratio: 12.5,
+        pin_offset: 0.0,
+        layout: Layout {
+            banks: vec![
+                Bank {
+                    name: "A".into(),
+                    angle_deg: 45.0,
+                },
+                Bank {
+                    name: "B".into(),
+                    angle_deg: -45.0,
+                },
+            ],
+            throws_deg: vec![0.0, 180.0, 180.0, 0.0],
+            cylinders,
+            firing_order: vec![1, 6, 2, 5, 4, 7, 3, 8],
+        },
+        intake: Head {
+            valves: Valves {
+                count: 2,
+                diameter: 0.038,
+                stem: 0.006,
+                cd: cd_intake(),
+            },
+            cam: Cam {
+                lift: 0.0125,
+                duration_deg: 280.0,
+                centreline_deg: 105.0,
+                profile: Profile::Polynomial,
+            },
+            port: Port {
+                length: 0.09,
+                diameter: vec![(0.0, 0.044), (1.0, 0.046)],
+                wall_temperature: 380.0,
+            },
+        },
+        exhaust: Head {
+            valves: Valves {
+                count: 2,
+                diameter: 0.032,
+                stem: 0.006,
+                cd: cd_exhaust(),
+            },
+            cam: Cam {
+                lift: 0.0115,
+                duration_deg: 276.0,
+                centreline_deg: 108.0,
+                profile: Profile::Polynomial,
+            },
+            port: Port {
+                length: 0.08,
+                diameter: vec![(0.0, 0.034), (1.0, 0.038)],
+                wall_temperature: 720.0,
+            },
+        },
+        crank: Crank {
+            flywheel_inertia: 0.06,
+            crank_inertia: 0.03,
+            reciprocating_mass: 0.40,
+            rotating_mass: 0.35,
+        },
+        combustion: Combustion {
+            fuel: Fuel::Gasoline,
+            wiebe_a: 5.0,
+            wiebe_m: 2.0,
+            duration_deg: 50.0,
+            reference_rpm: 3000.0,
+            speed_exponent: 0.35,
+            efficiency: 0.96,
+            variation: 0.03,
+            seed: 3,
+            octane: 100.0,
+        },
+        heat_transfer: HeatTransfer::default(),
+        friction: Friction::default(),
+        ecu: Ecu {
+            idle_rpm: 1200.0,
+            limiter_rpm: 9000.0,
+            stall_rpm: 500.0,
+            limiter_hysteresis_rpm: 200.0,
+            idle_authority: 0.05,
+            idle_gain: 0.0004,
+            overrun_cut_rpm: Some(2000.0),
+            spark_deg: Map2 {
+                rpm: vec![1000.0, 3000.0, 5000.0, 7000.0, 9000.0],
+                load: vec![0.0, 0.5, 1.0],
+                values: vec![
+                    vec![22.0, 16.0, 10.0],
+                    vec![38.0, 30.0, 22.0],
+                    vec![42.0, 34.0, 27.0],
+                    vec![44.0, 36.0, 30.0],
+                    vec![44.0, 37.0, 32.0],
+                ],
+            },
+            lambda: Map2 {
+                rpm: vec![1000.0, 9000.0],
+                load: vec![0.0, 0.7, 1.0],
+                values: vec![vec![1.0, 0.98, 0.9], vec![1.0, 0.95, 0.87]],
+            },
+        },
+    }
+}
+
+/// A 12 l air box feeding eight 200 mm trumpets, each with its own 48 mm throttle.
+pub fn v8_intake() -> Network {
+    let mut n = Network {
+        volumes: vec![volume("airbox", 12.0)],
+        pipes: vec![pipe(
+            "snorkel",
+            0.25,
+            &[(0.0, 0.10)],
+            300.0,
+            End::Ambient {
+                at: [0.4, 0.0, 1.1],
+                restriction: None,
+            },
+            vol("airbox"),
+        )],
+        orifices: vec![],
+    };
+    for c in 1..=8 {
+        n.pipes.push(pipe(
+            &format!("trumpet.{c}"),
+            0.20,
+            &[(0.0, 0.056), (0.4, 0.048), (1.0, 0.046)],
+            320.0,
+            End::Volume {
+                name: "airbox".into(),
+                restriction: Some(Restriction::Throttle {
+                    bore: 0.048,
+                    shaft: 0.006,
+                    closed_angle_deg: 6.0,
+                }),
+            },
+            End::Terminal(format!("intake.{c}")),
+        ));
+    }
+    n
+}
+
+/// Racing exhaust: a 4-into-1 for each bank, a short silencer, and two tailpipes.
+pub fn v8_exhaust() -> Network {
+    let mut n = Network {
+        volumes: vec![
+            volume("collector.A", 0.3),
+            volume("collector.B", 0.3),
+            volume("silencer.A", 4.0),
+            volume("silencer.B", 4.0),
+        ],
+        pipes: vec![],
+        orifices: vec![],
+    };
+    for c in 1..=8 {
+        let bank = if c <= 4 { "A" } else { "B" };
+        n.pipes.push(pipe(
+            &format!("primary.{c}"),
+            0.55,
+            &[(0.0, 0.042)],
+            950.0,
+            End::Terminal(format!("exhaust.{c}")),
+            vol(&format!("collector.{bank}")),
+        ));
+    }
+    for (bank, y) in [("A", 0.45), ("B", -0.45)] {
+        n.pipes.push(pipe(
+            &format!("collector.{bank}.pipe"),
+            0.8,
+            &[(0.0, 0.072)],
+            800.0,
+            vol(&format!("collector.{bank}")),
+            vol(&format!("silencer.{bank}")),
+        ));
+        n.pipes.push(pipe(
+            &format!("tail.{bank}"),
+            0.5,
+            &[(0.0, 0.070)],
+            600.0,
+            vol(&format!("silencer.{bank}")),
+            End::Ambient {
+                at: [-4.3, y, 0.35],
+                restriction: None,
+            },
+        ));
+    }
     n
 }

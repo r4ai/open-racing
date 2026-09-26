@@ -17,6 +17,9 @@ use crate::gas::Gas;
 use crate::pipe::{End, Pipe};
 use crate::spec::{EngineSpec, throttle_area};
 
+/// Most parts a step is split into for the CFL condition.
+const MAX_SPLIT: usize = 16;
+
 /// rad/s per rpm.
 pub const RAD_PER_RPM: f64 = PI / 30.0;
 
@@ -342,6 +345,8 @@ pub struct Model {
     pub load_torque: f64,
     /// Steps that had to be split for the CFL condition.
     pub split_steps: u64,
+    /// Set when the solution breaks down (a step would need too many splits).
+    pub fault: Option<String>,
     ecu: EcuState,
     rng: Rng,
     peak_pressure: f64,
@@ -392,6 +397,7 @@ impl Model {
             friction_torque: 0.0,
             load_torque: 0.0,
             split_steps: 0,
+            fault: None,
             ecu: EcuState::default(),
             peak_pressure: 50e5,
         };
@@ -473,10 +479,28 @@ impl Model {
     pub fn step(&mut self, c: &Controls) {
         self.control(c);
         let mut max_dt = f64::INFINITY;
-        for p in &self.pipes {
-            max_dt = max_dt.min(p.max_dt(0.9));
+        let mut worst = 0;
+        for (i, p) in self.pipes.iter().enumerate() {
+            let d = p.max_dt(0.9);
+            if d < max_dt {
+                max_dt = d;
+                worst = i;
+            }
         }
-        let n = (self.dt / max_dt).ceil().max(1.0) as usize;
+        let n = (self.dt / max_dt).ceil().max(1.0);
+        if (n.is_nan() || n > MAX_SPLIT as f64) && self.fault.is_none() {
+            self.fault = Some(format!(
+                "the flow in {} broke down at {:.3} s ({:.0} rpm)",
+                self.pipes[worst].name,
+                self.time,
+                self.rpm()
+            ));
+        }
+        let n = if n.is_finite() {
+            (n as usize).min(MAX_SPLIT)
+        } else {
+            MAX_SPLIT
+        };
         if n > 1 {
             self.split_steps += 1;
         }
@@ -605,11 +629,12 @@ impl Model {
                         lump.dmy += f[3];
                     }
                     if other == Port::Ambient
-                        && let Some(m) = self.mouths.iter_mut().find(|m| m.link == li) {
-                            let rho = s.w.rho;
-                            m.flow += f[0] / rho * h / self.dt;
-                            m.velocity += f[0] / (rho * area) * h / self.dt;
-                        }
+                        && let Some(m) = self.mouths.iter_mut().find(|m| m.link == li)
+                    {
+                        let rho = s.w.rho;
+                        m.flow += f[0] / rho * h / self.dt;
+                        m.velocity += f[0] / (rho * area) * h / self.dt;
+                    }
                     // Positive from a to b: out of the pipe when the pipe is `a`.
                     if matches!(a, Port::Pipe(..)) {
                         f[0]
@@ -773,12 +798,11 @@ impl Model {
                 * (a_head * (t - ht.head) + kin.area * (t - ht.piston) + a_liner * (t - ht.liner))
                 * h;
             // Knock: the end gas compressed isentropically from inlet valve closing.
-            if burning
-                && let Some((pr, _, tr)) = self.cylinders[ci].ivc {
-                    let tu = tr * (p / pr).powf(0.25);
-                    let tau = combustion::ignition_delay(comb.octane, p, tu);
-                    self.cylinders[ci].knock += h / tau;
-                }
+            if burning && let Some((pr, _, tr)) = self.cylinders[ci].ivc {
+                let tu = tr * (p / pr).powf(0.25);
+                let tau = combustion::ignition_delay(comb.octane, p, tu);
+                self.cylinders[ci].knock += h / tau;
+            }
             // Energy balance.
             let work = p0 * (v1 - v0);
             {

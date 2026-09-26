@@ -1,0 +1,29 @@
+(
+    description: "Engine and gearbox control units, loom and paddle shift.",
+    physical: (
+        shapes: [
+            (
+                name: "units",
+                kind: Box(
+                    size: (0.3, 0.25, 0.1),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 12.0,
+                colour: (0.25, 0.25, 0.27),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Electronics((
+        electronics: (
+            anti_stall: Some((
+                rpm: 1100.0,
+                band_rpm: 200.0,
+            )),
+            auto_blip: true,
+            blip_band_rpm: 500.0,
+            ignition_cut: true,
+            downshift_protection_rpm: Some(9000.0),
+        ),
+    )),
+)

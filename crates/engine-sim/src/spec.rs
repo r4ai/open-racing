@@ -413,6 +413,9 @@ pub enum End {
     },
     /// Joined to another part's terminal, or to an engine port.
     Terminal(String),
+    /// Joined straight to the one other pipe end of this network with the same joint name:
+    /// a change of section (a silencer's chamber, a megaphone) or a bend between pipes.
+    Join(String),
 }
 
 /// A restriction to the flow.

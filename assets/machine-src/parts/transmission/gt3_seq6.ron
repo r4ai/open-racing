@@ -1,0 +1,49 @@
+(
+    description: "Six-speed sequential transaxle with paddle actuation.",
+    physical: (
+        shapes: [
+            (
+                name: "case",
+                kind: Box(
+                    size: (0.6, 0.42, 0.38),
+                ),
+                at: (-0.3, 0.0, 0.0),
+                mass: 65.0,
+                colour: (0.62, 0.62, 0.66),
+            ),
+        ],
+        mounts: [
+            (
+                name: "front",
+                at: (0.0, 0.0, 0.0),
+            ),
+        ],
+    ),
+    design: Transmission((
+        clutch: (
+            max_torque: 900.0,
+            bite_point: 0.7,
+            engagement_exponent: 2.0,
+            kinetic_ratio: 0.8,
+        ),
+        gearbox: (
+            ratios: [
+                3.15,
+                2.37,
+                1.93,
+                1.62,
+                1.39,
+                1.2,
+            ],
+            reverse: 3.0,
+            final_drive: 3.4,
+            efficiency: 0.92,
+            input_inertia: 0.02,
+            input_drag: 1.0,
+            kind: Sequential(
+                shift_time: 0.05,
+                dog_release_torque: 150.0,
+            ),
+        ),
+    )),
+)

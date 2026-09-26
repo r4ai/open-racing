@@ -1,0 +1,23 @@
+(
+    description: "Rack and pinion with power assistance.",
+    physical: (
+        shapes: [
+            (
+                name: "rack",
+                kind: Box(
+                    size: (0.1, 0.9, 0.08),
+                ),
+                at: (0.0, 0.0, 0.0),
+                mass: 9.0,
+                colour: (0.25, 0.25, 0.27),
+            ),
+        ],
+        mounts: [],
+    ),
+    design: Steering((
+        steering: (
+            ratio: 13.0,
+            lock: 4.712,
+        ),
+    )),
+)

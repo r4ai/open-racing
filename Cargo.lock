@@ -7175,6 +7175,7 @@ dependencies = [
  "criterion",
  "rayon",
  "ron",
+ "rtrb",
  "serde",
 ]
 
@@ -7200,9 +7201,17 @@ dependencies = [
 name = "open-racing-machine-project"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "glam 0.33.8",
+ "open-racing-car",
  "open-racing-engine-sim",
+ "open-racing-sim",
+ "open-racing-track",
+ "png",
+ "rayon",
  "ron",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -8316,6 +8325,12 @@ dependencies = [
  "typeid",
  "unicode-ident",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fae8ee26b0371a29a77d2b2d6b3ae13aa81def6f9bf1b1b92a32d279a5e709b7"
 
 [[package]]
 name = "rustc-demangle"

@@ -296,6 +296,21 @@ mod tests {
     }
 
     #[test]
+    fn flat_plane_v8_breathes_at_high_speed() {
+        let (e, i, x) = (samples::v8(), samples::v8_intake(), samples::v8_exhaust());
+        let b = Build::new(&e)
+            .system("intake", &i)
+            .system("exhaust", &x)
+            .quality(Quality::Draft);
+        let (mut m, w) = b.build().unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let p = point(&mut m, 7500.0, &DynoOptions::default());
+        assert!(p.converged, "{p:?}");
+        assert!((11.0e5..15.0e5).contains(&p.bmep), "bmep {}", p.bmep);
+        assert!(p.power > 280e3 && p.power < 420e3, "power {}", p.power);
+    }
+
+    #[test]
     fn motoring_takes_torque() {
         let (e, i, x) = (samples::i4(), samples::i4_intake(), samples::i4_exhaust());
         let b = Build::new(&e)

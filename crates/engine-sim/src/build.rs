@@ -6,18 +6,18 @@ use crate::spec::{self, EngineSpec, Network, Restriction};
 
 /// An intake or exhaust system fitted to the engine, under an instance name (terminals
 /// are `name:terminal`), at a position in the engine's frame (for the sound).
-#[derive(Clone, Copy, Debug)]
-pub struct System<'a> {
-    pub name: &'a str,
-    pub network: &'a Network,
+#[derive(Clone, Debug, PartialEq)]
+pub struct System {
+    pub name: String,
+    pub network: Network,
     pub offset: [f64; 3],
 }
 
 /// Everything a model is built from.
-#[derive(Clone, Debug)]
-pub struct Build<'a> {
-    pub engine: &'a EngineSpec,
-    pub systems: Vec<System<'a>>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Build {
+    pub engine: EngineSpec,
+    pub systems: Vec<System>,
     /// Pairs of joined terminals, `instance:terminal` (the engine's instance is `engine`).
     /// Engine terminals not listed join the one system terminal of the same name, if there
     /// is exactly one.
@@ -26,10 +26,10 @@ pub struct Build<'a> {
     pub ambient: Ambient,
 }
 
-impl<'a> Build<'a> {
-    pub fn new(engine: &'a EngineSpec) -> Self {
+impl Build {
+    pub fn new(engine: &EngineSpec) -> Self {
         Self {
-            engine,
+            engine: engine.clone(),
             systems: Vec::new(),
             connections: Vec::new(),
             quality: Quality::Normal,
@@ -37,10 +37,10 @@ impl<'a> Build<'a> {
         }
     }
 
-    pub fn system(mut self, name: &'a str, network: &'a Network) -> Self {
+    pub fn system(mut self, name: &str, network: &Network) -> Self {
         self.systems.push(System {
-            name,
-            network,
+            name: name.into(),
+            network: network.clone(),
             offset: [0.0; 3],
         });
         self
@@ -102,7 +102,7 @@ fn add(v: [f64; 3], w: [f64; 3]) -> [f64; 3] {
 }
 
 pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
-    let e = b.engine;
+    let e = &b.engine;
     validate_engine(e)?;
     let mut m = Model::empty(e.clone(), b.quality, b.ambient)?;
     let mut warnings = Vec::new();
@@ -160,8 +160,9 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
     }
     // Systems.
     for sys in &b.systems {
-        let net = sys.network;
+        let net = &sys.network;
         let base = m.lumps.len();
+        let mut joints: Vec<(String, usize, End)> = Vec::new();
         for v in &net.volumes {
             if v.volume <= 0.0 {
                 return Err(format!(
@@ -241,8 +242,31 @@ pub fn build(b: &Build) -> Result<(Model, Vec<String>), String> {
                     spec::End::Terminal(t) => {
                         terminals.push((format!("{}:{t}", sys.name), p, which))
                     }
+                    spec::End::Join(j) => joints.push((j.clone(), p, which)),
                 }
             }
+        }
+        joints.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut k = 0;
+        while k < joints.len() {
+            let same = joints[k..]
+                .iter()
+                .take_while(|j| j.0 == joints[k].0)
+                .count();
+            if same != 2 {
+                return Err(format!(
+                    "{}: joint \"{}\" must join exactly two pipe ends, not {same}",
+                    sys.name, joints[k].0
+                ));
+            }
+            m.links.push(Link {
+                a: Port::Pipe(joints[k].1, joints[k].2),
+                b: Port::Pipe(joints[k + 1].1, joints[k + 1].2),
+                opening: Opening::Open,
+                flow: 0.0,
+                guess: 0.0,
+            });
+            k += 2;
         }
         for o in &net.orifices {
             let port = |n: &str| -> Result<Port, String> {

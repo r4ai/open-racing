@@ -10,19 +10,27 @@
 //!
 //! Units are SI; engine speeds are in rpm and crank angles in degrees where named so.
 
+pub mod acoustics;
+pub mod analysis;
 pub mod boundary;
 pub mod build;
 pub mod cam;
 pub mod combustion;
 pub mod crank;
+pub mod dsp;
 pub mod dyno;
 pub mod gas;
 pub mod model;
 pub mod pipe;
+pub mod realtime;
+pub mod render;
 pub mod samples;
 pub mod spec;
 pub mod table;
+pub mod trace;
 
+pub use acoustics::{Mic, SoundSettings};
 pub use build::{Build, System};
 pub use model::{Ambient, Controls, Load, Model, Quality};
+pub use render::{Recording, Script};
 pub use spec::{EngineSpec, Network};
